@@ -2,6 +2,7 @@ package ecs_view
 
 import (
 	"context"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/coredns/coredns/plugin"
@@ -39,6 +40,13 @@ type ECSView struct {
 
 	// Metrics turns on the counters and gauges.
 	Metrics bool
+
+	// Trusted are the queriers exempt from the filter, set once before anything
+	// serves. A query arriving from one of these prefixes is answered from every
+	// view at once rather than from the one its address sits on: what a router
+	// reaching every network needs, and nothing else should be given. Empty
+	// trusts nobody, which is the filter as it stands without this.
+	Trusted []netip.Prefix
 
 	// current is the published snapshot.
 	current atomic.Pointer[Snapshot]
@@ -89,6 +97,19 @@ func (v *ECSView) Replace(snap *Snapshot) {
 // SetHealthy implements Sink.
 func (v *ECSView) SetHealthy(healthy bool) {
 	v.healthy.Store(healthy)
+}
+
+// trusts says whether a query from addr is exempt from the filter. The address
+// is the one the packet arrived from: an ECS option is what a querier claims
+// about itself, and trust may not rest on a claim.
+func (v *ECSView) trusts(addr netip.Addr) bool {
+	for _, prefix := range v.Trusted {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Ready turns true once a snapshot has been published and the source reports

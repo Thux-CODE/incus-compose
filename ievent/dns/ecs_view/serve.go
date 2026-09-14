@@ -58,10 +58,13 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 	}
 
-	// Nothing relayed the query, so the source address is the querier: what a
-	// client naming this server in resolv.conf sends.
+	// Where the packet came from, whatever the option says. Nothing relayed the
+	// query means this is the querier too: what a client naming this server in
+	// resolv.conf sends.
+	src, haveSrc := sourceAddr(w.RemoteAddr())
+
 	if !haveClient {
-		client, haveClient = sourceAddr(w.RemoteAddr())
+		client, haveClient = src, haveSrc
 	}
 
 	snap := v.current.Load()
@@ -118,6 +121,13 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 
 		return write(w, m)
+	}
+
+	// A trusted querier is placed on every network at once instead of the one it
+	// sits on, so it is answered everything this name holds. Before the gate
+	// below, which is what it is exempt from.
+	if haveSrc && v.trusts(src) {
+		return v.answerTrusted(w, m, z, answers, qtype, clamp)
 	}
 
 	// Fail closed. Without an address there is no network to answer from, and any
@@ -179,6 +189,47 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	if v.Metrics {
 		requestCount.WithLabelValues(server, "success").Inc()
+	}
+
+	return write(w, m)
+}
+
+// answerTrusted answers one name from every view at once, which only a querier
+// in Trusted reaches. The records are the union of what the views hold, so a
+// name answering on two networks is two records in one answer rather than the
+// one set its querier's own address would have chosen.
+func (v *ECSView) answerTrusted(
+	w dns.ResponseWriter, m *dns.Msg, z *Zone, answers ViewAnswer, qtype uint16, clamp bool,
+) (bool, int, error) {
+	// Two instances claiming one alias wrote one CNAME each, and a name may hold
+	// only one. Refusing beats picking here exactly as it does for everybody
+	// else, and it reads as missing.
+	if len(answers.UnionFor(dns.TypeCNAME)) > 1 {
+		deny(m, z, clamp)
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nxdomain").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	rrs := answers.UnionFor(qtype)
+	if len(rrs) == 0 {
+		// The name is here, this type is not.
+		m.Ns = []dns.RR{authority(z.SOA, clamp)}
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nodata").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	m.Answer = withTTL(rrs, clamp)
+
+	if v.Metrics {
+		requestCount.WithLabelValues(v.Server, "trusted").Inc()
 	}
 
 	return write(w, m)

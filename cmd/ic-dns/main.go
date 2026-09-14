@@ -196,6 +196,12 @@ func runCommand() *cli.Command {
 				Sources: cli.EnvVars("DNS_ALLOW_TRANSFER"),
 			},
 			&cli.StringSliceFlag{
+				Name: "trusted-client",
+				Usage: "CIDR(s) answered from every view at once rather than from the networks they sit on, " +
+					"matched on the address the query arrives from and never on a client subnet; empty trusts nobody",
+				Sources: cli.EnvVars("DNS_TRUSTED_CLIENTS"),
+			},
+			&cli.StringSliceFlag{
 				Name:    "exclude",
 				Usage:   "Chain position(s) to leave out; only the optional ones, and an unknown name is an error",
 				Sources: cli.EnvVars("DNS_EXCLUDE"),
@@ -287,6 +293,7 @@ func action(ctx context.Context, cmd *cli.Command) error {
 		"sweep_project_delay", cfg.ProjectDelay,
 		"sweep_read_delay", cfg.ReadDelay,
 		"echo_subnet", cfg.EchoSubnet,
+		"trusted_clients", cfg.TrustedClients,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)
@@ -404,7 +411,12 @@ func drainContext(ctx context.Context) context.Context {
 func configFromCommand(cmd *cli.Command) (config, error) {
 	marker, value := parseMarker(cmd.String("project-marker"))
 
-	allow, err := prefixes(cmd.StringSlice("allow-transfer"))
+	allow, err := prefixes("allow-transfer", cmd.StringSlice("allow-transfer"))
+	if err != nil {
+		return config{}, err
+	}
+
+	trusted, err := prefixes("trusted-client", cmd.StringSlice("trusted-client"))
 	if err != nil {
 		return config{}, err
 	}
@@ -439,15 +451,17 @@ func configFromCommand(cmd *cli.Command) (config, error) {
 		Metrics:        cmd.Bool("metrics"),
 		Exclude:        cmd.StringSlice("exclude"),
 		AllowTransfer:  allow,
+		TrustedClients: trusted,
 		Log:            cmd.String("log"),
 
 		Pprof: cmd.Bool("pprof"),
 	}, nil
 }
 
-// prefixes parses the CIDRs a flag carries. A bad one is refused here rather
-// than dropped, or an allow-list would silently be narrower than it reads.
-func prefixes(list []string) ([]netip.Prefix, error) {
+// prefixes parses the CIDRs a flag carries, named so a bad one says which flag
+// it was in. Refused here rather than dropped, or an allow-list would silently
+// be narrower than it reads.
+func prefixes(flag string, list []string) ([]netip.Prefix, error) {
 	if len(list) == 0 {
 		return nil, nil
 	}
@@ -457,7 +471,7 @@ func prefixes(list []string) ([]netip.Prefix, error) {
 	for _, text := range list {
 		prefix, err := netip.ParsePrefix(text)
 		if err != nil {
-			return nil, fmt.Errorf("allow-transfer %q: %w", text, err)
+			return nil, fmt.Errorf("%s %q: %w", flag, text, err)
 		}
 
 		out = append(out, prefix.Masked())

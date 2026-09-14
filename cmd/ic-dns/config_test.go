@@ -162,3 +162,31 @@ func TestRedactedKeepsTheToken(t *testing.T) {
 	// And the length is the token's, not a constant that happens to fit.
 	assert.Equal(t, "<redacted-(11)>", config{Token: "hello world"}.redacted().Token)
 }
+
+// TestConfigTrustedClients pins the flag that exempts a querier from the view
+// filter: a list of CIDRs, an environment variable a compose file can set, and
+// a refusal rather than a silently shorter list when one of them is malformed.
+func TestConfigTrustedClients(t *testing.T) {
+	cfg := parse(t, "--trusted-client", "10.146.11.40/32", "--trusted-client", "fd42::/64")
+
+	require.Len(t, cfg.TrustedClients, 2)
+	assert.Equal(t, "10.146.11.40/32", cfg.TrustedClients[0].String())
+	assert.Equal(t, "fd42::/64", cfg.TrustedClients[1].String())
+
+	// Nobody by default, which is the filter as it stands without this.
+	assert.Empty(t, parse(t).TrustedClients)
+
+	t.Setenv("DNS_TRUSTED_CLIENTS", "10.146.11.40/32")
+	assert.Len(t, parse(t).TrustedClients, 1)
+
+	// A bad prefix names the flag it was in rather than the other CIDR list.
+	cmd := runCommand()
+	cmd.Action = func(_ context.Context, c *cli.Command) error {
+		_, err := configFromCommand(c)
+
+		return err
+	}
+
+	err := cmd.Run(t.Context(), []string{"run", "--trusted-client", "10.146.11.40"})
+	assert.ErrorContains(t, err, `trusted-client "10.146.11.40"`)
+}
