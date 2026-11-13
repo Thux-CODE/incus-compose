@@ -92,6 +92,7 @@ func chain(logger *slog.Logger, cfg config) []position {
 			dns.Suffix(cfg.Suffix),
 			dns.Project(serves(logger, cfg)),
 			dns.AllowTransfer(cfg.AllowTransfer),
+			dns.TrustedClients(cfg.TrustedClients),
 		)},
 		// After dns, so a readiness it raises is folded before this position
 		// sees the event that caused it. Any position works; this one reads best.

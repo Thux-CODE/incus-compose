@@ -53,6 +53,11 @@ type Config struct {
 	// a transfer is opt-in at the listener as well as at the zone.
 	AllowTransfer []netip.Prefix
 
+	// TrustedClients are the queriers answered from every view at once rather
+	// than from the one they sit on. Empty trusts nobody, which is the
+	// per-querier filter as it stands without this.
+	TrustedClients []netip.Prefix
+
 	// ColdDir is where the cold store lives, the same directory the certificate
 	// is in. Empty disables it, and nothing writes to disk without it.
 	ColdDir string
@@ -150,6 +155,12 @@ func AllowTransfer(prefixes []netip.Prefix) Option {
 	return func(cfg *Config) { cfg.AllowTransfer = prefixes }
 }
 
+// TrustedClients sets who is answered from every view at once instead of the
+// one their address places them on. Empty trusts nobody.
+func TrustedClients(prefixes []netip.Prefix) Option {
+	return func(cfg *Config) { cfg.TrustedClients = prefixes }
+}
+
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
 
@@ -192,6 +203,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	view.EchoSubnet = cfg.EchoSubnet
 	view.Metrics = cfg.Metrics
 	view.Server = cfg.Listen
+	view.Trusted = cfg.TrustedClients
 
 	p := &Plugin{
 		cfg:    cfg,

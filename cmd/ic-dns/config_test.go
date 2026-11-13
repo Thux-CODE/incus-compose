@@ -247,3 +247,44 @@ func TestValidateForward(t *testing.T) {
 		assert.Contains(t, err.Error(), "forward:")
 	})
 }
+
+// TestConfigTrustedClients pins the flag that exempts a querier from the view
+// filter: a list of CIDRs, an environment variable a compose file can set, and
+// a refusal rather than a silently shorter list when one of them is malformed.
+func TestConfigTrustedClients(t *testing.T) {
+	cfg := parse(t, "--trusted-client", "10.146.11.40/32", "--trusted-client", "fd42::/64")
+
+	require.Len(t, cfg.TrustedClients, 2)
+	assert.Equal(t, "10.146.11.40/32", cfg.TrustedClients[0].String())
+	assert.Equal(t, "fd42::/64", cfg.TrustedClients[1].String())
+
+	// Nobody by default, which is the filter as it stands without this.
+	assert.Empty(t, parse(t).TrustedClients)
+
+	// Both spellings of the environment: the short one a deployment may still
+	// set, and the prefixed one, which wins when both are there.
+	t.Setenv("DNS_TRUSTED_CLIENTS", "10.146.11.40/32,10.146.11.41/32")
+	assert.Len(t, parse(t).TrustedClients, 2)
+
+	t.Setenv("INCUS_COMPOSE_DNS_TRUSTED_CLIENTS", "10.146.11.40/32")
+	assert.Len(t, parse(t).TrustedClients, 1)
+}
+
+// TestConfigTrustedClientsRefusesABadPrefix pins that a malformed CIDR stops the
+// start rather than leaving a shorter list, and says which flag it was in.
+func TestConfigTrustedClientsRefusesABadPrefix(t *testing.T) {
+	t.Parallel()
+
+	app := command()
+	app.Writer = io.Discard
+	app.ErrWriter = io.Discard
+
+	err := app.Run(t.Context(), []string{"ic-dns", "run", "--trusted-client", "10.146.11.40"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `trusted-client "10.146.11.40"`)
+
+	// And allow-transfer still names itself, now that the parser is shared.
+	err = app.Run(t.Context(), []string{"ic-dns", "run", "--allow-transfer", "10.0.0.1"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `allow-transfer "10.0.0.1"`)
+}

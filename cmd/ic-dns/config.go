@@ -68,6 +68,11 @@ type config struct {
 	// allows nobody, so a transfer is opt-in here as well as at the zone.
 	AllowTransfer []netip.Prefix
 
+	// TrustedClients is who is answered from every view at once rather than
+	// from the networks their own address sits on, as CIDR prefixes. Empty
+	// trusts nobody, which is the per-querier filter on its own.
+	TrustedClients []netip.Prefix
+
 	// How the chain behaves.
 	TTL            uint
 	DebounceWindow time.Duration

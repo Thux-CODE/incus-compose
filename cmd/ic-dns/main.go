@@ -236,12 +236,28 @@ func runCommand(cfg *config) *cli.Command {
 				Usage:   "CIDR(s) that may ask for a zone transfer; empty allows nobody",
 				Sources: cli.EnvVars("INCUS_COMPOSE_DNS_ALLOW_TRANSFER", "DNS_ALLOW_TRANSFER"),
 				Action: func(ctx context.Context, c *cli.Command, s []string) error {
-					allow, err := prefixes(s)
+					allow, err := prefixes("allow-transfer", s)
 					if err != nil {
 						return err
 					}
 
 					cfg.AllowTransfer = allow
+
+					return nil
+				},
+			},
+			&cli.StringSliceFlag{
+				Name: "trusted-client",
+				Usage: "CIDR(s) answered from every view at once rather than from the networks they sit on, " +
+					"matched on the address the query arrives from and never on a client subnet; empty trusts nobody",
+				Sources: cli.EnvVars("INCUS_COMPOSE_DNS_TRUSTED_CLIENTS", "DNS_TRUSTED_CLIENTS"),
+				Action: func(ctx context.Context, c *cli.Command, s []string) error {
+					trusted, err := prefixes("trusted-client", s)
+					if err != nil {
+						return err
+					}
+
+					cfg.TrustedClients = trusted
 
 					return nil
 				},
@@ -339,6 +355,7 @@ func action(ctx context.Context, cmd *cli.Command, cfg *config) error {
 		"sweep_project_delay", cfg.ProjectDelay,
 		"sweep_read_delay", cfg.ReadDelay,
 		"echo_subnet", cfg.EchoSubnet,
+		"trusted_clients", cfg.TrustedClients,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)
@@ -472,9 +489,10 @@ func drainContext(ctx context.Context) context.Context {
 	return out
 }
 
-// prefixes parses the CIDRs a flag carries. A bad one is refused here rather
-// than dropped, or an allow-list would silently be narrower than it reads.
-func prefixes(list []string) ([]netip.Prefix, error) {
+// prefixes parses the CIDRs a flag carries, named so a bad one says which flag
+// it was in. Refused here rather than dropped, or an allow-list would silently
+// be narrower than it reads.
+func prefixes(flag string, list []string) ([]netip.Prefix, error) {
 	if len(list) == 0 {
 		return nil, nil
 	}
@@ -484,7 +502,7 @@ func prefixes(list []string) ([]netip.Prefix, error) {
 	for _, text := range list {
 		prefix, err := netip.ParsePrefix(text)
 		if err != nil {
-			return nil, fmt.Errorf("allow-transfer %q: %w", text, err)
+			return nil, fmt.Errorf("%s %q: %w", flag, text, err)
 		}
 
 		out = append(out, prefix.Masked())

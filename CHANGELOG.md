@@ -11,6 +11,16 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Added
+
+- `ic-dns --trusted-client` (`INCUS_COMPOSE_DNS_TRUSTED_CLIENTS`): CIDRs whose
+  queries are answered from every view at once instead of from the networks
+  their address sits on, for an edge router that proxies into every project's
+  own network. Matched on the source address, never on an EDNS client subnet;
+  empty (the default) trusts nobody. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
