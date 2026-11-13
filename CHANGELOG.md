@@ -27,6 +27,12 @@ form.
   instead of taking a record that may be out of date. Keep the default with a
   single server. (by @sandroden)
 
+- `ic-dns` honours `user.label.dns.drain=true` on an instance: it leaves its
+  service name (`<service>.<zone>`) and keeps answering at its own name
+  (`<instance>.<zone>`), so a replica can be taken out of rotation before it is
+  restarted or updated. Setting it back to `false` or unsetting it puts the
+  replica back. Instance-only: a project setting it is ignored. (by @sandroden)
+
 ### Fixed
 
 - The `ievent` enricher retries a sweep that failed (projects not listed, or a

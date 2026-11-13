@@ -26,6 +26,7 @@ const (
 	metaAliases  = "aliases"
 	metaNS       = "ns"
 	metaTransfer = "transfer"
+	metaDrain    = "drain"
 )
 
 // labelKind says which side of a read may set a key. A key nothing declares may
@@ -59,6 +60,10 @@ var kinds = map[string]labelKind{
 	// single record, replicas of each other or not.
 	labelPrefix + metaService: labelInstance,
 	labelServiceCompose:       labelInstance,
+
+	// Drain takes one replica out of its service, so it is the instance's: a
+	// project draining every instance it holds would answer for no service.
+	labelPrefix + metaDrain: labelInstance,
 
 	// Zone is left either side's on purpose: a project names the zone its fleet
 	// publishes under, and an instance may name one to join a zone another
