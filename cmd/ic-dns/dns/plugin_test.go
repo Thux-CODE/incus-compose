@@ -104,6 +104,48 @@ func TestPluginServesWhatItWasFed(t *testing.T) {
 			},
 		},
 		{
+			// A paused instance keeps its addresses - Incus still reports them -
+			// but answers on none of them, so a record would have a client wait
+			// out a timeout instead of trying the next replica.
+			name: "a paused instance stops answering",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", map[string]string{metaService: "frontend"}, map[string]string{"net-a": "10.0.0.5"}),
+				eventOn(started, "shop", "api", map[string]string{metaService: "frontend"}, map[string]string{"net-a": "10.0.0.6"}),
+				event(incusapi.EventLifecycleInstancePaused, "shop", "web").
+					WithInstance(read("shop", false, ours(metaService, "frontend"), netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.6"},
+				{qname: "frontend.shop.example.", from: "10.0.0.6", want: []string{"10.0.0.6"}},
+			},
+		},
+		{
+			// What a round reads off a frozen instance is the same read, whatever
+			// event it arrives on.
+			name: "a frozen instance read again stays unanswered",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+				eventOn(started, "shop", "db", nil, map[string]string{"net-a": "10.0.0.6"}),
+				event(incusapi.EventLifecycleInstanceUpdated, "shop", "web").
+					WithInstance(read("shop", false, nil, netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.6"},
+			},
+		},
+		{
+			name: "a resumed instance answers again",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+				event(incusapi.EventLifecycleInstancePaused, "shop", "web").
+					WithInstance(read("shop", false, nil, netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+				eventOn(incusapi.EventLifecycleInstanceResumed, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.5", want: []string{"10.0.0.5"}},
+			},
+		},
+		{
 			name: "a rename answers to the new name and not the old",
 			feed: []*iutil.Event{
 				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),

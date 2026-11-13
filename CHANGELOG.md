@@ -11,6 +11,15 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Fixed
+
+- `ic-dns` no longer answers for a paused (frozen) instance: `incus pause` takes
+  it out of its own name and its service name, and `incus resume` puts it back.
+  Before, its address kept being served and clients timed out on it instead of
+  trying another replica. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

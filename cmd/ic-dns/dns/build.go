@@ -155,7 +155,13 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 		return nil
 	}
 
-	nets := sitsOn(ev.Instance())
+	// A paused instance still holds its addresses, and Incus still reports
+	// them, but nothing behind them answers: it sits nowhere, the same as one
+	// that stopped.
+	nets := map[string]*netOn{}
+	if ev.Instance().Running() {
+		nets = sitsOn(ev.Instance())
+	}
 
 	own := meta(ev)
 	zone := zoneFor(ev.ProjectName(), own, suffix)
