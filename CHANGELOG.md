@@ -11,6 +11,18 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Added
+
+- `ic-dns` answers a service name (`<service>.<zone>`) with the replicas
+  `ic-healthd` reports `healthy`: a replica with a healthcheck enabled stays out
+  of it while `starting`, `unhealthy` or not yet checked, and its own name
+  (`<instance>.<zone>`) is answered throughout. Replicas without a healthcheck
+  are served as before, and where no replica is ready the name answers with all
+  of them, so a stopped `ic-healthd` or a single failing replica never takes a
+  service off the air. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
