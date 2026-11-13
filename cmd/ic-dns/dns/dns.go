@@ -279,6 +279,7 @@ func (p *Plugin) Wants() []iutil.Want {
 		{Action: incusapi.EventLifecycleInstanceStarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceRestarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceResumed, Enrich: wantsInstance},
+		{Action: incusapi.EventLifecycleInstancePaused, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceStopped, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceShutdown, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceUpdated, Enrich: wantsInstance, Debounce: true},

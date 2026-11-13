@@ -70,6 +70,11 @@ form.
   that has to go may only not have been read yet, and the router took the
   `NXDOMAIN` as final. (by @sandroden)
 
+- `ic-dns` no longer answers for a paused (frozen) instance: `incus pause` takes
+  it out of its own name and its service name, and `incus resume` puts it back.
+  Before, its address kept being served and clients timed out on it instead of
+  trying another replica. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
