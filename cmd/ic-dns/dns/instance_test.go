@@ -28,6 +28,30 @@ func TestInstanceCarriesWhatItContributes(t *testing.T) {
 			"its own name stays first, which is what a PTR answers with")
 	})
 
+	t.Run("a drained replica keeps its own name and its aliases only", func(t *testing.T) {
+		config := ours(metaService, "frontend")
+		config[userLabel(labelPrefix+metaDrain)] = "true"
+		config[userLabel(labelPrefix+metaAliases)] = "www"
+
+		inst := patchInstance(labeled("shop", "web", config, nil), "example.")
+		require.NotNil(t, inst)
+
+		assert.Equal(t, []string{"web.shop.example."}, inst.names)
+		assert.Equal(t, []string{"www.shop.example."}, inst.alias)
+	})
+
+	t.Run("the compose service is drained the same way", func(t *testing.T) {
+		config := map[string]string{
+			userLabel(labelServiceCompose):     "frontend",
+			userLabel(labelPrefix + metaDrain): "true",
+		}
+
+		inst := patchInstance(labeled("shop", "web", config, nil), "example.")
+		require.NotNil(t, inst)
+
+		assert.Equal(t, []string{"web.shop.example."}, inst.names)
+	})
+
 	t.Run("the aliases it claims", func(t *testing.T) {
 		inst := patchInstance(
 			labeled("shop", "web", ours(metaAliases, "shop,www"), nil), "example.")

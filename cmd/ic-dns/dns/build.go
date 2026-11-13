@@ -171,9 +171,11 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 		alias:    aliasNames(own, zone),
 	}
 
-	// A scaled service's replicas land under one record.
+	// A scaled service's replicas land under one record. A drained replica
+	// leaves it and keeps its own name, so it can be reached while the
+	// service is not sent to it.
 	service := own[metaService]
-	if service != "" {
+	if service != "" && !incusutil.IsTrue(own[metaDrain]) {
 		inst.names = append(inst.names, dns.CanonicalName(service)+zone)
 	}
 

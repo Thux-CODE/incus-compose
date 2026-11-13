@@ -11,6 +11,16 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Added
+
+- `ic-dns` honours `user.label.dns.drain=true` on an instance: it leaves its
+  service name (`<service>.<zone>`) and keeps answering at its own name
+  (`<instance>.<zone>`), so a replica can be taken out of rotation before it is
+  restarted or updated. Setting it back to `false` or unsetting it puts the
+  replica back. Instance-only: a project setting it is ignored. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
