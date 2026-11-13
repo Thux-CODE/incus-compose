@@ -177,6 +177,11 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 	out := make(map[string]ecs_view.ViewAnswer, len(inst.names)+len(inst.alias)+len(inst.ptrs))
 
 	for _, name := range inst.names {
+		// Written for every replica at once, by refresh.
+		if name == inst.service {
+			continue
+		}
+
 		out[name] = s.records(inst, name, ttl)
 	}
 
@@ -186,6 +191,144 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 
 	for name, on := range inst.ptrs {
 		out[name] = s.reverse(inst, name, on.key, ttl)
+	}
+
+	return out
+}
+
+// refresh writes every service name from the replicas that carry it: the ready
+// ones, or every one where none is - readiness picks between replicas, it never
+// takes a service off the air. A drained replica carries no service name, so it
+// is never among them.
+//
+// Rebuilt from everything held rather than patched per instance, since one
+// replica becoming ready changes what the others contribute. The one way in, so
+// whatever else rewrites views calls this too. It reports whether any name was
+// rewritten.
+//
+// A name is rewritten where its answer changed view by view, but its zone is
+// marked as moved only where what a transfer carries changed: the records
+// flattened over every view. A change in which view sees what is not a change
+// to the zone, and stepping its serial for one would have every secondary
+// transfer it back.
+func (s *state) refresh(ttl uint32) bool {
+	carriers := map[string][]*instance{}
+	zones := map[string]string{}
+
+	for _, inst := range s.held {
+		if inst.service == "" {
+			continue
+		}
+
+		carriers[inst.service] = append(carriers[inst.service], inst)
+		zones[inst.service] = inst.zone
+	}
+
+	changed := false
+
+	for name, held := range s.served {
+		_, still := carriers[name]
+		if still {
+			continue
+		}
+
+		s.dropName(name, held)
+		delete(s.served, name)
+		s.dirty(s.servedZone[name])
+		delete(s.servedZone, name)
+
+		changed = true
+	}
+
+	for name, replicas := range carriers {
+		answering := slices.DeleteFunc(slices.Clone(replicas), func(inst *instance) bool { return !inst.ready })
+		if len(answering) == 0 {
+			answering = replicas
+		}
+
+		next := ecs_view.ViewAnswer{}
+
+		for _, inst := range answering {
+			for id, records := range s.records(inst, name, ttl) {
+				next[id] = union(next[id], records)
+			}
+		}
+
+		prev := s.served[name]
+		if sameAnswer(prev, next) {
+			continue
+		}
+
+		if prev != nil {
+			s.dropName(name, prev)
+		}
+
+		s.addName(name, next)
+		s.served[name] = next
+		s.servedZone[name] = zones[name]
+
+		if !sameRecords(flatten(prev), flatten(next)) {
+			s.dirty(zones[name])
+		}
+
+		changed = true
+	}
+
+	return changed
+}
+
+// dirty marks one zone as moved, so publish steps its serial.
+func (s *state) dirty(zone string) {
+	held, known := s.serials[zone]
+	if !known {
+		return
+	}
+
+	held.dirty = true
+	s.serials[zone] = held
+}
+
+// sameAnswer reports whether two answers for one name say the same thing in
+// every view. union sorts what it builds, so equal answers line up record for
+// record.
+func sameAnswer(a, b ecs_view.ViewAnswer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for id, records := range a {
+		other, ok := b[id]
+		if !ok || !sameRecords(records, other) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// sameRecords reports whether two sets of records hold the same ones, type by
+// type, each sorted the way union leaves it.
+func sameRecords(a, b ecs_view.Records) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for qtype, rrs := range a {
+		if !slices.EqualFunc(rrs, b[qtype], sameRR) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// flatten is every record of an answer whatever view it is in, which is what a
+// zone transfer carries.
+func flatten(answer ecs_view.ViewAnswer) ecs_view.Records {
+	out := ecs_view.Records{}
+
+	for _, records := range answer {
+		out = union(out, records)
 	}
 
 	return out

@@ -92,6 +92,7 @@ func TestInstanceCarriesWhatItContributes(t *testing.T) {
 
 		s := newState(nil)
 		s.apply("shop/web", inst, 5)
+		s.refresh(5)
 
 		snap := s.snapshot()
 

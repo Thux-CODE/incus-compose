@@ -34,6 +34,14 @@ form.
   restarted or updated. Setting it back to `false` or unsetting it puts the
   replica back. Instance-only: a project setting it is ignored. (by @sandroden)
 
+- `ic-dns` answers a service name (`<service>.<zone>`) with the replicas
+  `ic-healthd` reports `healthy`: a replica with a healthcheck enabled stays out
+  of it while `starting`, `unhealthy` or not yet checked, and its own name
+  (`<instance>.<zone>`) is answered throughout. Replicas without a healthcheck
+  are served as before, and where no replica is ready the name answers with all
+  of them, so a stopped `ic-healthd` or a single failing replica never takes a
+  service off the air. (by @sandroden)
+
 ### Changed
 
 - `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an

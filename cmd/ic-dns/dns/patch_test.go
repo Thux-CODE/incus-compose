@@ -63,6 +63,9 @@ func patched(held map[string]*instance, ttl uint32) *state {
 		s.apply(key, inst, ttl)
 	}
 
+	// What write does after a window's patches: the service names.
+	s.refresh(ttl)
+
 	return s
 }
 
@@ -143,6 +146,7 @@ func TestPatch(t *testing.T) {
 	t.Run("a replica leaving takes only its own addresses out", func(t *testing.T) {
 		s := patched(fleet(), 5)
 		s.apply("shop/api", nil, 5)
+		s.refresh(5)
 
 		snap := s.snapshot()
 
@@ -158,6 +162,7 @@ func TestPatch(t *testing.T) {
 		s.apply("shop/web",
 			instanceOn("shop", "web", map[string]string{metaService: "frontend"},
 				map[string]string{"net-a": "10.0.0.9"}), 5)
+		s.refresh(5)
 
 		snap := s.snapshot()
 

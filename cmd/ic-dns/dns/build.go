@@ -41,6 +41,15 @@ type instance struct {
 	// alias is every name it claims as a CNAME onto its own.
 	alias []string
 
+	// service is the service name among names, empty where it carries none. Its
+	// records are not this instance's to write: which replicas answer for it
+	// depends on the others too, so services writes it for all of them.
+	service string
+
+	// ready is whether this replica may answer for its service while another
+	// may not.
+	ready bool
+
 	// ptrs is every reverse name it answers to, and where each sits.
 	ptrs map[string]ptrOn
 }
@@ -210,6 +219,12 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 			inst.ptrs[name] = ptrOn{key: key, zone: zone}
 		}
 	}
+
+	if len(inst.names) > 1 {
+		inst.service = inst.names[1]
+	}
+
+	inst.ready = ready(ev.Instance())
 
 	return inst
 }
