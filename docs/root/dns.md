@@ -228,16 +228,20 @@ sequenceDiagram
 Until `ic-dns` has been all the way round the fleet once - seconds to a minute
 after a start, the same moment `/ready` turns ready - a name under the suffix it
 cannot answer yet is `SERVFAIL` rather than `NXDOMAIN`: it may only not have
-been read yet. Names outside the suffix are forwarded as usual throughout, and
-once warm nothing changes, a lost Incus event stream included.
+been read yet. A name under the suffix outside every project zone read so far is
+still asked of the forwarders, and their answer is passed on when it holds
+records, so hosts the upstream resolver knows under the same suffix - the
+cluster members' own names, say - keep resolving; their `NXDOMAIN` or empty
+answer is `SERVFAIL` instead. Names outside the suffix are forwarded as usual
+throughout, and once warm nothing changes, a lost Incus event stream included.
 
 With two `ic-dns` in `dns.nameservers`, glibc, musl and Go resolvers move on to
 the other one on `SERVFAIL`, so a restarting server is skipped instead of
 answering that a name does not exist. With a single server, a client gets a
 temporary failure instead (`EAI_AGAIN`), and on musl-based images such as Alpine
 every such lookup first waits out the 5 s timeout. If another server answers
-part of the suffix through forwarding, those names fail the same way until this
-one is warm.
+part of the suffix through forwarding, its names resolve when it has records for
+them and fail the same way when it does not, until this one is warm.
 
 Names it already holds are answered during that time, with a 5 s TTL. One
 carried over from before a restart, whose address changed meanwhile, can be out

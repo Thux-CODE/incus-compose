@@ -2,11 +2,13 @@ package ecs_view
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
 	"testing"
 
+	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/test"
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
@@ -737,4 +739,174 @@ func TestColdAnswersOffFailsEveryHit(t *testing.T) {
 			}
 		}
 	}
+}
+
+// TestColdAsksTheForwarderOutsideEveryZone pins a cold miss under a claim in no
+// zone we know: it may be a host the forwarder resolves - the cluster's own
+// nodes share the suffix - or a project not read yet. The forwarder is asked as
+// a warm miss would ask it, and only an answer with records in it is passed on,
+// as it came; anything else may be the unread project, so it is SERVFAIL. A miss
+// inside a zone of ours never reaches the forwarder, and warm changes nothing.
+func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
+	t.Parallel()
+
+	// What the forwarder does with each name; a name not listed is NXDOMAIN.
+	type upstream int
+
+	const (
+		nxdomain upstream = iota
+		answers
+		nodata
+		fails
+		writesNothing
+	)
+
+	says := map[string]upstream{
+		"i1.incus.":        answers,
+		"x.www.incus.":     answers,
+		"gone.edge.incus.": answers,
+		"empty.incus.":     nodata,
+		"broken.incus.":    fails,
+		"refused.incus.":   writesNothing,
+	}
+
+	var asked []string
+
+	next := plugin.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+		qname := r.Question[0].Name
+		asked = append(asked, qname)
+
+		m := new(dns.Msg)
+		m.SetReply(r)
+
+		switch says[qname] {
+		case answers:
+			m.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 600},
+				A:   netip.MustParseAddr("10.0.4.1").AsSlice(),
+			}}
+		case nodata:
+		case fails:
+			return dns.RcodeServerFailure, errors.New("upstream timed out")
+		case writesNothing:
+			return dns.RcodeRefused, nil
+		default:
+			m.Rcode = dns.RcodeNameError
+		}
+
+		return dns.RcodeSuccess, w.WriteMsg(m)
+	})
+
+	// edge.incus. is a zone invented for one alias: it claims the name it holds
+	// and nothing else, so a miss in it is outside every zone of a project.
+	snap := testPiece()
+	snap.Denial, _, _ = snap.Denial.Insert(NameKey("edge.incus."), &Zone{
+		Name:      "edge.incus.",
+		SOA:       testSOA("edge.incus."),
+		Shadowing: true,
+	})
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+	v.Next = next
+	v.Replace(snap)
+
+	cases := []struct {
+		name      string
+		qname     string
+		cold      int
+		warm      int
+		forwarded bool
+	}{
+		{"a host the forwarder resolves", "i1.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"two labels over a name in no project", "x.www.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"a miss in a zone invented for an alias", "gone.edge.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"the forwarder knows nothing of it", "web.blog.incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
+		{"the suffix itself", "incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
+		{"the forwarder has no record of this type", "empty.incus.", dns.RcodeServerFailure, dns.RcodeSuccess, true},
+		{"the forwarder fails", "broken.incus.", dns.RcodeServerFailure, dns.RcodeServerFailure, true},
+		{"the forwarder writes nothing", "refused.incus.", dns.RcodeServerFailure, dns.RcodeRefused, true},
+		{"a miss inside a project zone", "nope.shop.incus.", dns.RcodeServerFailure, dns.RcodeNameError, false},
+		{"a hit inside a project zone", "user-api.shop.incus.", dns.RcodeSuccess, dns.RcodeSuccess, false},
+	}
+
+	for i, phase := range []string{"cold", "warm"} {
+		if i > 0 {
+			v.SetHealthy(true)
+		}
+
+		for _, tc := range cases {
+			label := phase + ", " + tc.name
+
+			want := tc.cold
+			if i > 0 {
+				want = tc.warm
+			}
+
+			asked = nil
+
+			w := dnstest.NewRecorder(&test.ResponseWriter{})
+
+			rcode, err := v.ServeDNS(context.Background(), w, query(tc.qname, dns.TypeA, "10.0.1.10"))
+
+			// Warm, a forwarder that writes nothing leaves the reply to the
+			// caller, as it always did.
+			if i > 0 && (says[tc.qname] == fails || says[tc.qname] == writesNothing) {
+				assert.Equal(t, says[tc.qname] == fails, err != nil, label)
+				assert.Equal(t, want, rcode, label)
+				assert.Nil(t, w.Msg, label)
+				assert.Equal(t, []string{tc.qname}, asked, label)
+
+				continue
+			}
+
+			require.NoError(t, err, label)
+			require.NotNil(t, w.Msg, label)
+			assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[w.Msg.Rcode], label)
+
+			if tc.forwarded {
+				assert.Equal(t, []string{tc.qname}, asked, label)
+			} else {
+				assert.Empty(t, asked, label)
+			}
+
+			if w.Msg.Rcode == dns.RcodeServerFailure {
+				// A cold failure, in the shape of every other one.
+				assert.False(t, w.Msg.Authoritative, label)
+				assert.Empty(t, w.Msg.Answer, label)
+				assert.Equal(t, []uint16{dns.ExtendedErrorCodeNotReady}, ede(w.Msg), label)
+
+				continue
+			}
+
+			if !tc.forwarded || w.Msg.Rcode != dns.RcodeSuccess || says[tc.qname] != answers {
+				continue
+			}
+
+			// Passed on as the forwarder wrote it: neither ours nor clamped.
+			assert.False(t, w.Msg.Authoritative, label)
+			require.Len(t, w.Msg.Answer, 1, label)
+			assert.Equal(t, uint32(600), w.Msg.Answer[0].Header().Ttl, label)
+			assert.Equal(t, "10.0.4.1", w.Msg.Answer[0].(*dns.A).A.String(), label)
+		}
+	}
+}
+
+// ede is the extended error codes a reply carries.
+func ede(m *dns.Msg) []uint16 {
+	opt := m.IsEdns0()
+	if opt == nil {
+		return nil
+	}
+
+	var out []uint16
+
+	for _, o := range opt.Option {
+		e, ok := o.(*dns.EDNS0_EDE)
+		if ok {
+			out = append(out, e.InfoCode)
+		}
+	}
+
+	return out
 }

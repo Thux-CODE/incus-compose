@@ -187,10 +187,22 @@ error `Not Ready` (14) when the query carries EDNS (none when it does not):
 
 - a name a zone does not hold, a name the querier cannot see, and a querier on
   no known network - the three answers that are `NXDOMAIN` once warm;
-- a name under one of `Claims` that no zone holds yet, which would otherwise
-  fall through to the next plugin. A source sets `Claims` to the domains it
-  serves before any zone in them has been published: for _incus_, the suffix
-  project zones are built under.
+- a name under one of `Claims` that no zone holds yet, unless the next plugin
+  answers it with records. A source sets `Claims` to the domains it serves
+  before any zone in them has been published: for _incus_, the suffix project
+  zones are built under.
+
+A name of the last kind is still handed to the next plugin, as a warm miss would
+be, with the reply caught instead of written. A `NOERROR` holding records is
+passed on as it came - for _incus_, a cluster node named under the same suffix
+that the uplink's resolver knows keeps resolving across a restart. `NXDOMAIN`,
+`NODATA`, a failure, or no reply at all may be a zone not read yet, and is
+`SERVFAIL` as above. A zone invented for an alias (`Shadowing`) counts only for
+the names it holds, so a miss in it is asked the same way. Asking costs what a
+warm miss costs: a forwarder that does not answer holds the query up to its own
+timeout - 5 s for CoreDNS's _forward_ - before the `SERVFAIL`. Reverse names are
+not under a claim: a miss in a reverse zone is a miss in a zone, and an address
+outside every one falls through as usual.
 
 Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy -
 unless `ColdAnswers` is off. Anything outside every zone and every claim falls
@@ -218,8 +230,8 @@ round fills them.
 
 A claim is the whole domain. Where another server answers part of it - a second
 `ic-dns` serving other projects under the same suffix, reached by forwarding -
-those names are `SERVFAIL` here too until this view is warm, instead of falling
-through to it.
+its answers with records are passed on while this view is cold, and its
+`NXDOMAIN` and `NODATA` are `SERVFAIL` here until warm.
 
 `SERVFAIL` because, unlike `NXDOMAIN`, the common stub resolvers do not take it
 as final where another server is listed. What they do with it, measured:
@@ -255,7 +267,8 @@ With the _prometheus_ plugin enabled:
 - `coredns_ecs_view_requests_total{server,result}` - requests by result, where
   result is `success`, `nodata`, `nxdomain`, `denied` or `servfail` (a miss
   answered before warm, or anything inside a zone with `ColdAnswers` off, see
-  [Before The First Read](#before-the-first-read)).
+  [Before The First Read](#before-the-first-read)). A cold miss the next plugin
+  answered is not counted, like any warm fall through.
 - `coredns_ecs_view_unidentified_clients_total{server}` - requests refused
   because the querier could not be placed on any known network.
 - `coredns_ecs_view_zones` - zones currently served.

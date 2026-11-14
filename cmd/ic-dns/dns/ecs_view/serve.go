@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/coredns/coredns/plugin/pkg/nonwriter"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 )
@@ -75,7 +76,7 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	z := snap.ZoneOf(qname)
 	if z == nil {
 		if cold && v.claimed(qname) {
-			return v.notReady(w, r, opt)
+			return v.askNext(ctx, w, r, opt)
 		}
 
 		v.logger.Debug("unknown, falling through", "zone", qname)
@@ -89,7 +90,7 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// for a domain we hold one name in would claim the rest of that domain too.
 	if z.Shadowing && !held {
 		if cold && v.claimed(qname) {
-			return v.notReady(w, r, opt)
+			return v.askNext(ctx, w, r, opt)
 		}
 
 		v.logger.Debug("not claimed, falling through", "name", qname, "zone", z.Name)
@@ -225,6 +226,31 @@ func (v *ECSView) claimed(qname string) bool {
 	}
 
 	return false
+}
+
+// askNext is a cold miss under a claim that no zone we know holds: either a
+// name the next plugin resolves - the hosts of the cluster under the same
+// suffix, say - or one in a project not read yet. It goes where a warm miss
+// would, with the reply caught rather than written. Only an answer with records
+// in it is passed on: NXDOMAIN, NODATA, a failure or nothing written may just as
+// well be the project not read yet, so those fail like any other cold miss.
+func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
+	if v.Next == nil {
+		return v.notReady(w, r, opt)
+	}
+
+	caught := nonwriter.New(w)
+
+	_, err := v.Next.ServeDNS(ctx, caught, r)
+
+	got := caught.Msg
+	if err != nil || got == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) == 0 {
+		return v.notReady(w, r, opt)
+	}
+
+	v.logger.Debug("not warm, answered by the next plugin", "name", r.Question[0].Name)
+
+	return write(w, got)
 }
 
 // notReady is SERVFAIL: unlike NXDOMAIN, glibc, musl and Go do not take it as

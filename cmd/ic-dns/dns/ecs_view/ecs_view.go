@@ -48,7 +48,10 @@ type ECSView struct {
 	// them has been published yet, set once before anything serves. Until warm,
 	// a miss under one of them is SERVFAIL rather than a fall through: the name
 	// may only not have been read yet, and a forwarder's NXDOMAIN would be a
-	// final answer that also stops the client trying its next server.
+	// final answer that also stops the client trying its next server. A miss in
+	// no zone we know is still asked of Next, and an answer holding records is
+	// passed on - a host sharing the suffix resolves by forwarding - while
+	// anything else from it fails the same way.
 	Claims []string
 
 	// ColdAnswers serves what the zones hold before warm, clamped like any
