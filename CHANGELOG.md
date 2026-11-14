@@ -11,6 +11,18 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Added
+
+- `ic-dns --peer-views` (`INCUS_COMPOSE_DNS_PEER_VIEWS`): a querier is also
+  answered from the networks its own network is peered with
+  (`incus network peer`, `Created` on both sides, one hop, never transitive),
+  names and PTRs alike. The peering is read at start and followed on
+  `network-peer-*` events without a restart; a side the certificate cannot read,
+  or in a project not served, is ignored. Peer answers count as `result="peer"`.
+  Off by default. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

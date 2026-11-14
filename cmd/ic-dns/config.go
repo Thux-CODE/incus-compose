@@ -68,6 +68,10 @@ type config struct {
 	// allows nobody, so a transfer is opt-in here as well as at the zone.
 	AllowTransfer []netip.Prefix
 
+	// PeerViews answers a querier from the networks its own are peered with,
+	// as well as from its own. Off by default.
+	PeerViews bool
+
 	// How the chain behaves.
 	TTL            uint
 	DebounceWindow time.Duration
