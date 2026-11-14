@@ -314,14 +314,18 @@ instance through one of them (an `ic-healthd` talking to its Incus node) would
 see the instance go down with it. The engine hands it to `Next`, the query chain
 a warm miss falls through to, through a
 [`nonwriter`](https://pkg.go.dev/github.com/coredns/coredns/plugin/pkg/nonwriter)
-that catches the reply. `NOERROR` with records in the answer goes out as the
-forwarder wrote it, not authoritative and not clamped. Anything else -
-`NXDOMAIN`, `NODATA`, an error, nothing written - is what an unread project
-looks like from upstream too, so it is the cold `SERVFAIL`. A forwarder that
-does not answer holds the query for `forward`'s own 5 s first, as it would warm.
-The cache sits in front of `forward`, so what it stores here is what upstream
-said and changes nothing once warm: a project's zone answers before the cache is
-reached.
+that catches the reply. `NOERROR` goes out as the forwarder wrote it, not
+authoritative and not clamped, with records or without: `NODATA` says upstream
+holds the name, so no project builds it, and the AAAA of an IPv4-only node is
+exactly that - failing it would fail the node's whole lookup on musl, which
+sends A and AAAA together and gives up on either's `SERVFAIL`. A truncated reply
+goes out as it came too, whatever its rcode, so the client retries over TCP and
+the TCP reply is judged on its own. Anything else - `NXDOMAIN`, another rcode,
+an error, nothing written - is what an unread project looks like from upstream
+too, so it is the cold `SERVFAIL`. A forwarder that does not answer holds the
+query for `forward`'s own 5 s first, as it would warm. The cache sits in front
+of `forward`, so what it stores here is what upstream said and changes nothing
+once warm: a project's zone answers before the cache is reached.
 
 glibc, musl and Go move on to the next listed server on `SERVFAIL`, which is
 what lets two `ic-dns` in `dns.nameservers` ride out a rolling restart. With a
@@ -332,8 +336,8 @@ systemd-resolved has not been measured.
 
 The claim is the whole suffix. A deployment that forwards part of it to another
 `ic-dns` - two serving different projects under one suffix - gets that one's
-records passed on while this one is cold, and `SERVFAIL` where it says
-`NXDOMAIN` or `NODATA`.
+`NOERROR` answers, `NODATA` included, passed on while this one is cold, and
+`SERVFAIL` where it says `NXDOMAIN`.
 
 ### Hits Before Warm: `--cold-answers`
 
@@ -366,7 +370,7 @@ reads that timed out, so the view can turn warm with holes, and those names are
 A round that fails outright - `GetProjectNames` timing out, say - raises no
 sweep-end, and today nothing runs again before `SweepInterval` (6 h by default):
 the view stays cold and every miss is `SERVFAIL` for that long, but those the
-forwarder answers with records. A retry with backoff is being done separately
+forwarder answers `NOERROR`. A retry with backoff is being done separately
 (`ievent-sweep-retry`); this behaviour depends on it.
 
 ### Turning Warm, In Order

@@ -28,11 +28,12 @@ form.
   or forwarding upstream for names under its suffix that it cannot answer before
   the first complete round of the fleet, so resolvers fall back to the next
   nameserver while a replica is restarting. A name under the suffix outside
-  every project zone read so far is still forwarded, and an upstream answer
-  holding records is passed on, so hosts the upstream knows under the suffix
-  keep resolving; an upstream `NXDOMAIN` or empty answer is `SERVFAIL`. Names
-  outside the suffix are forwarded, and nothing changes once warm. `/ready` now
-  turns ready only on a warm event no plugin dropped. (by @sandroden)
+  every project zone read so far is still forwarded, and an upstream `NOERROR`
+  is passed on, records or not, so hosts the upstream knows under the suffix
+  keep resolving, an empty AAAA included; an upstream `NXDOMAIN` is
+  `SERVFAIL`. Names outside the suffix are forwarded, and nothing changes once
+  warm. `/ready` now turns ready only on a warm event no plugin dropped.
+  (by @sandroden)
 
 ## [v1.4.0] - 2026-11-11
 
