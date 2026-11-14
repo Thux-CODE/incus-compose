@@ -44,6 +44,11 @@ type call struct {
 	// waitForRunning says whether this read should actively wait for the instance
 	// to become Running (used for instance-started).
 	waitForRunning bool
+
+	// again is every call for this key that arrived after this read went out.
+	// The read may have been taken before what they announce, so they get one
+	// of their own once this one lands.
+	again *call
 }
 
 // join folds a second call for the same key into this one; the first ev is
@@ -369,9 +374,14 @@ func (d *deferred) send(ctx context.Context, c *call) {
 				}
 
 				c.wantInterfaces = c.wantInterfaces || prev.wantInterfaces
+
+				// This read starts after them, so it answers them too.
+				if prev.again != nil {
+					c.join(prev.again)
+				}
 			}
 		} else {
-			out.join(c)
+			d.follow(out, c)
 
 			return
 		}
@@ -405,6 +415,27 @@ func (d *deferred) send(ctx context.Context, c *call) {
 		d.waiting = append(d.waiting, c)
 		d.timer.Reset(poolDelay)
 	}
+}
+
+// follow folds c into the call already held for its key. One whose read is not
+// out yet answers c as well; one already out may have been read before the
+// change c announces, so an instance call waits behind it for a read of its
+// own.
+func (d *deferred) follow(out, c *call) {
+	_, inFlight := d.cancels[c.key]
+	if !inFlight || c.kind != kindInstance {
+		out.join(c)
+
+		return
+	}
+
+	if out.again == nil {
+		out.again = c
+
+		return
+	}
+
+	out.again.join(c)
 }
 
 // cancel aborts the read in flight for key, if any, and returns it.
@@ -495,6 +526,15 @@ func (d *deferred) owes() int { return d.owed }
 func (d *deferred) done(ctx context.Context, c *call) {
 	delete(d.calls, c.key)
 	delete(d.cancels, c.key)
+
+	// What arrived while it was out is read again, after the answer it waited
+	// behind has been taken.
+	if c.again != nil {
+		again := c.again
+		c.again = nil
+
+		d.send(ctx, again)
+	}
 
 	if c.kind != kindProject {
 		return

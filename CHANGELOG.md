@@ -11,6 +11,15 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Fixed
+
+- `ic-dns` and `ic-healthd` no longer miss a change made while the instance was
+  being read: an event that arrives after a read of the same instance went out
+  (a label set right after a start, while the start waits for an address) gets a
+  read of its own instead of the older answer. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

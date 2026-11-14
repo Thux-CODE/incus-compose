@@ -638,10 +638,11 @@ func TestCoalescesReadsPerKey(t *testing.T) {
 
 	assert.True(t, first.Enriched(iutil.EnrichedInstance))
 	assert.Equal(t, "one", first.Name())
-	assert.Equal(t, 1, h.readsOf("p", "one"), "it was one read")
 
-	// Both settled from that read, and the second says what the first said.
-	assert.Equal(t, "two", h.next().Name(), "the coalesced event walked with nothing new on it")
+	// The second arrived after the read went out, so it is read again; with
+	// nothing new on it, it walks no further.
+	assert.Equal(t, "two", h.next().Name(), "the event read again walked with nothing new on it")
+	assert.Equal(t, 2, h.readsOf("p", "one"), "the second event had a read of its own")
 }
 
 // TestSlowReadHoldsTheLine is the ordering cost, stated: reads run
@@ -1106,8 +1107,9 @@ func TestADeleteAfterAReadKeepsItsOrder(t *testing.T) {
 	assert.Equal(t, incusapi.EventLifecycleInstanceDeleted, h.next().Action())
 }
 
-// TestALiveEventAndAFanOutOnOneKeyAreOneEvent: both settle from the same read,
-// so the real one walks and the invented one has nothing left to say.
+// TestALiveEventAndAFanOutOnOneKeyAreOneEvent: the live event arrives while the
+// fan-out's read is out, so it gets a read of its own, and the two still walk
+// as one event: the second read has nothing new to say.
 func TestALiveEventAndAFanOutOnOneKeyAreOneEvent(t *testing.T) {
 	t.Parallel()
 
@@ -1132,8 +1134,8 @@ func TestALiveEventAndAFanOutOnOneKeyAreOneEvent(t *testing.T) {
 	assert.Equal(t, incusapi.EventLifecycleInstanceUpdated, got.Action())
 	assert.NoError(t, got.Err(), "the event somebody sent was the one dropped")
 
-	require.Eventually(t, func() bool { return h.readsOf("p", testlib.InstanceName(0)) == 2 },
-		5*time.Second, 10*time.Millisecond, "the two did not share one read")
+	require.Eventually(t, func() bool { return h.readsOf("p", testlib.InstanceName(0)) == 3 },
+		5*time.Second, 10*time.Millisecond, "the live event was not read again")
 
 	assert.Empty(t, h.out, "the fan-out emitted an event of its own beside the real one")
 }
