@@ -2,6 +2,7 @@ package dns
 
 import (
 	"log/slog"
+	"net"
 	"testing"
 	"time"
 
@@ -14,6 +15,10 @@ import (
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
+// hostResolved is the one name coldServer's forwarder knows: a cluster node
+// under the suffix, which no project zone holds.
+const hostResolved = "i1.incus."
+
 // want is what one query should get: an rcode, and whether it reached the
 // forwarder to get it.
 type want struct {
@@ -23,7 +28,9 @@ type want struct {
 
 // coldServer is a plugin answering through the adapter, with a forwarder after
 // it that answers NXDOMAIN for everything - what a public resolver says about a
-// name under a suffix it does not serve. Nothing has been folded yet.
+// name under a suffix it does not serve - but hostResolved, a cluster node
+// sharing the suffix that the uplink's dnsmasq resolves. Nothing has been
+// folded yet.
 type coldServer struct {
 	p         *Plugin
 	a         *adapter
@@ -42,6 +49,15 @@ func newColdServer(t *testing.T, opts ...Option) *coldServer {
 
 			m := new(dns.Msg)
 			m.SetRcode(r, dns.RcodeNameError)
+
+			if r.Question[0].Name == hostResolved {
+				m.SetReply(r)
+				m.Answer = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{Name: hostResolved, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.IPv4(10, 0, 4, 1),
+				}}
+			}
+
 			_ = w.WriteMsg(m)
 		},
 		rcode: dns.RcodeNameError,
@@ -83,7 +99,9 @@ func (c *coldServer) check(t *testing.T, phase string, cases map[string]want) {
 // round still going, then the round's end, then the stream dropping. Until the
 // round ends a name under the suffix that misses may only be unread, so it is
 // SERVFAIL - which sends the client to its next server - rather than whatever
-// the forwarder makes of it.
+// the forwarder makes of it. Outside every zone read so far the forwarder is
+// still asked, and an answer with records is passed on: a cluster node under
+// the suffix resolves cold as it does warm, an unread project does not.
 func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 	t.Parallel()
 
@@ -96,8 +114,9 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 	c.check(t, "cold", map[string]want{
 		"web.shop.incus.":   {rcode: dns.RcodeSuccess},
 		"db.shop.incus.":    {rcode: dns.RcodeServerFailure},
-		"api.blog.incus.":   {rcode: dns.RcodeServerFailure},
-		"incus.":            {rcode: dns.RcodeServerFailure},
+		"api.blog.incus.":   {rcode: dns.RcodeServerFailure, forwarded: true},
+		"incus.":            {rcode: dns.RcodeServerFailure, forwarded: true},
+		hostResolved:        {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":  {rcode: dns.RcodeNameError, forwarded: true},
 		"shop.incus.":       {rcode: dns.RcodeSuccess},
 		"web.shop.incus.x.": {rcode: dns.RcodeNameError, forwarded: true},
@@ -118,6 +137,7 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 		"web.shop.incus.":        {rcode: dns.RcodeSuccess},
 		"db.shop.incus.":         {rcode: dns.RcodeNameError},
 		"api.blog.incus.":        {rcode: dns.RcodeNameError, forwarded: true},
+		hostResolved:             {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
 		"9.0.0.10.in-addr.arpa.": {rcode: dns.RcodeNameError},
 		"8.8.8.8.in-addr.arpa.":  {rcode: dns.RcodeNameError, forwarded: true},
@@ -137,7 +157,8 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 // before the round ends, a name it already holds - the apex and a PTR included -
 // is SERVFAIL like one it does not, so a client with a second server asks that
 // one rather than take a record from before the restart. Names outside the
-// suffix are forwarded as ever, and once warm the switch changes nothing.
+// suffix are forwarded as ever, a name under it in no zone the same way as with
+// the switch on, and once warm the switch changes nothing.
 func TestColdAnswersOffFailsTheHitsToo(t *testing.T) {
 	t.Parallel()
 
@@ -151,7 +172,8 @@ func TestColdAnswersOffFailsTheHitsToo(t *testing.T) {
 		"shop.incus.":            {rcode: dns.RcodeServerFailure},
 		"2.0.0.10.in-addr.arpa.": {rcode: dns.RcodeServerFailure},
 		"db.shop.incus.":         {rcode: dns.RcodeServerFailure},
-		"api.blog.incus.":        {rcode: dns.RcodeServerFailure},
+		"api.blog.incus.":        {rcode: dns.RcodeServerFailure, forwarded: true},
+		hostResolved:             {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
 		"8.8.8.8.in-addr.arpa.":  {rcode: dns.RcodeNameError, forwarded: true},
 	})
@@ -164,6 +186,7 @@ func TestColdAnswersOffFailsTheHitsToo(t *testing.T) {
 		"2.0.0.10.in-addr.arpa.": {rcode: dns.RcodeSuccess},
 		"db.shop.incus.":         {rcode: dns.RcodeNameError},
 		"api.blog.incus.":        {rcode: dns.RcodeNameError, forwarded: true},
+		hostResolved:             {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
 	})
 }

@@ -341,6 +341,22 @@ nothing). Hits, `NODATA` and the apex answer as usual, clamped to 5 s, unless
 `--cold-answers` is off (below), and names outside both fall through, so the
 internet keeps resolving.
 
+A name under `--suffix` in no zone known so far is not failed outright: names
+there that no project builds - the cluster members', which the uplink's dnsmasq
+resolves - would otherwise fail on every restart, and a client checking an
+instance through one of them (an `ic-healthd` talking to its Incus node) would
+see the instance go down with it. The engine hands it to `Next`, the query chain
+a warm miss falls through to, through a
+[`nonwriter`](https://pkg.go.dev/github.com/coredns/coredns/plugin/pkg/nonwriter)
+that catches the reply. `NOERROR` with records in the answer goes out as the
+forwarder wrote it, not authoritative and not clamped. Anything else -
+`NXDOMAIN`, `NODATA`, an error, nothing written - is what an unread project
+looks like from upstream too, so it is the cold `SERVFAIL`. A forwarder that
+does not answer holds the query for `forward`'s own 5 s first, as it would warm.
+The cache sits in front of `forward`, so what it stores here is what upstream
+said and changes nothing once warm: a project's zone answers before the cache is
+reached.
+
 glibc, musl and Go move on to the next listed server on `SERVFAIL`, which is
 what lets two `ic-dns` in `dns.nameservers` ride out a rolling restart. With a
 single server the cost is a temporary failure instead of a wrong answer, and on
@@ -349,8 +365,9 @@ musl each such miss blocks for its 5 s timeout first. The measurements are in
 systemd-resolved has not been measured.
 
 The claim is the whole suffix. A deployment that forwards part of it to another
-`ic-dns` - two serving different projects under one suffix - gets `SERVFAIL` for
-those names too while this one is cold.
+`ic-dns` - two serving different projects under one suffix - gets that one's
+records passed on while this one is cold, and `SERVFAIL` where it says
+`NXDOMAIN` or `NODATA`.
 
 ### Hits Before Warm: `--cold-answers`
 
@@ -384,9 +401,9 @@ reads that timed out, so the view can turn warm with holes, and those names are
 
 A round that fails outright - `GetProjectNames` timing out, say - raises no
 sweep-end, and today nothing runs again before `SweepInterval` (6 h by default):
-the view stays cold and every miss is `SERVFAIL` for that long. A retry with
-backoff is being done separately (`ievent-sweep-retry`); this behaviour depends
-on it.
+the view stays cold and every miss is `SERVFAIL` for that long, but those the
+forwarder answers with records. A retry with backoff is being done separately
+(`ievent-sweep-retry`); this behaviour depends on it.
 
 ### Turning Warm, In Order
 

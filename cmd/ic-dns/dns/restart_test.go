@@ -334,7 +334,8 @@ type fromAddr struct {
 func (f *fromAddr) RemoteAddr() net.Addr { return &net.UDPAddr{IP: f.from, Port: 4242} }
 
 // restartRig is the chain main builds, against a gated Incus and a forwarder
-// that answers NXDOMAIN for everything.
+// that answers NXDOMAIN for everything but hostResolved, a cluster node under
+// the suffix that no project builds.
 type restartRig struct {
 	p     *Plugin
 	a     *adapter
@@ -396,10 +397,6 @@ func (r *restartRig) check(t *testing.T, phase string, cases []restartCase) {
 
 		assert.Equal(t, dns.RcodeToString[tc.want.rcode], dns.RcodeToString[m.Rcode], label)
 		assert.Equal(t, tc.want.forwarded, forwarded, "%s: forwarded", label)
-
-		if forwarded {
-			continue
-		}
 
 		var got []string
 
@@ -531,6 +528,15 @@ func startRestart(t *testing.T, opts ...Option) (*restartRig, *gatedIncus) {
 
 			m := new(dns.Msg)
 			m.SetRcode(q, dns.RcodeNameError)
+
+			if q.Question[0].Name == hostResolved {
+				m.SetReply(q)
+				m.Answer = []dns.RR{&dns.A{
+					Hdr: dns.RR_Header{Name: hostResolved, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+					A:   net.IPv4(10, 0, 4, 1),
+				}}
+			}
+
 			_ = w.WriteMsg(m)
 		},
 		rcode: dns.RcodeNameError,
@@ -617,15 +623,26 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 		{restartQuery{name: "5.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeSuccess, answers: []string{"web.shop.incus."}, ttl: stale}},
 
-		// Every miss under the suffix may be a name not read yet.
+		// Every miss under the suffix may be a name not read yet. In a zone
+		// the replay restored it is failed outright; in none, the forwarder is
+		// asked first and its NXDOMAIN failed all the same.
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, subnet: shopQuerier},
-			restartWant{rcode: dns.RcodeServerFailure}},
+			restartWant{rcode: dns.RcodeServerFailure, forwarded: true}},
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, plain: true},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "api.blog.incus.", qtype: dns.TypeA, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeServerFailure}},
+
+		// A node of the cluster under the suffix is no project's: what the
+		// forwarder has for it is passed on as it came, cold as warm.
+		{restartQuery{name: hostResolved, qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.4.1"}, ttl: 60, forwarded: true}},
+		{restartQuery{name: hostResolved, qtype: dns.TypeA, plain: true},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.4.1"}, ttl: 60, forwarded: true}},
+		{restartQuery{name: hostResolved, qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.4.1"}, ttl: 60, forwarded: true}},
 
 		// Two claimants of one alias read as missing, and so as not read yet.
 		{restartQuery{name: "www.shop.incus.", qtype: dns.TypeCNAME, subnet: shopQuerier},
@@ -657,7 +674,7 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, from: edgeRouter},
-			restartWant{rcode: dns.RcodeServerFailure}},
+			restartWant{rcode: dns.RcodeServerFailure, forwarded: true}},
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, from: edgeRouter, plain: true},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "9.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, from: edgeRouter},
@@ -707,6 +724,8 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 		// A claimed name in no zone is the forwarder's again.
 		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeNameError, forwarded: true}},
+		{restartQuery{name: hostResolved, qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.4.1"}, ttl: 60, forwarded: true}},
 		{restartQuery{name: "www.example.com.", qtype: dns.TypeA, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeNameError, forwarded: true}},
 
@@ -755,7 +774,12 @@ func TestARestartWithoutColdAnswersFailsTheStoreToo(t *testing.T) {
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, subnet: shopQuerier},
-			restartWant{rcode: dns.RcodeServerFailure}},
+			restartWant{rcode: dns.RcodeServerFailure, forwarded: true}},
+
+		// No zone holds the cluster's node, so the switch has nothing to fail:
+		// the forwarder's answer is passed on.
+		{restartQuery{name: hostResolved, qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.4.1"}, ttl: 60, forwarded: true}},
 
 		// The trusted router gets nothing from the store either.
 		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, from: edgeRouter},

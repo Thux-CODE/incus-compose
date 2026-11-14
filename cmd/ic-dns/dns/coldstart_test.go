@@ -132,6 +132,14 @@ func TestARestartAnswersBeforeIncusDoes(t *testing.T) {
 	var answer []string
 
 	require.Eventually(t, func() bool {
+		// Run wires the query chain before it publishes anything, and a cold
+		// miss under the suffix reads it: nothing is asked before the replay
+		// has been published.
+		_, held := p.xfr.current.Load().Answers("web.shop.incus.")
+		if !held {
+			return false
+		}
+
 		w := &recorder{}
 
 		handled, _, err := p.view.Answer(t.Context(), w, q)
