@@ -297,8 +297,9 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 }
 
 // roundLost asks for an end of round again when one could not be used, since
-// it is what turns the view warm and until then every miss is SERVFAIL. Its
-// own request counts too, or one dropped in turn would end the asking.
+// it is what turns the view warm - until then every miss is SERVFAIL - and,
+// after a lost stream, healthy and ready again. Its own request counts too, or
+// one dropped in turn would end the asking.
 // Non-blocking, from either goroutine: a full door drops it like any event.
 func (p *Plugin) roundLost(ev *iutil.Event) {
 	if ev.Action() != iutil.ActionSweepEnd && ev.Action() != actionRoundLost {
@@ -439,9 +440,11 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	}
 
 	// A lost stream drops no record, but nothing is confirming them any more,
-	// which is what unready says.
+	// which is what unready says, until a round has ended again. The view stays
+	// warm: what it holds is as good as any other server's.
 	if ev.Action() == iutil.ActionDisconnected {
 		p.view.SetHealthy(false)
+		p.state.fresh = false
 		p.state.lost = ev.At()
 
 		return
@@ -456,7 +459,7 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		return
 	}
 
-	if ev.Err() != nil && !p.state.warm {
+	if ev.Err() != nil && !p.state.fresh {
 		p.roundLost(ev)
 	}
 
@@ -464,7 +467,9 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// dropped walked the chain behind it, so the round it closed is folded by
 	// now even if the sweep-end itself was lost. Stamped before the stream was
 	// lost, it is a debounced leftover and says nothing about the stream since.
-	if !p.state.warm && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
+	// The rule http follows for /ready, so the two agree. Nothing else -
+	// a failed read, or a cold stamp after the round - takes it back.
+	if !p.state.fresh && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
 		p.rounded()
 	}
 
@@ -515,7 +520,7 @@ func (p *Plugin) rounded() {
 	p.publish()
 
 	p.view.SetHealthy(true)
-	p.state.warm = true
+	p.state.fresh = true
 }
 
 // write applies what has arrived and publishes it. Nothing arrived is nothing

@@ -1,8 +1,12 @@
 package dns
 
 import (
+	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +17,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	ihttp "github.com/lxc/incus-compose/ievent/http"
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
@@ -312,6 +317,150 @@ func TestALostSweepEndWarmsOnlyInOrder(t *testing.T) {
 		c.check(t, "stale", miss)
 		assert.False(t, c.p.view.Ready(), "healthy while the stream is down")
 	})
+}
+
+// readyAfter puts the http plugin after p, the way main orders the chain, and
+// serves it on a loopback port. What it returns asks /ready, as a load balancer
+// would.
+func readyAfter(t *testing.T, p *Plugin) func() int {
+	t.Helper()
+
+	l, err := new(net.ListenConfig).Listen(t.Context(), "tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+
+	h := ihttp.New(slog.Default(), ihttp.Listen(addr))
+	require.NoError(t, h.Setup(iutil.SetupArgs{Next: func(_ *iutil.Event) {}}))
+
+	p.next = h.Handle
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		_ = h.Run(ctx)
+	}()
+
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
+
+	status := func() int {
+		reqCtx, stop := context.WithTimeout(t.Context(), time.Second)
+		defer stop()
+
+		req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, "http://"+addr+"/ready", nil)
+		require.NoError(t, err)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return 0
+		}
+
+		defer func() { _ = resp.Body.Close() }()
+
+		_, _ = io.Copy(io.Discard, resp.Body)
+
+		return resp.StatusCode
+	}
+
+	require.Eventually(t, func() bool { return status() != 0 }, 5*time.Second, 10*time.Millisecond,
+		"/ready never answered")
+
+	return status
+}
+
+// asked drains what the plugin raised and counts the rounds it asked for again,
+// leaving out its readiness announcements.
+func asked(raised chan iutil.Command) int {
+	n := 0
+
+	for {
+		select {
+		case cmd := <-raised:
+			if cmd.Action == actionRoundLost {
+				n++
+			}
+		default:
+			return n
+		}
+	}
+}
+
+// TestReadyStaysUpUntilTheStreamIsLost pins /ready to the view: once a round
+// has ended it stays up through whatever only one read went through - a read
+// that failed, or one minted cold before the round ended and landing after it -
+// and comes down only with the stream, until a round ends again. The view's
+// own answers follow the same edges, and stay warm throughout.
+func TestReadyStaysUpUntilTheStreamIsLost(t *testing.T) {
+	t.Parallel()
+
+	c := newColdServer(t, Suffix("incus"))
+	ready := readyAfter(t, c.p)
+
+	raised := make(chan iutil.Command, 8)
+	c.p.commandOut = raised
+
+	warmCases := map[string]want{
+		"web.shop.incus.": {rcode: dns.RcodeSuccess},
+		"db.shop.incus.":  {rcode: dns.RcodeNameError},
+		"api.blog.incus.": {rcode: dns.RcodeNameError, forwarded: true},
+	}
+
+	c.p.fold(event(iutil.ActionConnected, "", ""))
+	c.p.fold(enriched(incusapi.EventLifecycleInstanceStarted, "shop", "web", "10.0.0.2"))
+	c.p.write()
+	assert.Equal(t, http.StatusServiceUnavailable, ready(), "ready before the round ended")
+
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.True(t, c.p.view.Ready())
+	assert.Equal(t, http.StatusOK, ready(), "the round ended")
+
+	// A read that failed, the way the enricher hands it on, and reads minted
+	// before the round ended that land after it, still stamped cold: none of
+	// them is the view going anywhere.
+	c.p.fold(event(incusapi.EventLifecycleInstanceUpdated, "pricelist", "django-1").
+		WithFailed(errors.New("enricher/read")))
+	c.p.fold(warm(event(incusapi.EventLifecycleInstanceUpdated, "pricelist", "worker-1")).
+		WithFailed(errors.New("enricher/read")))
+	c.p.fold(enriched(incusapi.EventLifecycleInstanceUpdated, "shop", "web", "10.0.0.2"))
+	c.p.fold(event(incusapi.EventLifecycleInstanceUpdated, "pricelist", "beat-1").WithDropped("enricher"))
+	c.p.write()
+
+	assert.True(t, c.p.view.Ready(), "the view went unready on one read")
+	assert.Equal(t, http.StatusOK, ready(), "/ready went down on one read")
+	c.check(t, "after the failed reads", warmCases)
+	assert.Zero(t, asked(raised), "a failed read after warm asked for a round")
+
+	// The stream going is what takes it back, and the answers stay as they are.
+	c.p.fold(event(iutil.ActionDisconnected, "", ""))
+	assert.False(t, c.p.view.Ready())
+	assert.Equal(t, http.StatusServiceUnavailable, ready(), "ready with the stream lost")
+	c.check(t, "disconnected", warmCases)
+
+	// Back, and re-read cold: still not ready until the round has ended again.
+	c.p.fold(event(iutil.ActionConnected, "", ""))
+	c.p.fold(enriched(incusapi.EventLifecycleInstanceUpdated, "shop", "web", "10.0.0.2"))
+	c.p.write()
+	assert.False(t, c.p.view.Ready())
+	assert.Equal(t, http.StatusServiceUnavailable, ready(), "ready before the round ended again")
+
+	// An end dropped on the way is asked for again here too, as before the
+	// first round, and the request coming back warm is what makes it ready.
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")).WithDropped("enricher"))
+	assert.False(t, c.p.view.Ready())
+	assert.Equal(t, http.StatusServiceUnavailable, ready(), "a dropped end of round is not one")
+	assert.Equal(t, 1, asked(raised), "the lost end was not asked for again after a reconnect")
+
+	c.p.fold(warm(event(actionRoundLost, "", "")))
+	assert.True(t, c.p.view.Ready())
+	assert.Equal(t, http.StatusOK, ready(), "the round ended again")
+	c.check(t, "warm again", warmCases)
 }
 
 // edeCodes is every RFC 8914 info code a reply carries.
