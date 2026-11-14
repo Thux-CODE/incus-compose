@@ -55,6 +55,10 @@ type Config struct {
 	// Metrics turns on the engine's counters and gauges.
 	Metrics bool
 
+	// ColdAnswers serves what the zones hold before the first round has ended.
+	// Off, those queries are SERVFAIL like a cold miss. On unless turned off.
+	ColdAnswers bool
+
 	// AllowTransfer is who may ask for a zone transfer. Empty allows nobody, so
 	// a transfer is opt-in at the listener as well as at the zone.
 	AllowTransfer []netip.Prefix
@@ -170,6 +174,10 @@ func TrustedClients(prefixes []netip.Prefix) Option {
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
 
+// ColdAnswers sets whether what the zones hold is served before the first
+// round has ended, or SERVFAIL like a cold miss.
+func ColdAnswers(v bool) Option { return func(cfg *Config) { cfg.ColdAnswers = v } }
+
 // ColdDir sets where the cold store lives. Empty writes nothing to disk.
 func ColdDir(dir string) Option { return func(cfg *Config) { cfg.ColdDir = dir } }
 
@@ -196,7 +204,8 @@ func Project(fn func(p *incusapi.Project) bool) Option {
 // listener and cold store included.
 func New(logger *slog.Logger, opts ...Option) *Plugin {
 	cfg := Config{
-		InboxSize: defaultInboxSize,
+		InboxSize:   defaultInboxSize,
+		ColdAnswers: true,
 	}
 
 	for _, opt := range opts {
@@ -208,6 +217,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	view := ecs_view.New(logger)
 	view.EchoSubnet = cfg.EchoSubnet
 	view.Metrics = cfg.Metrics
+	view.ColdAnswers = cfg.ColdAnswers
 	view.Server = cfg.Listen
 	view.Trusted = cfg.TrustedClients
 

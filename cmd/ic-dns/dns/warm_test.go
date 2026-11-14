@@ -133,6 +133,41 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 	c.check(t, "disconnected", warmCases)
 }
 
+// TestColdAnswersOffFailsTheHitsToo is the start above with --cold-answers=false:
+// before the round ends, a name it already holds - the apex and a PTR included -
+// is SERVFAIL like one it does not, so a client with a second server asks that
+// one rather than take a record from before the restart. Names outside the
+// suffix are forwarded as ever, and once warm the switch changes nothing.
+func TestColdAnswersOffFailsTheHitsToo(t *testing.T) {
+	t.Parallel()
+
+	c := newColdServer(t, Suffix("incus"), ColdAnswers(false))
+
+	c.p.fold(enriched(incusapi.EventLifecycleInstanceStarted, "shop", "web", "10.0.0.2"))
+	c.p.write()
+
+	c.check(t, "cold", map[string]want{
+		"web.shop.incus.":        {rcode: dns.RcodeServerFailure},
+		"shop.incus.":            {rcode: dns.RcodeServerFailure},
+		"2.0.0.10.in-addr.arpa.": {rcode: dns.RcodeServerFailure},
+		"db.shop.incus.":         {rcode: dns.RcodeServerFailure},
+		"api.blog.incus.":        {rcode: dns.RcodeServerFailure},
+		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
+		"8.8.8.8.in-addr.arpa.":  {rcode: dns.RcodeNameError, forwarded: true},
+	})
+
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+
+	c.check(t, "warm", map[string]want{
+		"web.shop.incus.":        {rcode: dns.RcodeSuccess},
+		"shop.incus.":            {rcode: dns.RcodeSuccess},
+		"2.0.0.10.in-addr.arpa.": {rcode: dns.RcodeSuccess},
+		"db.shop.incus.":         {rcode: dns.RcodeNameError},
+		"api.blog.incus.":        {rcode: dns.RcodeNameError, forwarded: true},
+		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
+	})
+}
+
 // TestARootSuffixClaimsNothing pins the guard on the claim: a suffix that is
 // the root would fail every name on the internet until warm.
 func TestARootSuffixClaimsNothing(t *testing.T) {

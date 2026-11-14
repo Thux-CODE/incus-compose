@@ -84,6 +84,11 @@ type config struct {
 	Metrics        bool
 	Exclude        []string
 
+	// ColdAnswers serves what is held before the first round of the fleet has
+	// ended. Off, those answers are SERVFAIL too, for a deployment listing a
+	// second server the client can ask instead.
+	ColdAnswers bool
+
 	// Log is the level every chain log position prints a routine event at, and
 	// the process's own log level. Empty leaves the positions out and the
 	// process at Info.
@@ -96,6 +101,7 @@ func newConfig() *config {
 	return &config{
 		ProjectMarker:      defaultProjectMarker,
 		ProjectMarkerValue: defaultProjectMarkerValue,
+		ColdAnswers:        true,
 	}
 }
 

@@ -2,6 +2,7 @@ package ecs_view
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"testing"
@@ -642,4 +643,98 @@ func TestColdWithoutEDNSCarriesNoOPT(t *testing.T) {
 	assert.Equal(t, dns.RcodeServerFailure, w.Msg.Rcode)
 	assert.False(t, w.Msg.Authoritative)
 	assert.Nil(t, w.Msg.IsEdns0())
+}
+
+// TestColdAnswersOffFailsEveryHit pins the switch: off, nothing inside a zone is
+// answered before warm - a hit, NODATA and the apex fail like a miss, with the
+// same shape - so a client with another server listed asks it rather than take
+// a record that may be out of date. Outside every zone nothing changes, and once
+// warm the switch makes no difference.
+func TestColdAnswersOffFailsEveryHit(t *testing.T) {
+	t.Parallel()
+
+	const falls = -1
+
+	cases := []struct {
+		name   string
+		qname  string
+		qtype  uint16
+		client string
+		on     int
+		off    int
+		warm   int
+	}{
+		{"a hit", "user-api.shop.incus.", dns.TypeA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"nodata", "user-api.shop.incus.", dns.TypeAAAA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"the apex", "shop.incus.", dns.TypeSOA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"a miss", "nope.shop.incus.", dns.TypeA, "10.0.1.10", dns.RcodeServerFailure, dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a claimed name in no zone yet", "web.blog.incus.", dns.TypeA, "10.0.1.10", dns.RcodeServerFailure, dns.RcodeServerFailure, falls},
+		{"a name outside everything", "example.org.", dns.TypeA, "10.0.1.10", falls, falls, falls},
+	}
+
+	for _, coldAnswers := range []bool{true, false} {
+		v := New(slog.Default())
+		v.Claims = []string{"incus."}
+		v.ColdAnswers = coldAnswers
+		v.Replace(testPiece())
+
+		for i, phase := range []string{"cold", "warm"} {
+			if i > 0 {
+				v.SetHealthy(true)
+			}
+
+			for _, tc := range cases {
+				want := tc.warm
+
+				switch {
+				case i > 0:
+				case coldAnswers:
+					want = tc.on
+				default:
+					want = tc.off
+				}
+
+				label := fmt.Sprintf("cold answers %t, %s, %s", coldAnswers, phase, tc.name)
+
+				handled, m := ask(t, v, tc.qname, tc.qtype, tc.client)
+
+				if want == falls {
+					assert.False(t, handled, label)
+
+					continue
+				}
+
+				require.True(t, handled, label)
+				assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[m.Rcode], label)
+
+				if m.Rcode == dns.RcodeServerFailure {
+					assert.False(t, m.Authoritative, label)
+					assert.Empty(t, m.Answer, label)
+
+					opt := m.IsEdns0()
+					require.NotNil(t, opt, label)
+					require.Len(t, opt.Option, 1, label)
+
+					ede, ok := opt.Option[0].(*dns.EDNS0_EDE)
+					require.True(t, ok, label)
+					assert.Equal(t, dns.ExtendedErrorCodeNotReady, ede.InfoCode, label)
+
+					continue
+				}
+
+				if tc.name != "a hit" {
+					continue
+				}
+
+				// Served cold, clamped; once warm, the TTL it was built with.
+				ttl := uint32(staleTTL)
+				if i > 0 {
+					ttl = testTTL
+				}
+
+				require.Len(t, m.Answer, 1, label)
+				assert.Equal(t, ttl, m.Answer[0].Header().Ttl, label)
+			}
+		}
+	}
 }

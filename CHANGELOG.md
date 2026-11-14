@@ -20,6 +20,12 @@ form.
   their address sits on, for an edge router that proxies into every project's
   own network. Matched on the source address, never on an EDNS client subnet;
   empty (the default) trusts nobody. (by @sandroden)
+- `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
+  set to `false`, names it already holds are also answered `SERVFAIL` (extended
+  error `Not Ready`) until the first complete round of the fleet, like the names
+  it cannot answer yet, so a client listing a second `ic-dns` asks that one
+  instead of taking a record that may be out of date. Keep the default with a
+  single server. (by @sandroden)
 
 ### Fixed
 

@@ -239,6 +239,13 @@ every such lookup first waits out the 5 s timeout. If another server answers
 part of the suffix through forwarding, those names fail the same way until this
 one is warm.
 
+Names it already holds are answered during that time, with a 5 s TTL. One
+carried over from before a restart, whose address changed meanwhile, can be out
+of date for those seconds. With two `ic-dns` listed, `--cold-answers=false`
+(`INCUS_COMPOSE_DNS_COLD_ANSWERS=false`) fails those too, so clients ask the
+other server instead; leave it on with a single server, where it would fail
+every internal name until warm.
+
 ---
 
 ## Labels That Configure DNS
