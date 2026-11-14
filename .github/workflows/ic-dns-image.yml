@@ -4,6 +4,8 @@
 # ghcr.io/<owner>/incus-compose/ic-dns. The tag follows the branch, so the
 # same file serves both:
 #   ic-dns-trusted-client   -> 1.4.0-trusted     (v1.4.0 + --trusted-client)
+#   ic-dns-peer-views       -> 1.4.0-peerviews.2 (the above + --peer-views, after review;
+#                                                 1.4.0-peerviews was the first cut)
 #   ic-dns-53c7e15-trusted  -> 53c7e15-trusted   (what ran from 2026-09-14)
 # plus the short commit sha, so a deployment can pin what it pulled.
 name: ic-dns image
@@ -12,6 +14,7 @@ on:
   push:
     branches:
       - ic-dns-trusted-client
+      - ic-dns-peer-views
       - ic-dns-53c7e15-trusted
   workflow_dispatch:
 
@@ -34,6 +37,7 @@ jobs:
         run: |
           case "${GITHUB_REF_NAME}" in
             ic-dns-trusted-client)  tag=1.4.0-trusted ;;
+            ic-dns-peer-views)      tag=1.4.0-peerviews.2 ;;
             ic-dns-53c7e15-trusted) tag=53c7e15-trusted ;;
             *) echo "no image tag for branch ${GITHUB_REF_NAME}" >&2; exit 1 ;;
           esac
@@ -65,6 +69,6 @@ jobs:
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
-            org.opencontainers.image.description=ic-dns with --trusted-client (Thux-CODE build of ${{ github.ref_name }})
+            org.opencontainers.image.description=ic-dns, Thux-CODE build of ${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
