@@ -339,6 +339,15 @@ whatever went wrong. Every other round is paced by one `ReadDelay`, between
 projects and networks and the instance reads alike - and `SweepInterval` sits
 between rounds, or a fleet read in no time is read again immediately, for ever.
 
+**A round that broke is tried again soon.** `SweepInterval` follows only a round
+that reached its end. One that broke - a listing of projects that failed or
+timed out, or a project whose instances could not be listed - is followed after
+a backoff instead: one second, doubling each time it breaks again, never more
+than thirty. Waiting the interval would leave what is held unconfirmed, and
+every instance read held back until a round reaches the networks, for hours. The
+end of a round, and the warm it carries, is raised as soon as one reaches its
+end, and only then.
+
 **Absence is decided against what was asked about.** The model's keys in a scope
 are recorded when that scope's listing goes out, and what is pruned is that
 record minus the listing. A name created while the request was in flight is not
@@ -353,7 +362,9 @@ their archive entries, and releasing them downstream so plugins like
 
 **A listing that failed prunes nothing.** An empty answer and a daemon that
 would not answer arrive the same way, and one of them means every name in the
-project.
+project. A failed listing of instances also keeps the round from being done:
+what that project holds has been neither confirmed nor pruned, so the round goes
+on through the other projects, then ends as one that broke.
 
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
@@ -368,6 +379,7 @@ has been all the way round; it never says what exists.
 | `InboxSize`     | 1024, matched to the Incus client's own event channel                         |
 | `ReadDelay`     | 5s between the reads of a round - projects, networks and instances alike      |
 | `SweepInterval` | 6h between the end of one round and the start of the next                     |
+| sweep retry     | 1s after a round that broke, doubling to 30s, until one reaches its end       |
 | `StoreInterval` | 5s between writes of what is held, so a start finds at most that stale        |
 | `StoreFile`     | file path for the cold store cache (`enricher-cold-store.json`), empty to off |
 | `TTL`           | 0 (disabled), duration to keep held entries valid before re-reading           |
