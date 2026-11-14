@@ -41,11 +41,11 @@ type state struct {
 	// chain is what the last event carried.
 	chain iutil.ChainState
 
-	// warm is a round having ended here, which is what turns the view warm for
-	// good; lost is when the stream last went, so a warm stamp older than that
-	// is not taken for one.
-	warm bool
-	lost time.Time
+	// fresh is a round having ended here since the stream was last lost: what
+	// turns the view healthy, and the first time warm for good. lost is when
+	// the stream last went, so a warm stamp older than that is not taken for one.
+	fresh bool
+	lost  time.Time
 }
 
 // newState builds the working copy a fold starts from, with the serials a

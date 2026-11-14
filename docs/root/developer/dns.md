@@ -424,21 +424,32 @@ read yet into final `NXDOMAIN`s:
 - a sweep-end that was not dropped. One dropped on the way - at a full enricher
   inbox, say - skipped the line and overtook the reads still in flight before
   it, so it rounds nothing;
-- while never warm, any other event stamped `ChainWarm` that was not dropped: it
-  walked the chain behind the sweep-end, so everything that round read has been
-  folded. One stamped before the last lost stream is a debounced leftover and
-  does not count.
+- while no round has ended since the stream was last lost (`state.fresh`), any
+  other event stamped `ChainWarm` that was not dropped: it walked the chain
+  behind the sweep-end, so everything that round read has been folded. One
+  stamped before the last lost stream is a debounced leftover and does not
+  count.
 
 A sweep-end that cannot be used - dropped at `dns`'s own full inbox, or arriving
 dropped - is asked for again: `dns` raises `dns/round-lost`, which enters at the
 head behind everything already in the chain and comes back stamped warm. Without
-it a quiet fleet could leave the view cold until the next round.
+it a quiet fleet could leave the view cold until the next round. After a lost
+stream the same holds for healthy: a dropped first sweep-end after the
+reconnect is asked for again too, or the view would stay unhealthy, and
+`/ready` down, until the next round.
 
-`/ready` follows the same signal. `http` turns ready on a warm event only when
-it was not dropped, and it sits after `dns`, so the event that makes it ready is
-one `dns` has already folded: `/ready` is never up while misses still fail. It
-also goes unready on a lost stream, which the answers deliberately do not
-follow.
+`/ready` follows the same signal, with the same rule. `http` turns ready on a
+warm event only when it was not dropped and was stamped after the last lost
+stream, and it sits after `dns`, so the event that makes it ready is one `dns`
+has already folded: `/ready` is never up while misses still fail. Once up, only
+a lost stream takes it back - the moment `dns` marks the view unhealthy - and
+it comes back with the next round, as healthy does. Nothing else does: an
+event stamped `ChainCold` after the round, a read that failed or was dropped,
+says when that event was minted, not what is served. A read sent before the
+round ended can land after it still stamped cold, and clearing on it left
+`/ready` at 503 until the next round, hours later. The answers stay warm
+through a lost stream, deliberately: `/ready` down is "nothing is confirming
+this", not "this is cold".
 
 ## Readiness Is An Event
 
@@ -448,8 +459,9 @@ and http holds none to it: the event goes in at the head and is folded in order
 against the events that caused it.
 
 That announcement is for whoever is watching the chain. What `/ready` itself
-latches on is `ChainState`, which rides on the same sweep-end - so the two agree
-without either plugin knowing the other exists.
+latches on is `ChainState`, which rides on the same sweep-end, and the stream's
+own `source/disconnected` - the two edges `dns` turns healthy on and off - so
+the two agree without either plugin knowing the other exists.
 
 Edges rather than a level, so whoever folds them starts not-ready - the truth
 before anything has been read.
@@ -527,9 +539,10 @@ The two answer different questions on purpose. The only sensible response to
 — it throws away everything held and answers nothing until the fleet has been
 re-read. So **a lost stream is unready, never unhealthy.**
 
-A round does not make it unready. One is always running and the server answers
-from what it published last throughout, so `/ready` stays up and nothing pulls
-the process out of rotation for it.
+A round does not make it unready, and neither does a read that failed. One is
+always running and the server answers from what it published last throughout,
+so `/ready` stays up and nothing pulls the process out of rotation for it. Once
+up it comes down only with the event stream, and back with the next round.
 
 The fleet is read a name at a time rather than all at once, so those two delays
 are what decides how long a change nothing announced goes unnoticed: roughly

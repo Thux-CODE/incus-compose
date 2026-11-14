@@ -234,7 +234,9 @@ without, so hosts the upstream resolver knows under the same suffix - the
 cluster members' own names, say - keep resolving, the empty AAAA of an IPv4-only
 node included; their `NXDOMAIN` is `SERVFAIL` instead. Names outside the suffix
 are forwarded as usual throughout, and once warm nothing changes, a lost Incus
-event stream included.
+event stream included. Only `/ready` follows a lost stream: it is 503 from the
+moment the stream goes until the next round has ended. A read that fails or
+times out, once ready, moves neither the answers nor `/ready`.
 
 With two `ic-dns` in `dns.nameservers`, glibc, musl and Go resolvers move on to
 the other one on `SERVFAIL`, so a restarting server is skipped instead of

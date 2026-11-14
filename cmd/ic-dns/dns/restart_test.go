@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,22 +45,68 @@ const (
 // until open is closed - a daemon slower than the whole cold phase - and from
 // then on answers the fleet it was given. Over a unix socket, as stalledIncus.
 type gatedIncus struct {
-	open    chan struct{}
-	release func()
+	mu sync.Mutex
+
+	// open is closed while Incus answers; cut is closed to end the event
+	// streams open now.
+	open chan struct{}
+	cut  chan struct{}
 
 	fleet map[string]*testlib.Project
+
+	// order is the fleet's projects as given, which is how they are listed:
+	// the order a run reads them in is then the test's, not the map's.
+	order []string
+
+	// fail, when set, answers a request with an error instead, the way a
+	// daemon too busy for that one read does. Set before release.
+	fail func(r *http.Request) bool
+}
+
+// gate is what a request arriving now waits on, and what ends its stream.
+func (g *gatedIncus) gate() (open, cut chan struct{}) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	return g.open, g.cut
+}
+
+// release lets every request held so far through, and those after it.
+func (g *gatedIncus) release() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	select {
+	case <-g.open:
+	default:
+		close(g.open)
+	}
+}
+
+// drop ends the event stream and holds everything again, the reconnect
+// included, until the next release: an Incus gone away for a while.
+func (g *gatedIncus) drop() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+
+	close(g.cut)
+	g.cut = make(chan struct{})
+
+	select {
+	case <-g.open:
+		g.open = make(chan struct{})
+	default:
+	}
 }
 
 func newGatedIncus(t *testing.T, fleet ...*testlib.Project) (*gatedIncus, *iclient.Connection) {
 	t.Helper()
 
-	g := &gatedIncus{open: make(chan struct{}), fleet: map[string]*testlib.Project{}}
-
-	var once sync.Once
-	g.release = func() { once.Do(func() { close(g.open) }) }
+	g := &gatedIncus{open: make(chan struct{}), cut: make(chan struct{}), fleet: map[string]*testlib.Project{}}
 
 	for _, p := range fleet {
 		g.fleet[p.Project.Name] = p
+		g.order = append(g.order, p.Project.Name)
 	}
 
 	dir, err := os.MkdirTemp("", "ic-dns-")
@@ -88,8 +135,10 @@ func newGatedIncus(t *testing.T, fleet ...*testlib.Project) (*gatedIncus, *iclie
 
 // ServeHTTP answers the handful of reads the source and the enricher make.
 func (g *gatedIncus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	open, cut := g.gate()
+
 	select {
-	case <-g.open:
+	case <-open:
 	case <-r.Context().Done():
 		return
 	}
@@ -98,14 +147,20 @@ func (g *gatedIncus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	project := g.fleet[r.URL.Query().Get("project")]
 
 	if path == "/events" {
-		g.events(w, r)
+		g.events(w, r, cut)
+
+		return
+	}
+
+	if g.fail != nil && g.fail(r) {
+		incusFailed(w)
 
 		return
 	}
 
 	if path == "/projects" {
 		names := []string{}
-		for name := range g.fleet {
+		for _, name := range g.order {
 			names = append(names, "/1.0/projects/"+name)
 		}
 
@@ -191,8 +246,9 @@ func (g *gatedIncus) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // events holds the stream open and says nothing on it: the sweep is what reads
-// the fleet, and a quiet stream is all a connected one needs to be.
-func (g *gatedIncus) events(w http.ResponseWriter, r *http.Request) {
+// the fleet, and a quiet stream is all a connected one needs to be. Closing cut
+// ends it.
+func (g *gatedIncus) events(w http.ResponseWriter, r *http.Request, cut chan struct{}) {
 	upgrader := websocket.Upgrader{}
 
 	socket, err := upgrader.Upgrade(w, r, nil)
@@ -201,6 +257,17 @@ func (g *gatedIncus) events(w http.ResponseWriter, r *http.Request) {
 	}
 
 	defer func() { _ = socket.Close() }()
+
+	done := make(chan struct{})
+	defer close(done)
+
+	go func() {
+		select {
+		case <-cut:
+			_ = socket.Close()
+		case <-done:
+		}
+	}()
 
 	// Until the listener closes its end.
 	for {
@@ -232,6 +299,18 @@ func incusMissing(w http.ResponseWriter) {
 		"type":       "error",
 		"error":      "not found",
 		"error_code": http.StatusNotFound,
+	})
+}
+
+// incusFailed is the error a daemon too busy to answer a read gives.
+func incusFailed(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusInternalServerError)
+
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"type":       "error",
+		"error":      "timed out",
+		"error_code": http.StatusInternalServerError,
 	})
 }
 
@@ -842,4 +921,93 @@ func TestARestartWithoutColdAnswersFailsTheStoreToo(t *testing.T) {
 
 	assert.Equal(t, uint32(8), r.serial(t, "shop.incus."), "the correction was not announced exactly once")
 	assert.Equal(t, uint32(4), r.serial(t, "blog.incus."), "a zone that did not move was stepped")
+}
+
+// TestARestartStaysReadyThroughAReadThatFailed is a restart whose Incus is slow
+// for a moment during the first round: web's first read fails, and the read
+// that retries it is sent before the round ends and lands after it, carrying
+// the cold stamp it was minted with. /ready stays up and the answers stay warm.
+// Only the stream going takes /ready back - the answers stay warm through that
+// too, clamped - and the next round brings it back.
+func TestARestartStaysReadyThroughAReadThatFailed(t *testing.T) {
+	t.Parallel()
+
+	r, gate := startRestart(t)
+
+	// web's first read is slow and fails, with the round's own read of web
+	// waiting on it. The retry is sent a second later, before the round ends -
+	// blog's listing, after shop's, holds the end back - and is slow enough to
+	// land after it.
+	var webReads atomic.Int32
+
+	gate.fail = func(req *http.Request) bool {
+		project := req.URL.Query().Get("project")
+
+		switch {
+		case req.URL.Path == "/1.0/instances/web" && project == "shop":
+			switch webReads.Add(1) {
+			case 1:
+				time.Sleep(300 * time.Millisecond)
+
+				return true
+			case 2:
+				time.Sleep(2 * time.Second)
+			}
+
+		case req.URL.Path == "/1.0/instances" && project == "blog":
+			time.Sleep(2500 * time.Millisecond)
+		}
+
+		return false
+	}
+
+	gate.release()
+
+	require.Eventually(t, func() bool {
+		return r.p.view.Ready() && r.readyz(t)
+	}, 20*time.Second, 10*time.Millisecond, "the first round never turned the server ready")
+
+	warmCases := func(ttl uint32) []restartCase {
+		return []restartCase{
+			{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+				restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.0.7"}, ttl: ttl}},
+			{restartQuery{name: "api.blog.incus.", qtype: dns.TypeA, from: edgeRouter},
+				restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.1.0.5"}, ttl: ttl}},
+			{restartQuery{name: "db.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+				restartWant{rcode: dns.RcodeNameError}},
+			{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+				restartWant{rcode: dns.RcodeNameError}},
+		}
+	}
+
+	// Until the retry has landed, and past it.
+	require.Eventually(t, func() bool { return webReads.Load() >= 2 }, 10*time.Second, 10*time.Millisecond)
+
+	for range 50 {
+		require.True(t, r.readyz(t), "/ready went down over a read that failed")
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	assert.True(t, r.p.view.Ready())
+	r.check(t, "after the failed read", warmCases(30))
+
+	// Incus goes away: /ready goes with it, and the answers stay, clamped.
+	gate.drop()
+
+	require.Eventually(t, func() bool {
+		return !r.readyz(t)
+	}, 10*time.Second, 10*time.Millisecond, "/ready stayed up with the stream lost")
+
+	assert.False(t, r.p.view.Ready())
+	r.check(t, "stream lost", warmCases(5))
+
+	// Back: the next round is what brings it up again.
+	gate.release()
+
+	require.Eventually(t, func() bool {
+		return r.p.view.Ready() && r.readyz(t)
+	}, 20*time.Second, 10*time.Millisecond, "the round after the reconnect never turned the server ready")
+
+	r.check(t, "warm again", warmCases(30))
 }

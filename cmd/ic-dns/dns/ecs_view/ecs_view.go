@@ -144,7 +144,8 @@ func (v *ECSView) trusts(addr netip.Addr) bool {
 }
 
 // Ready turns true once a snapshot has been published and the source reports
-// itself healthy.
+// itself healthy, and false again only when the source reports itself
+// unhealthy: warm stays where it is.
 func (v *ECSView) Ready() bool {
 	return v.published.Load() && v.healthy.Load()
 }

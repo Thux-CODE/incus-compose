@@ -289,7 +289,11 @@ here, but detecting the clash belongs to the source - see
 
 This plugin reports readiness to the _ready_ plugin. It turns ready once a
 source has published a snapshot and reports itself healthy - which is also the
-moment it turns warm.
+moment it turns warm. Only the source reporting itself unhealthy takes it back -
+for incus, a lost event stream, until a round has ended again - and warm stays:
+the answers do not go back to `SERVFAIL`. A read that failed is not the source
+going unhealthy, and neither ready nor warm moves for one. ic-dns's `/ready`
+follows the same edges.
 
 An empty fleet publishes an empty snapshot, which is not the same as never
 having published: only one of those is ready.

@@ -58,8 +58,11 @@ form.
   is passed on, records or not, so hosts the upstream knows under the suffix
   keep resolving, an empty AAAA included; an upstream `NXDOMAIN` is
   `SERVFAIL`. Names outside the suffix are forwarded, and nothing changes once
-  warm. `/ready` now turns ready only on a warm event no plugin dropped.
-  (by @sandroden)
+  warm. `/ready` now turns ready only on a warm event no plugin dropped, and
+  once ready only a lost Incus event stream takes it back, until the next
+  complete round: a failed read, or an event read before the first round ended
+  and landing after it, no longer leaves it at 503 until the next round, hours
+  later. (by @sandroden)
 
 - `ic-dns` answers a `--trusted-client` asking for an alias two instances claim
   `SERVFAIL` (`Not Ready`) instead of `NXDOMAIN` before the first complete
