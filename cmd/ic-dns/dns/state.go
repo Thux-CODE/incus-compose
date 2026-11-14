@@ -70,7 +70,12 @@ func (s *state) write(ttl uint32) bool {
 
 		prev := s.held[key]
 
+		// The same records, so the trees are left alone - but the event held is
+		// the newer one, or an instance restored from the cold store would read
+		// as restored for ever once a live read confirmed it unchanged.
 		if next != nil && prev != nil && next.Equal(prev.Event) {
+			s.held[key] = next
+
 			continue
 		}
 

@@ -2,9 +2,14 @@ package enricher
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
 	"iter"
+	"log/slog"
 	"maps"
 	"net/netip"
+	"os"
 	"slices"
 	"strings"
 
@@ -65,9 +70,9 @@ type state struct {
 	dirty bool
 }
 
-// newState prepares an empty state. The file is where the cold store will write
-// it; nothing is persisted yet.
-func newState(_ string) *state {
+// newState prepares an empty state, which is what a start with no cold store
+// to read begins from. See loadState for one that has.
+func newState() *state {
 	return &state{
 		projects: map[string]*project{},
 	}
@@ -97,9 +102,17 @@ func (s *state) clone() *state {
 // stateJSON and projectJSON are the wire form of the fleet. Their own types
 // rather than tags on the fields, so the file format is one visible thing and
 // renaming a field here is not a format change.
+//
+// Version is absent from what v1.4.0 wrote, which is the same shape as version
+// one: a missing key reads as zero and is taken for it. Anything else is a
+// format this binary does not know, and is ignored rather than migrated.
 type stateJSON struct {
+	Version  int                    `json:"version"`
 	Projects map[string]projectJSON `json:"projects"`
 }
+
+// storeVersion is the on-disk format written here.
+const storeVersion = 1
 
 type projectJSON struct {
 	// Not omitempty: a project that sets nothing writes an empty object, and one
@@ -111,7 +124,7 @@ type projectJSON struct {
 }
 
 func (s state) MarshalJSON() ([]byte, error) {
-	out := stateJSON{Projects: make(map[string]projectJSON, len(s.projects))}
+	out := stateJSON{Version: storeVersion, Projects: make(map[string]projectJSON, len(s.projects))}
 
 	for projectName, p := range s.projects {
 		out.Projects[projectName] = projectJSON{
@@ -122,6 +135,133 @@ func (s state) MarshalJSON() ([]byte, error) {
 	}
 
 	return json.Marshal(out)
+}
+
+// errStoreVersion is a file written in a format this binary does not read.
+var errStoreVersion = errors.New("unknown cold store version")
+
+// decodeState reads what a previous run wrote back into a state, as it was
+// written: which projects are still served is loadState's question.
+func decodeState(b []byte) (*state, error) {
+	var in stateJSON
+
+	err := json.Unmarshal(b, &in)
+	if err != nil {
+		return nil, err
+	}
+
+	if in.Version != 0 && in.Version != storeVersion {
+		return nil, fmt.Errorf("%w %d", errStoreVersion, in.Version)
+	}
+
+	out := newState()
+
+	for projectName, p := range in.Projects {
+		held := newProject()
+		held.config = p.Config
+
+		for instanceName, i := range p.Instances {
+			// A null written for an instance is no instance: a nil here would
+			// reach every reader that ranges over its interfaces.
+			if i != nil {
+				held.instances[instanceName] = i
+			}
+		}
+
+		for networkName, n := range p.Networks {
+			if n != nil {
+				held.networks[networkName] = n
+			}
+		}
+
+		out.projects[projectName] = held
+	}
+
+	return out, nil
+}
+
+// loadState is the fleet a previous run of this process left in path, cut down
+// to what the configuration of this one serves - or an empty state, which is
+// what a missing, unreadable or unknown file all come to. Never an error: this
+// is a cache, and starting without it costs only the wait for the first run.
+//
+// A project the predicate no longer serves - the list or the marker changed
+// between the two starts - keeps its networks, since an instance in a served
+// project may sit on one, and loses its instances and what it sets. One whose
+// configuration was never read is asked with none: a list of names still
+// answers for it, and a marker it cannot be seen to carry does not. A project
+// the certificate no longer sees cannot be told from here; the first listing of
+// the run prunes it, and the prune announces every instance it held.
+func loadState(logger *slog.Logger, path string, serves func(*incusapi.Project) bool) *state {
+	if path == "" {
+		return newState()
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			logger.Info("no cold store yet, starting cold", "plugin", name, "path", path)
+		} else {
+			logger.Warn("the cold store could not be read, starting cold",
+				"plugin", name, "path", path, "err", err)
+		}
+
+		return newState()
+	}
+
+	s, err := decodeState(b)
+	if err != nil {
+		logger.Warn("the cold store could not be decoded, starting cold",
+			"plugin", name, "path", path, "err", err)
+
+		return newState()
+	}
+
+	if serves != nil {
+		for projectName, p := range s.projects {
+			config := maps.Clone(p.config)
+			if config == nil {
+				config = map[string]string{}
+			}
+
+			if serves(&incusapi.Project{Name: projectName, ProjectPut: incusapi.ProjectPut{Config: config}}) {
+				continue
+			}
+
+			if len(p.networks) == 0 {
+				delete(s.projects, projectName)
+
+				continue
+			}
+
+			p.config = nil
+			p.instances = map[string]*iutil.Instance{}
+		}
+	}
+
+	logger.Info("restored the fleet from the cold store",
+		"plugin", name, "path", path,
+		"projects", s.projectCount(), "instances", s.instanceCount())
+
+	return s
+}
+
+// restored is every instance held, in a fixed order, which is what a start
+// replays before the first run has read any of it.
+func (s *state) restored() []subject {
+	var out []subject
+
+	for projectName, p := range s.projects {
+		for instanceName := range p.instances {
+			out = append(out, subject{project: projectName, instance: instanceName})
+		}
+	}
+
+	slices.SortFunc(out, func(a, b subject) int {
+		return strings.Compare(a.project+"/"+a.instance, b.project+"/"+b.instance)
+	})
+
+	return out
 }
 
 // resourceKey identifies one resource by its kind, and by the project that owns
@@ -540,6 +680,25 @@ func (s *state) pruneNetworks(project string, listed []string) {
 	for _, name := range missing(p.networks, listed) {
 		delete(p.networks, name)
 	}
+}
+
+// missingProjects is every instance held in a project a listing left out.
+//
+// Answered rather than deleted, for the reason missingInstances is: a project
+// that went, or one this binary no longer serves, took its instances with it,
+// and each has to reach the chain as a delete or it answers for ever.
+func (s *state) missingProjects(listed []string) []subject {
+	var out []subject
+
+	for _, projectName := range missing(s.projects, listed) {
+		names := slices.Sorted(maps.Keys(s.projects[projectName].instances))
+
+		for _, instanceName := range names {
+			out = append(out, subject{project: projectName, instance: instanceName})
+		}
+	}
+
+	return out
 }
 
 // pruneProjects drops every project a listing left out, and everything in one.

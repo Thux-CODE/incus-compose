@@ -122,11 +122,18 @@ type ptrOn struct {
 	zone string
 }
 
-// zoneSerial is what a zone was published under. Serial persists; what a zone
-// is made of is rebuilt by folding, so the rest is unexported and the cold
-// store never sees it.
+// zoneSerial is what a zone was published under. Serial and Owed persist; what
+// a zone is made of is rebuilt by folding, so the rest is unexported and the
+// cold store never sees it.
 type zoneSerial struct {
 	Serial uint32
+
+	// Owed is a change made while cold that the serial has not yet answered
+	// for: cold may not step, so the first warm publish steps once for all of
+	// them. Persisted, so a restart before that publish still owes it. Never
+	// set by the replay of what was restored, which is what the stored serial
+	// already describes.
+	Owed bool `json:"owed,omitempty"`
 
 	// dirty is a name in this zone having moved since it was last published. A
 	// serial step is a claim that the zone changed, so only a patch sets it.

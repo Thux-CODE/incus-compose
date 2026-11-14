@@ -42,6 +42,14 @@ func (p *Plugin) restartSweep(ctx context.Context) {
 func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 	switch msg.action {
 	case sweepActionProjects:
+		// Announced before the prune, the way a listing of instances is: a
+		// project that went, or one no longer served, would otherwise leave its
+		// names answering - restored ones most of all, which nothing else reads.
+		for _, s := range p.state.missingProjects(msg.names) {
+			p.accept(ctx, iutil.NewEvent(time.Now(),
+				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+		}
+
 		p.state.pruneProjects(msg.names)
 
 		// The run lists, this plugin reads: a project's own configuration is
@@ -53,6 +61,10 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				kind:    kindProject,
 				project: project,
 			})
+		}
+
+		for ev := range p.q.release() {
+			p.args.Next(ev)
 		}
 
 	case sweepActionNetworks:

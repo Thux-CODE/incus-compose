@@ -22,6 +22,10 @@ type Event struct {
 	// chainState is what the chain was when this event was made. See ChainState.
 	chainState ChainState
 
+	// restored says what is on the event came out of a cold store rather than a
+	// read in this run. See Restored.
+	restored bool
+
 	// received is when the event was decoded.
 	received time.Time
 
@@ -79,6 +83,22 @@ func (e *Event) WithChainState(state ChainState) *Event {
 	return &next
 }
 
+// Restored says the instance on this event is what a previous run of the
+// process held, put back from its cold store, and nothing in this run has read
+// it yet. The first read that lands for it carries false, even where it found
+// the same thing, so a consumer that must not act on a stale answer - a health
+// status, say - can tell the two apart and wait for that one.
+func (e *Event) Restored() bool { return e.restored }
+
+// WithRestored derives an event marked as restored from the cold store. Only
+// the plugin that owns the store calls this.
+func (e *Event) WithRestored() *Event {
+	next := *e
+	next.restored = true
+
+	return &next
+}
+
 // WithDropped marks the event finished with, naming who did it: a plugin's
 // Name, or "source/<cause>". A no-op once the event is dropped or failed.
 func (e *Event) WithDropped(by string) *Event {
@@ -105,8 +125,8 @@ func (e *Event) WithFailed(reason error) *Event {
 	return &next
 }
 
-// Equal reports whether two events say the same thing about the same subject. At and ChainState
-// are excluded: neither is about the subject.
+// Equal reports whether two events say the same thing about the same subject. At, ChainState
+// and Restored are excluded: none of them is about the subject.
 func (e *Event) Equal(other *Event) bool {
 	if e == nil || other == nil {
 		return e == other

@@ -8,7 +8,7 @@ import (
 )
 
 func TestMetricsRecordState(t *testing.T) {
-	p := &Plugin{state: newState("")}
+	p := &Plugin{state: newState()}
 	p.state.project("alpha")
 	p.state.project("beta")
 

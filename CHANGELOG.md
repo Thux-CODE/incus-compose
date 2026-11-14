@@ -30,6 +30,20 @@ form.
   cold, holding every instance read, for hours after one failed sweep. (by
   @sandroden)
 
+- `ic-dns` answers from its cold store right after a restart instead of falling
+  through to the forwarders until the first sweep of the fleet ends (12-45 s
+  against a slow Incus). The enricher reads `enricher-cold-store.json` back,
+  dropping projects the current `--project` or marker no longer serves, and
+  replays it as cold events marked `Restored`; the sweep then corrects and
+  deletes what changed or went while it was down. Zone serials no longer go
+  backwards when a zone is republished before its names are replayed, and a
+  change found while the chain is cold steps its zone's serial once the chain is
+  warm, so secondaries transfer it. An instance of a project that is no longer
+  listed, or one a read finds deleted, now reaches the chain as
+  `instance-deleted`: a project listing that succeeds empty (a certificate
+  restricted to `projects: []`) now removes every name at the first sweep, where
+  v1.4.0 kept answering. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
