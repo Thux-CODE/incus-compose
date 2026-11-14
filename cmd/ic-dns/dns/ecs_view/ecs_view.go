@@ -51,6 +51,12 @@ type ECSView struct {
 	// trusts nobody, which is the filter as it stands without this.
 	Trusted []netip.Prefix
 
+	// PeerViews answers a querier from its view's peer half too, set once
+	// before anything serves: the names on the networks its own are peered
+	// with. Off, the peer half is never looked up, which is the engine as it
+	// stands without it.
+	PeerViews bool
+
 	// current is the published snapshot.
 	current atomic.Pointer[Snapshot]
 

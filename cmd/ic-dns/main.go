@@ -262,6 +262,13 @@ func runCommand(cfg *config) *cli.Command {
 					return nil
 				},
 			},
+			&cli.BoolFlag{
+				Name: "peer-views",
+				Usage: "Answer a querier from the networks its own are peered with (incus network peer, " +
+					"Created on both sides, one hop) as well as from its own",
+				Destination: &cfg.PeerViews,
+				Sources:     cli.EnvVars("INCUS_COMPOSE_DNS_PEER_VIEWS", "DNS_PEER_VIEWS"),
+			},
 			&cli.StringSliceFlag{
 				Name:        "exclude",
 				Usage:       "Chain position(s) to leave out; only the optional ones, and an unknown name is an error",
@@ -356,6 +363,7 @@ func action(ctx context.Context, cmd *cli.Command, cfg *config) error {
 		"sweep_read_delay", cfg.ReadDelay,
 		"echo_subnet", cfg.EchoSubnet,
 		"trusted_clients", cfg.TrustedClients,
+		"peer_views", cfg.PeerViews,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)

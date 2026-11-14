@@ -1389,6 +1389,42 @@ func TestNetworkUpdatePatchesAndFansOut(t *testing.T) {
 		"and re-read means read, not guessed")
 }
 
+// TestNetworkPeerIsNotANetwork: a peer, an ACL or a forward shares the
+// "network-" prefix but names something on a network. Taken for a network, a
+// peer event would read a network called like the peer and fan out over
+// nothing; it passes through untouched instead, and the network stays known.
+func TestNetworkPeerIsNotANetwork(t *testing.T) {
+	t.Parallel()
+
+	h := seeded(t, 1, 1)
+
+	before := h.readsOf("p", testlib.InstanceName(0))
+	netBefore := h.netReadsOf("p", testlib.NetworkName(0))
+
+	for _, action := range []string{
+		incusapi.EventLifecycleNetworkPeerCreated,
+		incusapi.EventLifecycleNetworkPeerDeleted,
+		incusapi.EventLifecycleNetworkACLUpdated,
+	} {
+		h.send(action, "p", testlib.NetworkName(0))
+
+		got := h.next()
+		assert.Equal(t, action, got.Action())
+		assert.NoError(t, got.Err())
+	}
+
+	assert.Never(t, func() bool { return len(h.out) > 0 },
+		200*time.Millisecond, 20*time.Millisecond, "a peer event fanned out over the network")
+
+	assert.Equal(t, netBefore, h.netReadsOf("p", testlib.NetworkName(0)), "a peer event read the network it names")
+	assert.Equal(t, before, h.readsOf("p", testlib.InstanceName(0)), "a peer event re-read an instance")
+
+	h.stop()
+
+	_, _, known := h.p.state.network("p", testlib.NetworkName(0))
+	assert.True(t, known, "a peer event forgot the network")
+}
+
 // TestNetworkDeleteForgetsTheNetwork: the network goes, so nothing is left resolving
 // against a key that describes nothing. Nothing is on it, because Incus
 // refuses to delete a managed network anything is attached to.

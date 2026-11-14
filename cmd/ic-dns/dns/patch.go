@@ -191,6 +191,20 @@ func (s *state) backfill(fresh []ecs_view.ViewID, ttl uint32) {
 				s.addName(name, ecs_view.ViewAnswer{id: records})
 			}
 		}
+
+		// And its peer half, from everything on the networks it is peered with.
+		peer := ecs_view.PeerOf(id)
+
+		for _, inst := range s.on(s.peerKeys(id)) {
+			for name, answer := range s.contributions(inst, ttl) {
+				records, answers := answer[peer]
+				if !answers {
+					continue
+				}
+
+				s.addName(name, ecs_view.ViewAnswer{peer: records})
+			}
+		}
 	}
 }
 
@@ -200,6 +214,14 @@ func (s *state) forget(gone []ecs_view.ViewID, ttl uint32) {
 		for _, inst := range s.on(ecs_view.KeysOf(id)) {
 			for name := range s.contributions(inst, ttl) {
 				s.dropView(name, id)
+			}
+		}
+
+		peer := ecs_view.PeerOf(id)
+
+		for _, inst := range s.on(s.peerKeys(id)) {
+			for name := range s.contributions(inst, ttl) {
+				s.dropView(name, peer)
 			}
 		}
 	}
@@ -344,6 +366,11 @@ func (s *state) reverse(inst *instance, name, on string, ttl uint32) ecs_view.Vi
 		out[id] = renderPTR(name, []string{inst.names[0]}, ttl)
 	}
 
+	// A view peered with that network reads the PTR the way it reads the name.
+	for _, id := range s.peerViews(on) {
+		out[ecs_view.PeerOf(id)] = renderPTR(name, []string{inst.names[0]}, ttl)
+	}
+
 	return out
 }
 
@@ -482,6 +509,34 @@ func (s *state) records(inst *instance, name string, ttl uint32) ecs_view.ViewAn
 			slices.SortFunc(v6, netip.Addr.Compare)
 
 			out[id] = render(name, v4, v6, ttl)
+		}
+
+		// The views that see this network through a peer, under their peer half,
+		// with what they reach of this instance that way.
+		for _, id := range s.peerViews(key) {
+			peer := ecs_view.PeerOf(id)
+
+			_, done := out[peer]
+			if done {
+				continue
+			}
+
+			var v4, v6 []netip.Addr
+
+			for _, on := range s.peerKeys(id) {
+				net, reachable := inst.nets[on]
+				if !reachable {
+					continue
+				}
+
+				v4 = append(v4, net.ipv4...)
+				v6 = append(v6, net.ipv6...)
+			}
+
+			slices.SortFunc(v4, netip.Addr.Compare)
+			slices.SortFunc(v6, netip.Addr.Compare)
+
+			out[peer] = render(name, v4, v6, ttl)
 		}
 	}
 

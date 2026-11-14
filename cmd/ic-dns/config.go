@@ -73,6 +73,10 @@ type config struct {
 	// trusts nobody, which is the per-querier filter on its own.
 	TrustedClients []netip.Prefix
 
+	// PeerViews answers a querier from the networks its own are peered with,
+	// as well as from its own. Off by default.
+	PeerViews bool
+
 	// How the chain behaves.
 	TTL            uint
 	DebounceWindow time.Duration
