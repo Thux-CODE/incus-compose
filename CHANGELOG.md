@@ -20,6 +20,7 @@ form.
   their address sits on, for an edge router that proxies into every project's
   own network. Matched on the source address, never on an EDNS client subnet;
   empty (the default) trusts nobody. (by @sandroden)
+
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
   error `Not Ready`) until the first complete round of the fleet, like the names
@@ -32,6 +33,16 @@ form.
   (`<instance>.<zone>`), so a replica can be taken out of rotation before it is
   restarted or updated. Setting it back to `false` or unsetting it puts the
   replica back. Instance-only: a project setting it is ignored. (by @sandroden)
+
+### Changed
+
+- `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an
+  instance with a healthcheck starts, restarts or resumes, as docker does,
+  instead of leaving the previous run's `healthy` or `stopped` until the first
+  check. Without a `start_period` it stays `starting` until a check passes or
+  the retries run out. Status writes to one instance no longer overlap, so a
+  quick first check can no longer leave `starting` behind on a healthy instance.
+  (by @sandroden)
 
 ### Fixed
 
