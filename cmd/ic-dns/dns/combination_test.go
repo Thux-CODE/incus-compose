@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
+	incusapi "github.com/lxc/incus/v7/shared/api"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,9 +155,35 @@ func TestTheSerialStepsOnlyWhenTheZoneMoved(t *testing.T) {
 
 	assert.Equal(t, uint32(2), s.serials[zone].Serial, "cold confirmed nothing")
 
-	// And what cold left dirty is not owed a step once warm says so.
+	// But the zone did move, and a secondary holding 2 holds the old address:
+	// the first warm publish owes it one step, whatever else did or did not
+	// move by then, and only one.
 	s.step(true, 5)
-	assert.Equal(t, uint32(2), s.serials[zone].Serial)
+	assert.Equal(t, uint32(3), s.serials[zone].Serial, "a change made while cold was never announced")
+
+	s.step(true, 5)
+	assert.Equal(t, uint32(3), s.serials[zone].Serial, "a change made while cold was announced twice")
+}
+
+// TestTheReplayOwesNoStep: what the cold store restored is what the stored
+// serial was published with, so folding it back in owes a secondary nothing -
+// or every restart would have every secondary transfer every zone again.
+func TestTheReplayOwesNoStep(t *testing.T) {
+	const zone = "shop.example."
+
+	s := newState(map[string]zoneSerial{zone: {Serial: 7}})
+
+	restored := patchInstance(
+		eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", nil,
+			map[string]string{"net-a": "10.0.0.5"}).WithRestored(),
+		"example.")
+
+	s.apply("shop/web", restored, 5)
+	s.step(false, 5)
+	s.step(true, 5)
+
+	assert.Equal(t, uint32(7), s.serials[zone].Serial, "the replay claimed the zone changed")
+	assert.False(t, s.serials[zone].Owed)
 }
 
 // TestEverythingLeavingEmptiesTheTrees is the invariant a subtracting patcher

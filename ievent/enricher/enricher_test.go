@@ -98,6 +98,10 @@ type fixture struct {
 	// one key from both sides of a read.
 	own map[string]string
 
+	// gone is every project/name a read answers 404 for, the way Incus answers
+	// one deleted behind this plugin's back.
+	gone map[string]bool
+
 	// fleet is what a run finds, and listErr what its listings fail with. Nil
 	// fleet means every listing refuses, so no run ever reaches the chain.
 	fleet   *testlib.Project
@@ -331,7 +335,12 @@ func (h *fixture) answer(
 	h.reads[project+"/"+name]++
 	gate, failWith, leaseless, tag, noNIC, nic := h.gate, h.err, h.leaseless, h.tag, h.noNIC, h.nic
 	own := maps.Clone(h.own)
+	gone := h.gone[project+"/"+name]
 	h.mu.Unlock()
+
+	if gone {
+		return nil, nil, incusapi.StatusErrorf(http.StatusNotFound, "no such instance")
+	}
 
 	if gate != nil {
 		select {
@@ -1016,6 +1025,12 @@ func TestInstanceFilterDropWhenUnserved(t *testing.T) {
 	require.Equal(t, "inst-1", evUpdate.Name())
 	assert.Nil(t, evUpdate.Instance())
 
+	// Dropped from what is held, and said so: a consumer serving it would
+	// otherwise go on serving it, since nothing about it reaches the chain again.
+	evDeleted := h.next()
+	require.Equal(t, "inst-1", evDeleted.Name())
+	assert.Equal(t, incusapi.EventLifecycleInstanceDeleted, evDeleted.Action())
+
 	h.send(incusapi.EventLifecycleInstanceUpdated, "p", "inst-1")
 	select {
 	case ev := <-h.out:
@@ -1240,6 +1255,34 @@ func TestAReconnectRestartsTheRun(t *testing.T) {
 	// The instance is unchanged, so it emits nothing; the end of the run is
 	// what says a whole one ran.
 	assert.Equal(t, iutil.ActionSweepEnd, h.next().Action())
+}
+
+// TestAReadFindingAHeldInstanceGoneAnnouncesIt: a fan-out that reaches an
+// instance deleted while nobody was listening - the stream was down, or the
+// process was and the cold store put it back - finds a 404 and nothing else
+// will say so: the listing that follows has nothing left to prune.
+func TestAReadFindingAHeldInstanceGoneAnnouncesIt(t *testing.T) {
+	t.Parallel()
+
+	h := seeded(t, 1, 1)
+	name := testlib.InstanceName(0)
+
+	h.mu.Lock()
+	h.gone = map[string]bool{"p/" + name: true}
+	h.mu.Unlock()
+
+	// A profile change fans out over what is held, which is the read no event
+	// named.
+	h.send(incusapi.EventLifecycleProfileUpdated, "p", "default")
+	require.Equal(t, incusapi.EventLifecycleProfileUpdated, h.next().Action())
+
+	ev := h.next()
+	assert.Equal(t, incusapi.EventLifecycleInstanceDeleted, ev.Action())
+	assert.Equal(t, name, ev.Name())
+
+	h.stop()
+
+	assert.Nil(t, h.p.state.instance("p", name))
 }
 
 // TestGoneIsNotAFailure: an instance read after it went is the ordinary race

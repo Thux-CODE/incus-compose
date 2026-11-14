@@ -214,9 +214,10 @@ it - the fan-out is where a fleet-sized burst of "nothing changed" comes from.
 `Event.Equal` is structural rather than a hash: a collision would read a real
 change as a repeat, and this is two events rather than a fleet. It leaves out
 what is not about the subject - when the event was decoded, what the chain was
-doing, and a plugin's own values. Two things it deliberately keeps: the action,
-so a stop is never absorbed by the update before it, and whether a read landed,
-because "no networks" and "nobody asked for networks" are different answers.
+doing, whether the answer was restored from the cold store, and a plugin's own
+values. Two things it deliberately keeps: the action, so a stop is never
+absorbed by the update before it, and whether a read landed, because "no
+networks" and "nobody asked for networks" are different answers.
 
 **An event that says nothing new goes nowhere**, whoever sent it. Most of what a
 busy fleet emits is one: `volatile.*` is stripped before the comparison, so a
@@ -349,7 +350,21 @@ back: the next round reads it unchanged and emits nothing.
 have has gone. The enricher creates synthetic `instance-deleted` events for
 missing instances and passes them through `accept`, updating the model, dropping
 their archive entries, and releasing them downstream so plugins like
-[[developer/dns|dns]] and `checker` learn about the deletes.
+[[developer/dns|dns]] and `checker` learn about the deletes. The listing of
+projects does the same for every instance of a project it left out - one that
+went, or one this binary no longer serves - before the project is dropped.
+
+That includes a listing that succeeded and is empty, which is what a certificate
+restricted to `projects: []` answers - and what one restricted to a project that
+was deleted and created again is left with. Every name goes at the first round,
+where v1.4.0 dropped the projects from what it held without telling the chain
+and kept answering.
+
+So does a read that finds an instance it held gone: a 404, or one the `Instance`
+predicate no longer serves. A live delete may be on its way with the same news,
+but one that happened while the stream or the process was down is not, and a
+fan-out that reaches it before the listing leaves the listing nothing to prune.
+A second delete for one name changes nothing downstream.
 
 **A listing that failed prunes nothing.** An empty answer and a daemon that
 would not answer arrive the same way, and one of them means every name in the
@@ -358,6 +373,39 @@ project.
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
 has been all the way round; it never says what exists.
+
+## A Start Replays What The Last One Held
+
+With `StoreFile` set, what is held is written every `StoreInterval` and once on
+the way down, and read back by the next start in `New`. A file that is missing,
+cannot be decoded, or carries a `version` this binary does not know starts cold
+with a log line, the way a start without a store does; a file with no `version`
+at all is what v1.4.0 wrote, and is the same shape as version 1.
+
+What is read back is cut to the configuration of this start before anything sees
+it: a project the `Project` predicate no longer serves - `--project` or the
+marker changed between the two starts - keeps its networks, which an instance in
+a served project may sit on, and loses its instances and its configuration. A
+project whose configuration was never read cannot be asked and goes the same
+way. A project the certificate no longer sees cannot be told from the file; the
+first listing of projects prunes it, and announces every instance it held.
+
+Before the first round starts, `Run` hands on every instance held as the
+`instance-updated` a read of it would have made, with its instance and project
+attached, stamped `ChainCold` and marked `Restored`, and files each in the
+archive. A consumer serves it at once, and one that must not act on a stale
+answer can tell it from a read: **the round's first read of each instance is
+handed on once even where nothing changed**, carrying `Restored` false, and
+after that an unchanged read goes no further, as before. Whatever moved while
+the process was down the round corrects like any other change, and whatever went
+it deletes.
+
+A first round that breaks leaves the replay standing, unconfirmed, until one
+reaches its end; how soon the next is tried is the sweep retry's business.
+
+The replay goes through the successor's `Handle` in one burst. A fleet larger
+than the successor's inbox (1024 by default) has the excess dropped there; the
+round brings each of those back as a read that differs from the restored one.
 
 ## The Numbers
 
@@ -369,7 +417,7 @@ has been all the way round; it never says what exists.
 | `ReadDelay`     | 5s between the reads of a round - projects, networks and instances alike      |
 | `SweepInterval` | 6h between the end of one round and the start of the next                     |
 | `StoreInterval` | 5s between writes of what is held, so a start finds at most that stale        |
-| `StoreFile`     | file path for the cold store cache (`enricher-cold-store.json`), empty to off |
+| `StoreFile`     | the cold store (`enricher-cold-store.json`), read back at start; empty is off |
 | `TTL`           | 0 (disabled), duration to keep held entries valid before re-reading           |
 | `Metrics`       | false, enables Prometheus counters and gauges                                 |
 | repair delay    | 1s, three attempts per key, then one every 5s for as long as it keeps failing |

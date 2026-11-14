@@ -240,7 +240,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		sweeps: sweeps,
 
 		q:       &queue{},
-		state:   newState(o.StoreFile),
+		state:   loadState(logger, o.StoreFile, o.Project),
 		reads:   newDeferred(o.Workers, o.ReadTimeout),
 		retries: newRetries(),
 		archive: archive{},
@@ -371,6 +371,11 @@ func (p *Plugin) Run(ctx context.Context) error {
 		}
 	}()
 
+	// Ahead of the first run, which is the point: what the last run of this
+	// process held answers until this one has read it again, rather than
+	// nothing answering until it has.
+	p.replay()
+
 	runSweeper(sweepCtx, p.logger, p.sweepArgs(), p.opts.SweepInterval)
 
 	if p.storeIn != nil {
@@ -466,6 +471,37 @@ func (p *Plugin) Run(ctx context.Context) error {
 			p.reads.retry(ctx)
 		}
 	}
+}
+
+// replay hands on every instance the cold store restored, each as the
+// instance-updated a read of it would have made, marked restored and stamped
+// cold: nothing in this run has confirmed any of it.
+//
+// Filed in the archive like any event emitted here, so the run's read of an
+// instance that has not changed is news once - it is the first fresh answer,
+// and a consumer waiting on one has to see it - and then no more. What has
+// changed, or gone, the run corrects the way it would anything else.
+func (p *Plugin) replay() {
+	want := p.args.Wanted[incusapi.EventLifecycleInstanceUpdated].Enrich
+	if want&wantsInstanceRead == 0 {
+		return
+	}
+
+	for _, s := range p.state.restored() {
+		// Whole, the way settleRead hands on every read that lands, or the run's
+		// read of an unchanged instance would differ from this by more than
+		// where it came from.
+		ev := p.withProject(iutil.NewEvent(time.Now(),
+			incusapi.EventLifecycleInstanceUpdated, s.project, s.instance, "").
+			WithChainState(iutil.ChainCold).
+			WithInstance(p.state.instance(s.project, s.instance), true).
+			WithRestored())
+
+		p.archive.changed(ev)
+		p.args.Next(ev)
+	}
+
+	p.updateMetrics()
 }
 
 // withProject attaches the project's own configuration out of the state, not a
@@ -617,6 +653,18 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 			p.q.push(syn, true)
 		}
 	}
+
+	// Held before this read and not after it: Incus no longer has it, or no
+	// longer serves it. A live delete may be on its way with the same news, but
+	// one that happened while the stream was down - or this process was, and
+	// the cold store put it back - is not, and a fan-out reaching it first
+	// leaves the listing nothing to prune. Announced here, then, the way a
+	// prune does; a second delete for the same name changes nothing.
+	if had && landed && p.state.instance(c.project, c.name) == nil {
+		p.q.push(iutil.NewEvent(time.Now(),
+			incusapi.EventLifecycleInstanceDeleted, c.project, c.name, "").
+			WithChainState(p.chain), true)
+	}
 }
 
 // accept puts one event in the line, issuing whatever read it needs first.
@@ -756,7 +804,8 @@ func (p *Plugin) patchState(
 	case err == nil:
 
 	case incusapi.StatusErrorCheck(err, http.StatusNotFound):
-		// Read after it went; the delete is on its way with the same news.
+		// Read after it went. settleRead announces the delete where this held
+		// it, since one that went while nobody listened has no event coming.
 		p.state.deleteInstance(project, name)
 		p.retries.done(project, name)
 		p.archive.forget(project, name)

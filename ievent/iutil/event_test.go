@@ -66,6 +66,14 @@ func TestEqual(t *testing.T) {
 			equal: true,
 		},
 		{
+			// Where the answer came from is not what it says: a restored read
+			// that a live one confirms is the same instance, and the consumer
+			// that cares asks Restored.
+			name:  "restored from the cold store",
+			other: func() *Event { return base().WithRestored() },
+			equal: true,
+		},
+		{
 			// Included on purpose: a stop whose transition an update already
 			// absorbed still has to reach whoever is counting stops.
 			name: "another action about the same instance",

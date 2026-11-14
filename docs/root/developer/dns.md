@@ -204,6 +204,17 @@ zone changed, and cold has confirmed nothing, so it has no standing to make one.
 Its first publish is a birth rather than a step, since a secondary reads zero as
 "no zone here".
 
+What changes while cold is **owed** instead: the zone is marked, and the first
+publish once warm steps it once, however many changes it collected. Without it a
+secondary already holding the serial would keep what that serial described - an
+address the first round after a restart or a reconnect corrected - until a later
+change happened to step it. The replay of what the cold store restored, landing
+where nothing was held, owes nothing: it is what the stored serial was published
+with. The mark goes to the cold store with the serial, so a restart before the
+first warm publish still owes the step. A zone born cold may be stepped once
+more when warm, since the names it collected after its birth were not confirmed
+either.
+
 The plugin stamps it because it is the only thing that knows what it published
 last - the engine is a read-only view and holds nothing to compare against.
 
@@ -258,6 +269,29 @@ With `ColdDir` set, every zone's serial is written to disk. Records come back
 from the enricher's own store or an Incus fleet read; a serial cannot be
 recovered from anywhere, and a secondary reading one going backwards
 re-transfers on every restart of this process. Serials are the whole of it.
+
+On a restart the enricher replays what it held before it has read anything, as
+`instance-updated` events stamped cold and marked `Restored`, so names are
+answered from the first publish - one `publishWindow` after the start - rather
+than falling through to the forwarders until the first round ends. Nothing is
+`Ready` and every answer is clamped until that round does, and no serial moves
+while cold: a zone comes back under the serial it was stored with. A zone whose
+names have not come back by a publish stops being served but keeps its serial
+until the chain is warm - the replay may simply not have reached it yet, and
+forgetting it would publish it at 1. Once warm, a zone nothing came back to is
+gone, serial and all.
+
+A read in this run that finds what was restored changes no record and moves no
+serial, but replaces the event held for that instance, so what is held stops
+reading as restored. What the round finds changed while the process was down is
+published at once under the serial the zone was stored with, and owed one step
+at the first warm publish (see Zone Serials), which is when a secondary
+transfers it.
+
+How long that takes is how long the first round takes. One that breaks - Incus
+refusing the listings at start, say - leaves the restored names served, clamped
+and not `Ready`, until a round reaches its end; how soon one is tried again is
+the enricher's (see the sweep retry in [[developer/ievent/enricher|enricher]]).
 
 Encoding happens on the fold goroutine and writing on its own, so a slow disk
 cannot stall the chain. What crosses between them is a finished `[]byte`, which
