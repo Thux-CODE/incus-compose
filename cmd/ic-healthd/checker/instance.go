@@ -165,6 +165,15 @@ type instance struct {
 	// happens on a transition. Discovery refreshes it.
 	status string
 
+	// writing says a status write is in flight. One at a time per instance:
+	// two racing writes land in any order, and the one that loses would stay
+	// on the instance while status says the other.
+	writing bool
+
+	// queued is the status asked for while a write was in flight, written
+	// once it lands.
+	queued string
+
 	// restartDelay doubles per restart; a healthy check rebases it.
 	restartDelay time.Duration
 }
@@ -413,6 +422,7 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 
 		// It is running again, whoever did it, so a queued restart is moot.
 		instanceStarted(inst, time.Now())
+		reportStarting(ctx, logger, conn, ev.ProjectName(), results, inst)
 
 	case incusApi.EventLifecycleInstanceStopped, incusApi.EventLifecycleInstanceShutdown:
 		inst, err := saveInstance(instances, ev)
@@ -657,6 +667,32 @@ func reportStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connec
 
 	// Recorded before the write lands, so two writes in flight cannot invert.
 	inst.status = status
+
+	if inst.writing {
+		inst.queued = status
+
+		return
+	}
+
+	writeStatus(ctx, logger, conn, project, results, inst, status)
+}
+
+// reportStarting marks a freshly started instance starting, as docker does: it
+// has no verdict until its first check, and whatever was on it before - the
+// last run's healthy, or stopped - is not one about this run. An instance with
+// nothing to run has nothing to wait for.
+func reportStarting(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance) {
+	if len(inst.config.test) == 0 || inst.config.test[0] == "NONE" {
+		return
+	}
+
+	reportStatus(ctx, logger, conn, project, results, inst, shared.HealthStatusStarting)
+}
+
+// writeStatus starts one status write. Its result is what clears writing and
+// sends whatever was queued behind it.
+func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance, status string) {
+	inst.writing = true
 
 	go func(name string) {
 		res := instanceStatusAction(ctx, logger, conn, project, name, status)
@@ -967,25 +1003,34 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 			restartsTotal.WithLabelValues("success").Inc()
 		}
 		instanceStarted(inst, time.Now())
+		reportStarting(ctx, logger, conn, res.project, results, inst)
 	case instanceResultStatus:
 		inst, ok := instances[res.Key()]
 		if !ok {
 			return
 		}
 
+		inst.writing = false
+
+		queued := inst.queued
+		inst.queued = ""
+
 		if res.err != nil {
 			logger.Warn("Writing the health status failed",
 				"instance", res.name, "status", res.status, "error", res.err)
 
 			// Nothing landed, so forget what reportStatus recorded.
-			if inst.status == res.status {
+			if queued == "" && inst.status == res.status {
 				inst.status = ""
 			}
-
-			return
+		} else {
+			// Only transitions get here, so this stays quiet on a healthy fleet.
+			logger.Info("Health status", "project", res.project, "instance", res.name, "status", res.status)
 		}
 
-		// Only transitions get here, so this stays quiet on a healthy fleet.
-		logger.Info("Health status", "project", res.project, "instance", res.name, "status", res.status)
+		// What was asked for meanwhile, unless it is what just landed.
+		if queued != "" && (queued != res.status || res.err != nil) {
+			writeStatus(ctx, logger, conn, res.project, results, inst, queued)
+		}
 	}
 }

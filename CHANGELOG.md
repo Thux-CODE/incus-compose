@@ -11,6 +11,18 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Changed
+
+- `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an
+  instance with a healthcheck starts, restarts or resumes, as docker does,
+  instead of leaving the previous run's `healthy` or `stopped` until the first
+  check. Without a `start_period` it stays `starting` until a check passes or
+  the retries run out. Status writes to one instance no longer overlap, so a
+  quick first check can no longer leave `starting` behind on a healthy instance.
+  (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
