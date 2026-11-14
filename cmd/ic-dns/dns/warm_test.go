@@ -3,6 +3,7 @@ package dns
 import (
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,7 +17,8 @@ import (
 )
 
 // hostResolved is the one name coldServer's forwarder knows: a cluster node
-// under the suffix, which no project zone holds.
+// under the suffix, which no project zone holds. It has an IPv4 address and no
+// IPv6 one, so its AAAA is NODATA, as the uplink's dnsmasq answers it.
 const hostResolved = "i1.incus."
 
 // want is what one query should get: an rcode, and whether it reached the
@@ -29,8 +31,8 @@ type want struct {
 // coldServer is a plugin answering through the adapter, with a forwarder after
 // it that answers NXDOMAIN for everything - what a public resolver says about a
 // name under a suffix it does not serve - but hostResolved, a cluster node
-// sharing the suffix that the uplink's dnsmasq resolves. Nothing has been
-// folded yet.
+// sharing the suffix that the uplink's dnsmasq resolves: an A record, and
+// NODATA for anything else. Nothing has been folded yet.
 type coldServer struct {
 	p         *Plugin
 	a         *adapter
@@ -52,10 +54,13 @@ func newColdServer(t *testing.T, opts ...Option) *coldServer {
 
 			if r.Question[0].Name == hostResolved {
 				m.SetReply(r)
-				m.Answer = []dns.RR{&dns.A{
-					Hdr: dns.RR_Header{Name: hostResolved, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-					A:   net.IPv4(10, 0, 4, 1),
-				}}
+
+				if r.Question[0].Qtype == dns.TypeA {
+					m.Answer = []dns.RR{&dns.A{
+						Hdr: dns.RR_Header{Name: hostResolved, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+						A:   net.IPv4(10, 0, 4, 1),
+					}}
+				}
 			}
 
 			_ = w.WriteMsg(m)
@@ -69,16 +74,25 @@ func newColdServer(t *testing.T, opts ...Option) *coldServer {
 	return c
 }
 
-// check asks every name, as an A or a PTR by its form, from an address the
-// fixtures place.
+// check asks every name, as an A or a PTR by its form unless a type comes
+// first ("AAAA name"), from an address the fixtures place.
 func (c *coldServer) check(t *testing.T, phase string, cases map[string]want) {
 	t.Helper()
 
-	for name, want := range cases {
-		r := subnetQuery(name, "10.0.0.2")
+	for key, want := range cases {
+		name := key
+
+		qtype := dns.TypeA
 		if dns.IsSubDomain("arpa.", name) {
-			r.Question[0].Qtype = dns.TypePTR
+			qtype = dns.TypePTR
 		}
+
+		if typ, rest, ok := strings.Cut(key, " "); ok {
+			name, qtype = rest, dns.StringToType[typ]
+		}
+
+		r := subnetQuery(name, "10.0.0.2")
+		r.Question[0].Qtype = qtype
 
 		before := c.forwarded
 
@@ -121,6 +135,11 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 		"shop.incus.":       {rcode: dns.RcodeSuccess},
 		"web.shop.incus.x.": {rcode: dns.RcodeNameError, forwarded: true},
 
+		// The node's NODATA says the forwarder holds the name, so it is passed
+		// on as well: on musl a SERVFAIL for either half of an A+AAAA pair
+		// fails the whole lookup.
+		"AAAA " + hostResolved: {rcode: dns.RcodeSuccess, forwarded: true},
+
 		// A reverse zone exists once an address in it has been read, and a
 		// miss in it is one more name not read yet. Outside it, nothing claims
 		// the address.
@@ -138,6 +157,7 @@ func TestColdFailsWhatItMayNotHaveReadYet(t *testing.T) {
 		"db.shop.incus.":         {rcode: dns.RcodeNameError},
 		"api.blog.incus.":        {rcode: dns.RcodeNameError, forwarded: true},
 		hostResolved:             {rcode: dns.RcodeSuccess, forwarded: true},
+		"AAAA " + hostResolved:   {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
 		"9.0.0.10.in-addr.arpa.": {rcode: dns.RcodeNameError},
 		"8.8.8.8.in-addr.arpa.":  {rcode: dns.RcodeNameError, forwarded: true},
@@ -174,6 +194,7 @@ func TestColdAnswersOffFailsTheHitsToo(t *testing.T) {
 		"db.shop.incus.":         {rcode: dns.RcodeServerFailure},
 		"api.blog.incus.":        {rcode: dns.RcodeServerFailure, forwarded: true},
 		hostResolved:             {rcode: dns.RcodeSuccess, forwarded: true},
+		"AAAA " + hostResolved:   {rcode: dns.RcodeSuccess, forwarded: true},
 		"www.example.com.":       {rcode: dns.RcodeNameError, forwarded: true},
 		"8.8.8.8.in-addr.arpa.":  {rcode: dns.RcodeNameError, forwarded: true},
 	})

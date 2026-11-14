@@ -191,21 +191,25 @@ error `Not Ready` (14) when the query carries EDNS (none when it does not):
   trusted querier as for anybody: the claimant that has to go may only not have
   been read yet;
 - a name under one of `Claims` that no zone holds yet, unless the next plugin
-  answers it with records. A source sets `Claims` to the domains it serves
-  before any zone in them has been published: for _incus_, the suffix project
-  zones are built under.
+  answers it `NOERROR` or truncated. A source sets `Claims` to the domains it
+  serves before any zone in them has been published: for _incus_, the suffix
+  project zones are built under.
 
 A name of the last kind is still handed to the next plugin, as a warm miss would
-be, with the reply caught instead of written. A `NOERROR` holding records is
-passed on as it came - for _incus_, a cluster node named under the same suffix
-that the uplink's resolver knows keeps resolving across a restart. `NXDOMAIN`,
-`NODATA`, a failure, or no reply at all may be a zone not read yet, and is
-`SERVFAIL` as above. A zone invented for an alias (`Shadowing`) counts only for
-the names it holds, so a miss in it is asked the same way. Asking costs what a
-warm miss costs: a forwarder that does not answer holds the query up to its own
-timeout - 5 s for CoreDNS's _forward_ - before the `SERVFAIL`. Reverse names are
-not under a claim: a miss in a reverse zone is a miss in a zone, and an address
-outside every one falls through as usual.
+be, with the reply caught instead of written. A `NOERROR` is passed on as it
+came, records or not - for _incus_, a cluster node named under the same suffix
+that the uplink's resolver knows keeps resolving across a restart. `NODATA`
+counts too: it says the name exists upstream, so it is no zone of ours, and a
+`SERVFAIL` for the AAAA of an IPv4-only node would fail the node's whole lookup
+on musl, which asks for A and AAAA together. A truncated reply is passed on
+whatever its rcode, so the client asks again over TCP and that reply is judged
+on its own. `NXDOMAIN`, any other rcode, a failure, or no reply at all may be a
+zone not read yet, and is `SERVFAIL` as above. A zone invented for an alias
+(`Shadowing`) counts only for the names it holds, so a miss in it is asked the
+same way. Asking costs what a warm miss costs: a forwarder that does not answer
+holds the query up to its own timeout - 5 s for CoreDNS's _forward_ - before the
+`SERVFAIL`. Reverse names are not under a claim: a miss in a reverse zone is a
+miss in a zone, and an address outside every one falls through as usual.
 
 Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy -
 unless `ColdAnswers` is off. Anything outside every zone and every claim falls
@@ -233,8 +237,8 @@ round fills them.
 
 A claim is the whole domain. Where another server answers part of it - a second
 `ic-dns` serving other projects under the same suffix, reached by forwarding -
-its answers with records are passed on while this view is cold, and its
-`NXDOMAIN` and `NODATA` are `SERVFAIL` here until warm.
+its `NOERROR` answers, `NODATA` included, are passed on while this view is
+cold, and its `NXDOMAIN` is `SERVFAIL` here until warm.
 
 `SERVFAIL` because, unlike `NXDOMAIN`, the common stub resolvers do not take it
 as final where another server is listed. What they do with it, measured:

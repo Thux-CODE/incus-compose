@@ -288,8 +288,12 @@ func (v *ECSView) claimed(qname string) bool {
 // askNext is a cold miss under a claim that no zone we know holds: either a
 // name the next plugin resolves - the hosts of the cluster under the same
 // suffix, say - or one in a project not read yet. It goes where a warm miss
-// would, with the reply caught rather than written. Only an answer with records
-// in it is passed on: NXDOMAIN, NODATA, a failure or nothing written may just as
+// would, with the reply caught rather than written. A NOERROR is passed on as it
+// came, records or not: NODATA says upstream holds the name, so it is no project
+// of ours, and failing it would fail a whole lookup on musl, which asks for A
+// and AAAA at once and gives up on either's SERVFAIL. So is a truncated reply,
+// whatever it says, so the client asks again over TCP and that reply is judged
+// on its own. NXDOMAIN, another rcode, a failure or nothing written may just as
 // well be the project not read yet, so those fail like any other cold miss.
 func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
 	if v.Next == nil {
@@ -301,7 +305,7 @@ func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
 	_, err := v.Next.ServeDNS(ctx, caught, r)
 
 	got := caught.Msg
-	if err != nil || got == nil || got.Rcode != dns.RcodeSuccess || len(got.Answer) == 0 {
+	if err != nil || got == nil || (got.Rcode != dns.RcodeSuccess && !got.Truncated) {
 		return v.notReady(w, r, opt)
 	}
 
