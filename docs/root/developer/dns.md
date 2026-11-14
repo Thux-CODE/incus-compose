@@ -365,8 +365,10 @@ date: an address changed while the server was down is served as a final
   at all.
 - **off**: every query inside a zone of ours is `SERVFAIL` until warm, in the
   same shape as a cold miss - extended error `Not Ready`, `AA` unset, counted as
-  `servfail`, reverse zones included. There is no per-record provenance: a name
-  read since the start fails along with one carried over from before it.
+  `servfail`, reverse zones and a `--trusted-client` included: the router's
+  answer from every view is as old as anybody's. There is no per-record
+  provenance: a name read since the start fails along with one carried over from
+  before it.
 
 Turn it off only when every client lists a second `ic-dns`: glibc, musl and Go
 then ask the other one instead of taking a stale record. With a single server it

@@ -484,15 +484,12 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-// TestARestartServesTheColdStoreUntilTheFleetIsRead is a restart end to end,
-// with the three things it touches at once: the enricher's store replayed, the
-// misses failed until warm, and a trusted router answered from every view.
-//
-// The store holds shop (web, db, both claiming www) and blog (api). Incus says
-// nothing until the cold phase has been asked; then it answers that web moved
-// and db is gone.
-func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
-	t.Parallel()
+// startRestart is a restart with Incus still silent: the enricher's store holds
+// shop (web, db, both claiming www) and blog (api), with serials 7 and 4, and the
+// chain has replayed it. Once released, Incus answers that web moved and db is
+// gone. opts are added to what main would pass.
+func startRestart(t *testing.T, opts ...Option) (*restartRig, *gatedIncus) {
+	t.Helper()
 
 	dir := t.TempDir()
 
@@ -544,13 +541,13 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 		enricher.StoreFile(store),
 	)
 
-	r.p = New(slog.Default(),
+	r.p = New(slog.Default(), append([]Option{
 		Suffix("incus"),
 		TTL(30),
 		ColdDir(dir),
 		TrustedClients([]netip.Prefix{netip.MustParsePrefix(edgeRouter + "/32")}),
 		Chain([]plugin.Plugin{func(plugin.Handler) plugin.Handler { return upstream }}),
-	)
+	}, opts...)...)
 	r.a = &adapter{logger: slog.Default(), chain: r.p.xfr}
 
 	h := ihttp.New(slog.Default(), ihttp.Listen(r.ready))
@@ -574,21 +571,39 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 	wg.Go(func() { _ = r.p.Run(ctx) })
 	wg.Go(func() { _ = h.Run(ctx) })
 
-	// The replay is folded in windows: wait for every restored name, asked
-	// straight at the engine, which needs nothing Run wires. A snapshot seen here
-	// was published after the wiring, so the adapter is safe from here on.
+	// The replay is folded in windows: wait for every restored name in what was
+	// published, which the engine got first and which may not be answered from
+	// at all yet. A snapshot seen here was published after the wiring, so the
+	// adapter is safe from here on.
 	require.Eventually(t, func() bool {
-		for _, name := range []string{"web.shop.incus.", "db.shop.incus.", "api.blog.incus."} {
-			w := &fromAddr{from: net.ParseIP(edgeRouter)}
+		snap := r.p.xfr.current.Load()
+		if snap == nil {
+			return false
+		}
 
-			handled, _, err := r.p.view.Answer(t.Context(), w, query(name))
-			if err != nil || !handled || w.msg == nil || len(w.msg.Answer) == 0 {
+		for _, name := range []string{"web.shop.incus.", "db.shop.incus.", "api.blog.incus."} {
+			answers, held := snap.Answers(name)
+			if !held || len(answers) == 0 {
 				return false
 			}
 		}
 
 		return true
-	}, 10*time.Second, 10*time.Millisecond, "the cold store was not served while Incus was silent")
+	}, 10*time.Second, 10*time.Millisecond, "the cold store was not published while Incus was silent")
+
+	return r, gate
+}
+
+// TestARestartServesTheColdStoreUntilTheFleetIsRead is a restart end to end,
+// with the three things it touches at once: the enricher's store replayed, the
+// misses failed until warm, and a trusted router answered from every view.
+//
+// Incus says nothing until the cold phase has been asked; then it answers that
+// web moved and db is gone.
+func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
+	t.Parallel()
+
+	r, gate := startRestart(t)
 
 	const stale = 5
 
@@ -710,6 +725,82 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 	})
 
 	// What the round corrected is announced once, and only where it moved.
+	assert.Equal(t, uint32(8), r.serial(t, "shop.incus."), "the correction was not announced exactly once")
+	assert.Equal(t, uint32(4), r.serial(t, "blog.incus."), "a zone that did not move was stepped")
+}
+
+// TestARestartWithoutColdAnswersFailsTheStoreToo is the same restart with
+// --cold-answers=false: nothing the replay restored is answered before the round
+// ends - a hit, a PTR, the apex, and the trusted router's answers from every
+// view included - so a client with a second server asks that one rather than
+// take web's address from before the restart. Outside the suffix the forwarder
+// answers as ever, and once warm the answers are the ones the default gives.
+func TestARestartWithoutColdAnswersFailsTheStoreToo(t *testing.T) {
+	t.Parallel()
+
+	r, gate := startRestart(t, ColdAnswers(false))
+
+	r.check(t, "cold", []restartCase{
+		// Held, and failed all the same: the address is the one from before.
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, plain: true},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "5.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "shop.incus.", qtype: dns.TypeSOA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeServerFailure}},
+
+		// The misses, as before.
+		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeServerFailure}},
+
+		// The trusted router gets nothing from the store either.
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "api.blog.incus.", qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "6.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, from: edgeRouter},
+			restartWant{rcode: dns.RcodeServerFailure}},
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, from: edgeRouter, plain: true},
+			restartWant{rcode: dns.RcodeServerFailure}},
+
+		// Outside the suffix nothing is claimed, switch or no switch.
+		{restartQuery{name: "www.example.com.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeNameError, forwarded: true}},
+		{restartQuery{name: "www.example.com.", qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeNameError, forwarded: true}},
+	})
+
+	assert.False(t, r.readyz(t), "/ready before Incus answered anything")
+
+	gate.release()
+
+	require.Eventually(t, func() bool {
+		return r.p.view.Ready() && r.readyz(t)
+	}, 20*time.Second, 10*time.Millisecond, "the first round never turned the server ready")
+
+	r.check(t, "warm", []restartCase{
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.0.7"}, ttl: 30}},
+		{restartQuery{name: "7.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"web.shop.incus."}, ttl: 30}},
+		{restartQuery{name: "www.shop.incus.", qtype: dns.TypeCNAME, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"web.shop.incus."}, ttl: 30}},
+		{restartQuery{name: "db.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeNameError}},
+		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeNameError}},
+		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, subnet: shopQuerier},
+			restartWant{rcode: dns.RcodeNameError, forwarded: true}},
+		{restartQuery{name: "api.blog.incus.", qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.1.0.5"}, ttl: 30}},
+		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.0.7"}, ttl: 30}},
+	})
+
 	assert.Equal(t, uint32(8), r.serial(t, "shop.incus."), "the correction was not announced exactly once")
 	assert.Equal(t, uint32(4), r.serial(t, "blog.incus."), "a zone that did not move was stepped")
 }

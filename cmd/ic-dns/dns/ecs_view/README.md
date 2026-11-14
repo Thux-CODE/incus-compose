@@ -204,14 +204,14 @@ being read.
 serves) decides what happens to what a zone does hold before warm. On, it is
 answered: with a single server a name that may be a few seconds out of date
 beats no name at all. Off, every query inside a zone - hit, `NODATA` and apex
-included - is `SERVFAIL` in exactly the shape of a cold miss, `Not Ready` and
-the `servfail` counter included. There is no telling a record read since the
-start from one carried over from before it, so it is all of them. Turn it off
-where every client lists a second server: a source that replays what it held
-before a restart publishes records that may be out of date - an address changed
-while the server was down is served as a final `NOERROR` until a read replaces
-it - and failing them sends the client to the other server instead. Names
-outside every zone are not touched by it.
+included, from a querier in `Trusted` as from anybody - is `SERVFAIL` in exactly
+the shape of a cold miss, `Not Ready` and the `servfail` counter included. There
+is no telling a record read since the start from one carried over from before
+it, so it is all of them. Turn it off where every client lists a second server:
+a source that replays what it held before a restart publishes records that may
+be out of date - an address changed while the server was down is served as a
+final `NOERROR` until a read replaces it - and failing them sends the client to
+the other server instead. Names outside every zone are not touched by it.
 
 Healthy means the source says it has been all the way round, not that it read
 everything: _incus_ reports it at the end of a round that may have skipped a
