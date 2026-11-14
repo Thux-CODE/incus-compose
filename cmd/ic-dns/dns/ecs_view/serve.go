@@ -144,7 +144,7 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// sits on, so it is answered everything this name holds. Before the gate
 	// below, which is what it is exempt from.
 	if haveSrc && v.trusts(src) {
-		return v.answerTrusted(w, m, z, answers, qtype, clamp)
+		return v.answerTrusted(w, r, opt, m, z, answers, qtype, clamp, cold)
 	}
 
 	// Fail closed. Without an address there is no network to answer from, and any
@@ -225,12 +225,18 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 // name answering on two networks is two records in one answer rather than the
 // one set its querier's own address would have chosen.
 func (v *ECSView) answerTrusted(
-	w dns.ResponseWriter, m *dns.Msg, z *Zone, answers ViewAnswer, qtype uint16, clamp bool,
+	w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT, m *dns.Msg,
+	z *Zone, answers ViewAnswer, qtype uint16, clamp, cold bool,
 ) (bool, int, error) {
 	// Two instances claiming one alias wrote one CNAME each, and a name may hold
 	// only one. Refusing beats picking here exactly as it does for everybody
-	// else, and it reads as missing.
+	// else, and it reads as missing - so before warm it is a miss like any
+	// other: the claimant that has to go may only not have been read yet.
 	if len(answers.UnionFor(dns.TypeCNAME)) > 1 {
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		deny(m, z, clamp)
 
 		if v.Metrics {

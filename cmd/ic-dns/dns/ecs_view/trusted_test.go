@@ -306,6 +306,37 @@ func TestTrustedClientRefusesTwoClaimantsOfOneAlias(t *testing.T) {
 		assert.Empty(t, m.Answer)
 	})
 
+	t.Run("two claimants before warm are not ready", func(t *testing.T) {
+		t.Parallel()
+
+		// The claimant that has to go may only not have been read yet, so the
+		// miss is SERVFAIL here as it is for an untrusted querier: an NXDOMAIN
+		// would be final for the router and wrong once the round ends.
+		v := New(slog.Default())
+		v.Replace(aliasPiece("gateway.shop.incus.", "user-api.shop.incus."))
+		v.Trusted = []netip.Prefix{netip.MustParsePrefix(router + "/32")}
+
+		m := new(dns.Msg)
+		m.SetQuestion("api.shop.incus.", dns.TypeCNAME)
+		m.SetEdns0(1232, false)
+
+		handled, got := answerFrom(t, v, m, router)
+
+		require.True(t, handled)
+		assert.Equal(t, dns.RcodeToString[dns.RcodeServerFailure], dns.RcodeToString[got.Rcode])
+		assert.Empty(t, got.Answer)
+
+		opt := got.IsEdns0()
+		require.NotNil(t, opt)
+		require.Len(t, opt.Option, 1)
+		assert.Equal(t, dns.ExtendedErrorCodeNotReady, opt.Option[0].(*dns.EDNS0_EDE).InfoCode)
+
+		// And without EDNS no OPT record comes back.
+		_, plain := askFrom(t, v, "api.shop.incus.", dns.TypeCNAME, router)
+		assert.Equal(t, dns.RcodeServerFailure, plain.Rcode)
+		assert.Nil(t, plain.IsEdns0())
+	})
+
 	t.Run("one claimant on one wire answers the trusted querier", func(t *testing.T) {
 		t.Parallel()
 

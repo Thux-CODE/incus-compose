@@ -186,7 +186,10 @@ with the [RFC 8914](https://datatracker.ietf.org/doc/html/rfc8914) extended
 error `Not Ready` (14) when the query carries EDNS (none when it does not):
 
 - a name a zone does not hold, a name the querier cannot see, and a querier on
-  no known network - the three answers that are `NXDOMAIN` once warm;
+  no known network - the three answers that are `NXDOMAIN` once warm. A name
+  two instances claim as an alias reads as one the querier cannot see, for a
+  trusted querier as for anybody: the claimant that has to go may only not have
+  been read yet;
 - a name under one of `Claims` that no zone holds yet, which would otherwise
   fall through to the next plugin. A source sets `Claims` to the domains it
   serves before any zone in them has been published: for _incus_, the suffix

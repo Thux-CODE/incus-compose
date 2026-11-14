@@ -51,6 +51,12 @@ form.
   forwarded, and nothing changes once warm. `/ready` now turns ready only on a
   warm event no plugin dropped. (by @sandroden)
 
+- `ic-dns` answers a `--trusted-client` asking for an alias two instances claim
+  `SERVFAIL` (`Not Ready`) instead of `NXDOMAIN` before the first complete
+  round, as it already did every other querier: after a restart the claimant
+  that has to go may only not have been read yet, and the router took the
+  `NXDOMAIN` as final. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

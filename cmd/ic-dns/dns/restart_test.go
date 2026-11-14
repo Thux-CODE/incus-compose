@@ -635,7 +635,10 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 		{restartQuery{name: "6.0.0.10.in-addr.arpa.", qtype: dns.TypePTR, from: edgeRouter},
 			restartWant{rcode: dns.RcodeSuccess, answers: []string{"db.shop.incus."}, ttl: stale}},
 
-		// And its misses are failed like anybody's.
+		// And its misses are failed like anybody's, the contested alias
+		// included: db, the claimant that has to go, has not been read yet.
+		{restartQuery{name: "www.shop.incus.", qtype: dns.TypeCNAME, from: edgeRouter},
+			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
 			restartWant{rcode: dns.RcodeServerFailure}},
 		{restartQuery{name: "web.gone.incus.", qtype: dns.TypeA, from: edgeRouter},
@@ -696,6 +699,8 @@ func TestARestartServesTheColdStoreUntilTheFleetIsRead(t *testing.T) {
 			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.1.0.5"}, ttl: 30}},
 		{restartQuery{name: "web.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
 			restartWant{rcode: dns.RcodeSuccess, answers: []string{"10.0.0.7"}, ttl: 30}},
+		{restartQuery{name: "www.shop.incus.", qtype: dns.TypeCNAME, from: edgeRouter},
+			restartWant{rcode: dns.RcodeSuccess, answers: []string{"web.shop.incus."}, ttl: 30}},
 		{restartQuery{name: "db.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
 			restartWant{rcode: dns.RcodeNameError}},
 		{restartQuery{name: "nothere.shop.incus.", qtype: dns.TypeA, from: edgeRouter},
