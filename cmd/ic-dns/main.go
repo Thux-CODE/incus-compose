@@ -226,6 +226,14 @@ func runCommand(cfg *config) *cli.Command {
 				Sources:     cli.EnvVars("INCUS_COMPOSE_DNS_ECHO_SUBNET", "DNS_ECHO_SUBNET"),
 			},
 			&cli.BoolFlag{
+				Name: "cold-answers",
+				Usage: "Serve what is held before the first round of the fleet has ended; " +
+					"false fails it like a miss, so a client asks its next server",
+				Value:       true,
+				Destination: &cfg.ColdAnswers,
+				Sources:     cli.EnvVars("INCUS_COMPOSE_DNS_COLD_ANSWERS", "DNS_COLD_ANSWERS"),
+			},
+			&cli.BoolFlag{
 				Name:        "metrics",
 				Usage:       "Record the engine's counters and gauges; off leaves them registered at zero",
 				Destination: &cfg.Metrics,
@@ -339,6 +347,7 @@ func action(ctx context.Context, cmd *cli.Command, cfg *config) error {
 		"sweep_project_delay", cfg.ProjectDelay,
 		"sweep_read_delay", cfg.ReadDelay,
 		"echo_subnet", cfg.EchoSubnet,
+		"cold_answers", cfg.ColdAnswers,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)

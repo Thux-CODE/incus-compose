@@ -97,6 +97,12 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		return false, dns.RcodeSuccess, nil
 	}
 
+	// Inside a zone of ours and asked not to answer from it before warm: a hit
+	// may be a record from before the restart, so it fails like a miss would.
+	if cold && !v.ColdAnswers {
+		return v.notReady(w, r, opt)
+	}
+
 	server := v.Server
 
 	// Records are shared by every query on the view, so only the clamp copies.

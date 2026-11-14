@@ -51,6 +51,13 @@ type ECSView struct {
 	// final answer that also stops the client trying its next server.
 	Claims []string
 
+	// ColdAnswers serves what the zones hold before warm, clamped like any
+	// unhealthy answer. Off, every query inside a zone is SERVFAIL until warm,
+	// the same as a miss, so a client with another server listed asks that one
+	// instead of taking a record that may be out of date. Set once before
+	// anything serves; New turns it on.
+	ColdAnswers bool
+
 	// current is the published snapshot.
 	current atomic.Pointer[Snapshot]
 
@@ -72,7 +79,7 @@ type ECSView struct {
 // New returns an ECSView already holding an empty snapshot, so the query path
 // never has to check for nil.
 func New(logger *slog.Logger) *ECSView {
-	v := &ECSView{logger: logger}
+	v := &ECSView{logger: logger, ColdAnswers: true}
 	v.current.Store(EmptySnapshot())
 
 	return v

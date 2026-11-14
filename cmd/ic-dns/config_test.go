@@ -55,6 +55,10 @@ func TestConfigDefaults(t *testing.T) {
 	// Off with them: a binary nobody scrapes pays nothing for the numbers, so
 	// recording them is the deliberate act.
 	assert.False(t, cfg.Metrics)
+
+	// On: with a single server, a name that may be out of date for a few
+	// seconds beats no name at all.
+	assert.True(t, cfg.ColdAnswers)
 }
 
 func TestConfigFromCommand(t *testing.T) {
@@ -111,6 +115,14 @@ func TestConfigFromEnvironment(t *testing.T) {
 	// And what is off by default is on when it is asked for.
 	cfg = parse(t, "--metrics")
 	assert.True(t, cfg.Metrics)
+
+	// And what is on by default is off when it is asked for, both ways.
+	cfg = parse(t, "--cold-answers=false")
+	assert.False(t, cfg.ColdAnswers)
+
+	t.Setenv("INCUS_COMPOSE_DNS_COLD_ANSWERS", "false")
+	cfg = parse(t)
+	assert.False(t, cfg.ColdAnswers)
 
 	// The flag still wins over the environment.
 	cfg = parse(t, "--listen", "127.0.0.1:15353")

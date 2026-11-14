@@ -192,9 +192,23 @@ error `Not Ready` (14) when the query carries EDNS (none when it does not):
   serves before any zone in them has been published: for _incus_, the suffix
   project zones are built under.
 
-Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy.
-Anything outside every zone and every claim falls through as usual, so names on
-the internet keep resolving while the fleet is being read.
+Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy -
+unless `ColdAnswers` is off. Anything outside every zone and every claim falls
+through as usual, so names on the internet keep resolving while the fleet is
+being read.
+
+`ColdAnswers` (on unless the source turns it off, set once before anything
+serves) decides what happens to what a zone does hold before warm. On, it is
+answered: with a single server a name that may be a few seconds out of date
+beats no name at all. Off, every query inside a zone - hit, `NODATA` and apex
+included - is `SERVFAIL` in exactly the shape of a cold miss, `Not Ready` and
+the `servfail` counter included. There is no telling a record read since the
+start from one carried over from before it, so it is all of them. Turn it off
+where every client lists a second server: a source that replays what it held
+before a restart publishes records that may be out of date - an address changed
+while the server was down is served as a final `NOERROR` until a read replaces
+it - and failing them sends the client to the other server instead. Names
+outside every zone are not touched by it.
 
 Healthy means the source says it has been all the way round, not that it read
 everything: _incus_ reports it at the end of a round that may have skipped a
@@ -223,6 +237,11 @@ With a single cold server it costs a temporary failure instead of a wrong
 answer, and on musl every such miss blocks for 5 s first. A hidden name and an
 absent one still answer alike.
 
+The same table is the cost of turning `ColdAnswers` off, now for every name in a
+zone rather than only the misses: free with two servers listed, every lookup of
+an internal name failing until warm with one. So it stays on for a single
+server.
+
 Warm latches. A source that reports unhealthy again - _incus_ does when its
 event stream drops - leaves the view warm: the zones are as full as when it last
 confirmed them, the TTL clamp already says they are stale, and an Incus outage
@@ -235,7 +254,8 @@ With the _prometheus_ plugin enabled:
 
 - `coredns_ecs_view_requests_total{server,result}` - requests by result, where
   result is `success`, `nodata`, `nxdomain`, `denied` or `servfail` (a miss
-  answered before warm, see [Before The First Read](#before-the-first-read)).
+  answered before warm, or anything inside a zone with `ColdAnswers` off, see
+  [Before The First Read](#before-the-first-read)).
 - `coredns_ecs_view_unidentified_clients_total{server}` - requests refused
   because the querier could not be placed on any known network.
 - `coredns_ecs_view_zones` - zones currently served.

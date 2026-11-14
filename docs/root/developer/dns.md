@@ -303,8 +303,9 @@ So until then every miss is `SERVFAIL` with the extended error `Not Ready`:
 inside a zone (missing, invisible, or a querier not placed yet - its own
 instance may be the one still unread), and anywhere under `--suffix`, which
 `dns` hands the engine as `ECSView.Claims` (an empty or root suffix claims
-nothing). Hits, `NODATA` and the apex answer as usual, and names outside both
-fall through, so the internet keeps resolving.
+nothing). Hits, `NODATA` and the apex answer as usual, clamped to 5 s, unless
+`--cold-answers` is off (below), and names outside both fall through, so the
+internet keeps resolving.
 
 glibc, musl and Go move on to the next listed server on `SERVFAIL`, which is
 what lets two `ic-dns` in `dns.nameservers` ride out a rolling restart. With a
@@ -316,6 +317,27 @@ systemd-resolved has not been measured.
 The claim is the whole suffix. A deployment that forwards part of it to another
 `ic-dns` - two serving different projects under one suffix - gets `SERVFAIL` for
 those names too while this one is cold.
+
+### Hits Before Warm: `--cold-answers`
+
+What a cold server answers is what has been read so far and, where the enricher
+replays what it held before the restart, records from then, which can be out of
+date: an address changed while the server was down is served as a final
+`NOERROR` until the round reads it again. `--cold-answers`
+(`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`) decides what to do about it:
+
+- **on** (the default): hits, `NODATA` and the apex are answered, TTL clamped to
+  5 s. With a single server a name that may be a few seconds old beats no name
+  at all.
+- **off**: every query inside a zone of ours is `SERVFAIL` until warm, in the
+  same shape as a cold miss - extended error `Not Ready`, `AA` unset, counted as
+  `servfail`, reverse zones included. There is no per-record provenance: a name
+  read since the start fails along with one carried over from before it.
+
+Turn it off only when every client lists a second `ic-dns`: glibc, musl and Go
+then ask the other one instead of taking a stale record. With a single server it
+turns every internal lookup into a temporary failure until warm. Names outside
+the zones are forwarded either way, and once warm it changes nothing.
 
 ### What Warm Means
 
@@ -424,6 +446,7 @@ Every flag has a matching environment variable:
 | `--sweep-project-delay` | `INCUS_COMPOSE_DNS_SWEEP_PROJECT_DELAY` | `30s`   | Delay between consecutive project sweeps                  |
 | `--sweep-read-delay`    | `INCUS_COMPOSE_DNS_SWEEP_READ_DELAY`    | `5s`    | Delay between instance reads in a sweep                   |
 | `--echo-subnet`         | `INCUS_COMPOSE_DNS_ECHO_SUBNET`         | `false` | Echo back RFC 7871 client subnet                          |
+| `--cold-answers`        | `INCUS_COMPOSE_DNS_COLD_ANSWERS`        | `true`  | Serve held names before warm; `false` makes them SERVFAIL |
 | `--exclude`             | `INCUS_COMPOSE_DNS_EXCLUDE`             |         | Chain position(s) to leave out (`debounce`, `http`, etc.) |
 | `--log`                 | `INCUS_COMPOSE_DNS_LOG`                 | `INFO`  | Log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`)     |
 

@@ -13,6 +13,15 @@ form.
 
 ## [Unreleased]
 
+### Added
+
+- `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
+  set to `false`, names it already holds are also answered `SERVFAIL` (extended
+  error `Not Ready`) until the first complete round of the fleet, like the names
+  it cannot answer yet, so a client listing a second `ic-dns` asks that one
+  instead of taking a record that may be out of date. Keep the default with a
+  single server. (by @sandroden)
+
 ### Fixed
 
 - `ic-dns` answers `SERVFAIL` (extended error `Not Ready`) instead of `NXDOMAIN`

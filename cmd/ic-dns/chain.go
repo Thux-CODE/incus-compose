@@ -87,6 +87,7 @@ func chain(logger *slog.Logger, cfg config) []position {
 			dns.Stop(stop),
 			dns.EchoSubnet(cfg.EchoSubnet),
 			dns.Metrics(cfg.Metrics),
+			dns.ColdAnswers(cfg.ColdAnswers),
 			dns.ColdDir(cfg.DataDir),
 			dns.TTL(uint32(cfg.TTL)),
 			dns.Suffix(cfg.Suffix),
