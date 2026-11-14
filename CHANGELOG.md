@@ -92,6 +92,11 @@ form.
   Before, its address kept being served and clients timed out on it instead of
   trying another replica. (by @sandroden)
 
+- `ic-dns` and `ic-healthd` no longer miss a change made while the instance was
+  being read: an event that arrives after a read of the same instance went out
+  (a label set right after a start, while the start waits for an address) gets a
+  read of its own instead of the older answer. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
