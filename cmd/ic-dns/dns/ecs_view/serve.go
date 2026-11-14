@@ -66,10 +66,18 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	snap := v.current.Load()
 
+	// Before the first whole read, every miss below may be a name not read yet
+	// rather than one that is not there, so none of them is answered as final.
+	cold := !v.warm.Load()
+
 	// Zones first, and the zone tree is zones deep rather than names deep: a name
 	// outside every zone is the common case and never touches the name tree.
 	z := snap.ZoneOf(qname)
 	if z == nil {
+		if cold && v.claimed(qname) {
+			return v.notReady(w, r, opt)
+		}
+
 		v.logger.Debug("unknown, falling through", "zone", qname)
 
 		return false, dns.RcodeSuccess, nil
@@ -80,6 +88,10 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// A zone claiming only the names in it, the apex included: naming a server
 	// for a domain we hold one name in would claim the rest of that domain too.
 	if z.Shadowing && !held {
+		if cold && v.claimed(qname) {
+			return v.notReady(w, r, opt)
+		}
+
 		v.logger.Debug("not claimed, falling through", "name", qname, "zone", z.Name)
 
 		return false, dns.RcodeSuccess, nil
@@ -111,6 +123,11 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	if !held {
+		// A zone of ours, whatever Claims says.
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		deny(m, z, clamp)
 
 		if v.Metrics {
@@ -132,6 +149,11 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	if !known || view == AmbiguousView {
+		// The querier's own instance may be what has not been read yet.
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		if v.Metrics {
 			deniedCount.WithLabelValues(server).Inc()
 			requestCount.WithLabelValues(server, "denied").Inc()
@@ -154,6 +176,10 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	// Unreachable reads exactly like missing.
 	if !visible {
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		deny(m, z, clamp)
 
 		if v.Metrics {
@@ -179,6 +205,44 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	if v.Metrics {
 		requestCount.WithLabelValues(server, "success").Inc()
+	}
+
+	return write(w, m)
+}
+
+// claimed reports whether qname is under one of Claims.
+func (v *ECSView) claimed(qname string) bool {
+	for _, domain := range v.Claims {
+		if dns.IsSubDomain(domain, qname) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// notReady is SERVFAIL: unlike NXDOMAIN, glibc, musl and Go do not take it as
+// final where another server is listed. With EDNS it carries RFC 8914's Not
+// Ready, and no client subnet: nothing about it was tailored to the querier.
+func (v *ECSView) notReady(w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
+	v.logger.Debug("not warm, failing", "name", r.Question[0].Name)
+
+	if v.Metrics {
+		requestCount.WithLabelValues(v.Server, "servfail").Inc()
+	}
+
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeServerFailure)
+
+	if opt != nil {
+		out := &dns.OPT{
+			Hdr:    dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT},
+			Option: []dns.EDNS0{&dns.EDNS0_EDE{InfoCode: dns.ExtendedErrorCodeNotReady}},
+		}
+
+		out.SetUDPSize(opt.UDPSize())
+
+		m.Extra = []dns.RR{out}
 	}
 
 	return write(w, m)

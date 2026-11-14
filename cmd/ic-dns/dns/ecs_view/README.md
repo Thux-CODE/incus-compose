@@ -79,7 +79,8 @@ type Sink interface {
     // Replace swaps everything served for snap, which holds every zone the
     // source serves.
     Replace(snap *Snapshot)
-    // SetHealthy says whether the source's data is currently fresh.
+    // SetHealthy says whether the source's data is currently fresh. The
+    // first true also turns the view warm, for good.
     SetHealthy(healthy bool)
 }
 ```
@@ -176,12 +177,65 @@ healthy server.
 The clamp is deliberately coarse: it applies to every zone, not only the ones
 affected. It errs toward shorter TTLs.
 
+## Before The First Read
+
+Until its source first reports itself healthy, the view is cold: what it holds
+may be only part of what exists, so a miss may be a name that has not been read
+yet rather than one that is not there. Every miss is then answered `SERVFAIL`,
+with the [RFC 8914](https://datatracker.ietf.org/doc/html/rfc8914) extended
+error `Not Ready` (14) when the query carries EDNS (none when it does not):
+
+- a name a zone does not hold, a name the querier cannot see, and a querier on
+  no known network - the three answers that are `NXDOMAIN` once warm;
+- a name under one of `Claims` that no zone holds yet, which would otherwise
+  fall through to the next plugin. A source sets `Claims` to the domains it
+  serves before any zone in them has been published: for _incus_, the suffix
+  project zones are built under.
+
+Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy.
+Anything outside every zone and every claim falls through as usual, so names on
+the internet keep resolving while the fleet is being read.
+
+Healthy means the source says it has been all the way round, not that it read
+everything: _incus_ reports it at the end of a round that may have skipped a
+project whose listing failed, or an instance whose read timed out. The view
+turns warm with those holes, and from then on they are `NXDOMAIN` until a later
+round fills them.
+
+A claim is the whole domain. Where another server answers part of it - a second
+`ic-dns` serving other projects under the same suffix, reached by forwarding -
+those names are `SERVFAIL` here too until this view is warm, instead of falling
+through to it.
+
+`SERVFAIL` because, unlike `NXDOMAIN`, the common stub resolvers do not take it
+as final where another server is listed. What they do with it, measured:
+
+| resolver | the first of two servers `SERVFAIL`s      | the only server `SERVFAIL`s                         |
+| -------- | ----------------------------------------- | --------------------------------------------------- |
+| glibc    | asks the next, answered in ~0.02 s        | `EAI_AGAIN` at once, each `search` domain tried     |
+| musl     | asks both at once, ignores the `SERVFAIL` | `EAI_AGAIN` after 5 s, at the first `search` domain |
+| Go       | temporary error, asks the next            | temporary error                                     |
+
+systemd-resolved has not been measured. A forwarder's `NXDOMAIN` for a name it
+has never heard of is final for all three, may be cached negatively, and is
+wrong. With two servers listed, a cold one costs a client nothing measurable.
+With a single cold server it costs a temporary failure instead of a wrong
+answer, and on musl every such miss blocks for 5 s first. A hidden name and an
+absent one still answer alike.
+
+Warm latches. A source that reports unhealthy again - _incus_ does when its
+event stream drops - leaves the view warm: the zones are as full as when it last
+confirmed them, the TTL clamp already says they are stale, and an Incus outage
+drops the stream of every replica at once, so failing misses then would fail
+them everywhere at the same time.
+
 ## Metrics
 
 With the _prometheus_ plugin enabled:
 
 - `coredns_ecs_view_requests_total{server,result}` - requests by result, where
-  result is `success`, `nodata`, `nxdomain` or `denied`.
+  result is `success`, `nodata`, `nxdomain`, `denied` or `servfail` (a miss
+  answered before warm, see [Before The First Read](#before-the-first-read)).
 - `coredns_ecs_view_unidentified_clients_total{server}` - requests refused
   because the querier could not be placed on any known network.
 - `coredns_ecs_view_zones` - zones currently served.
@@ -194,7 +248,8 @@ here, but detecting the clash belongs to the source - see
 ## Ready
 
 This plugin reports readiness to the _ready_ plugin. It turns ready once a
-source has published a snapshot and reports itself healthy.
+source has published a snapshot and reports itself healthy - which is also the
+moment it turns warm.
 
 An empty fleet publishes an empty snapshot, which is not the same as never
 having published: only one of those is ready.

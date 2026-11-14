@@ -537,3 +537,109 @@ func TestUnhealthyClampsTheTTL(t *testing.T) {
 	require.Len(t, again.Answer, 1)
 	assert.EqualValues(t, testTTL, again.Answer[0].Header().Ttl)
 }
+
+// TestColdFailsEveryMiss pins what the engine does before its source first
+// reports healthy: a hit is answered, clamped, and every miss under a claim or
+// inside a zone is SERVFAIL, since it may be a name not read yet. Anything else
+// falls through, and the first healthy ends all of it for good.
+func TestColdFailsEveryMiss(t *testing.T) {
+	t.Parallel()
+
+	// Not an rcode: the query went to the next plugin.
+	const falls = -1
+
+	snap := testPiece()
+	snap.Denial, _, _ = snap.Denial.Insert(NameKey("other.com."), &Zone{
+		Name:      "other.com.",
+		SOA:       testSOA("other.com."),
+		Shadowing: true,
+	})
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+	v.Replace(snap)
+
+	cases := []struct {
+		name   string
+		qname  string
+		client string
+		cold   int
+		warm   int
+	}{
+		{"a hit is answered", "user-api.shop.incus.", "10.0.1.10", dns.RcodeSuccess, dns.RcodeSuccess},
+		{"a name the zone does not hold", "nope.shop.incus.", "10.0.1.10", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a name the querier cannot see", "user-db.shop.incus.", "10.0.1.10", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a querier on no known network", "user-api.shop.incus.", "192.0.2.1", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a claimed name in no zone yet", "web.blog.incus.", "10.0.1.10", dns.RcodeServerFailure, falls},
+		{"a shadowing zone outside every claim", "www.other.com.", "10.0.1.10", falls, falls},
+		{"a name outside everything", "example.org.", "10.0.1.10", falls, falls},
+	}
+
+	phases := []struct {
+		name    string
+		healthy bool
+	}{
+		{"cold", false},
+		{"warm", true},
+		{"unhealthy again", false},
+	}
+
+	for i, phase := range phases {
+		if i > 0 {
+			v.SetHealthy(phase.healthy)
+		}
+
+		for _, tc := range cases {
+			want := tc.warm
+			if i == 0 {
+				want = tc.cold
+			}
+
+			handled, m := ask(t, v, tc.qname, dns.TypeA, tc.client)
+
+			if want == falls {
+				assert.False(t, handled, "%s, %s", phase.name, tc.name)
+
+				continue
+			}
+
+			require.True(t, handled, "%s, %s", phase.name, tc.name)
+			assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[m.Rcode], "%s, %s", phase.name, tc.name)
+
+			if m.Rcode != dns.RcodeSuccess {
+				continue
+			}
+
+			ttl := uint32(staleTTL)
+			if phase.healthy {
+				ttl = testTTL
+			}
+
+			require.Len(t, m.Answer, 1)
+			assert.Equal(t, ttl, m.Answer[0].Header().Ttl, "%s, %s", phase.name, tc.name)
+		}
+	}
+}
+
+// TestColdWithoutEDNSCarriesNoOPT pins that the extended error rides only on a
+// query that brought an OPT record: one the client did not send is one it may
+// not parse.
+func TestColdWithoutEDNSCarriesNoOPT(t *testing.T) {
+	t.Parallel()
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+
+	r := new(dns.Msg)
+	r.SetQuestion("web.blog.incus.", dns.TypeA)
+
+	w := dnstest.NewRecorder(&test.ResponseWriter{})
+
+	handled, _, err := v.Answer(context.Background(), w, r)
+	require.NoError(t, err)
+	require.True(t, handled)
+
+	assert.Equal(t, dns.RcodeServerFailure, w.Msg.Rcode)
+	assert.False(t, w.Msg.Authoritative)
+	assert.Nil(t, w.Msg.IsEdns0())
+}

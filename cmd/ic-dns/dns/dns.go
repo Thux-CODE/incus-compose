@@ -14,6 +14,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	incusapi "github.com/lxc/incus/v7/shared/api"
+	"github.com/miekg/dns"
 
 	"github.com/lxc/incus-compose/cmd/ic-dns/dns/ecs_view"
 	"github.com/lxc/incus-compose/ievent/iutil"
@@ -24,6 +25,11 @@ const name = "dns"
 
 // defaultInboxSize is what the inbox holds before a drop is the only answer.
 const defaultInboxSize = 1024
+
+// actionRoundLost is what this plugin raises when a sweep-end was dropped, here
+// or before here. It walks the chain behind everything already in it and, stamped
+// warm, arrives as the ordered signal that sweep-end would have been.
+const actionRoundLost = "dns/round-lost"
 
 // publishWindow is how long patches collect before one snapshot is published.
 // Trailing edge only, and invisible against a TTL measured in seconds.
@@ -193,6 +199,14 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	view.Metrics = cfg.Metrics
 	view.Server = cfg.Listen
 
+	// Every project zone is built under the suffix, so the suffix is ours before
+	// any of them has been read. Empty or "." claims nothing: claiming the root
+	// would fail every name on the internet until warm.
+	claim := dns.CanonicalName(cfg.Suffix)
+	if claim != "." {
+		view.Claims = []string{claim}
+	}
+
 	p := &Plugin{
 		cfg:    cfg,
 		logger: logger,
@@ -268,6 +282,22 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 	case p.inbox <- ev:
 	default:
 		p.next(ev.WithDropped(name))
+		p.roundLost(ev)
+	}
+}
+
+// roundLost asks for an end of round again when one could not be used, since
+// it is what turns the view warm and until then every miss is SERVFAIL. Its
+// own request counts too, or one dropped in turn would end the asking.
+// Non-blocking, from either goroutine: a full door drops it like any event.
+func (p *Plugin) roundLost(ev *iutil.Event) {
+	if ev.Action() != iutil.ActionSweepEnd && ev.Action() != actionRoundLost {
+		return
+	}
+
+	select {
+	case p.commandOut <- iutil.Command{Action: actionRoundLost}:
+	default:
 	}
 }
 
@@ -402,14 +432,30 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// which is what unready says.
 	if ev.Action() == iutil.ActionDisconnected {
 		p.view.SetHealthy(false)
+		p.state.lost = ev.At()
 
 		return
 	}
 
-	if ev.Action() == iutil.ActionSweepEnd {
+	// Only an end that came the whole way in order. One dropped on the way
+	// overtook the reads still in flight before it, and rounding on it would
+	// turn the view warm over names nobody has read yet.
+	if ev.Action() == iutil.ActionSweepEnd && ev.Err() == nil {
 		p.rounded()
 
 		return
+	}
+
+	if ev.Err() != nil && !p.state.warm {
+		p.roundLost(ev)
+	}
+
+	// The same end arriving another way: anything stamped warm that was not
+	// dropped walked the chain behind it, so the round it closed is folded by
+	// now even if the sweep-end itself was lost. Stamped before the stream was
+	// lost, it is a debounced leftover and says nothing about the stream since.
+	if !p.state.warm && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
+		p.rounded()
 	}
 
 	if ev.Err() != nil || !slices.Contains(p.actions, ev.Action()) {
@@ -459,6 +505,7 @@ func (p *Plugin) rounded() {
 	p.publish()
 
 	p.view.SetHealthy(true)
+	p.state.warm = true
 }
 
 // write applies what has arrived and publishes it. Nothing arrived is nothing

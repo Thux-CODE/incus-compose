@@ -223,6 +223,22 @@ sequenceDiagram
 2. **The query's source address**, when no subnet is present (such as when an
    instance's `resolv.conf` targets `ic-dns` directly).
 
+### Right After A Start
+
+Until `ic-dns` has been all the way round the fleet once - seconds to a minute
+after a start, the same moment `/ready` turns ready - a name under the suffix it
+cannot answer yet is `SERVFAIL` rather than `NXDOMAIN`: it may only not have
+been read yet. Names outside the suffix are forwarded as usual throughout, and
+once warm nothing changes, a lost Incus event stream included.
+
+With two `ic-dns` in `dns.nameservers`, glibc, musl and Go resolvers move on to
+the other one on `SERVFAIL`, so a restarting server is skipped instead of
+answering that a name does not exist. With a single server, a client gets a
+temporary failure instead (`EAI_AGAIN`), and on musl-based images such as Alpine
+every such lookup first waits out the 5 s timeout. If another server answers
+part of the suffix through forwarding, those names fail the same way until this
+one is warm.
+
 ---
 
 ## Labels That Configure DNS

@@ -2,6 +2,7 @@ package ecs_view
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
@@ -77,4 +78,36 @@ func TestMetricsAreOptional(t *testing.T) {
 			assert.Equal(t, want, testutil.ToFloat64(zonesGauge))
 		})
 	}
+}
+
+// TestColdMissesAreCountedAsServfail pins the label a cold miss is counted
+// under, apart from the NXDOMAIN it becomes once warm.
+func TestColdMissesAreCountedAsServfail(t *testing.T) {
+	t.Parallel()
+
+	const server = "metrics-cold"
+
+	t.Cleanup(func() {
+		requestCount.DeleteLabelValues(server, "servfail")
+		requestCount.DeleteLabelValues(server, "nxdomain")
+	})
+
+	v := New(slog.Default())
+	v.Metrics = true
+	v.Server = server
+	v.Replace(testPiece())
+
+	_, m := ask(t, v, "nope.shop.incus.", dns.TypeA, "10.0.1.10")
+	require.Equal(t, dns.RcodeServerFailure, m.Rcode)
+
+	assert.InDelta(t, 1, testutil.ToFloat64(requestCount.WithLabelValues(server, "servfail")), 0)
+	assert.InDelta(t, 0, testutil.ToFloat64(requestCount.WithLabelValues(server, "nxdomain")), 0)
+
+	v.SetHealthy(true)
+
+	_, m = ask(t, v, "nope.shop.incus.", dns.TypeA, "10.0.1.10")
+	require.Equal(t, dns.RcodeNameError, m.Rcode)
+
+	assert.InDelta(t, 1, testutil.ToFloat64(requestCount.WithLabelValues(server, "servfail")), 0)
+	assert.InDelta(t, 1, testutil.ToFloat64(requestCount.WithLabelValues(server, "nxdomain")), 0)
 }

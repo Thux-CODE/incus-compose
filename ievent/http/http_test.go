@@ -69,3 +69,23 @@ func TestReadinessNamesWhichHalfIsMissing(t *testing.T) {
 	p.serveReady(w, httptest.NewRequestWithContext(t.Context(), "GET", "/ready", nil))
 	assert.Contains(t, w.Body.String(), "nothing published yet")
 }
+
+// TestADroppedWarmEventIsNotReady pins that readiness follows what was folded,
+// not what was stamped: an end of round dropped before the plugin that serves
+// it says nothing about what is served, and the next warm event that was not
+// dropped is what does.
+func TestADroppedWarmEventIsNotReady(t *testing.T) {
+	t.Parallel()
+
+	p := New(slog.Default())
+	p.next = func(_ *iutil.Event) {}
+
+	send(p, iutil.ActionConnected, iutil.ChainCold)
+
+	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionSweepEnd, "", "", "").
+		WithChainState(iutil.ChainWarm).WithDropped("dns"))
+	assert.Equal(t, 503, ready(t, p), "a dropped end of round is not one")
+
+	send(p, "dns/round-lost", iutil.ChainWarm)
+	assert.Equal(t, 200, ready(t, p), "the next one that was folded is")
+}

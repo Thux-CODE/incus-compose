@@ -11,6 +11,17 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Fixed
+
+- `ic-dns` answers `SERVFAIL` (extended error `Not Ready`) instead of `NXDOMAIN`
+  or forwarding upstream for names under its suffix that it cannot answer before
+  the first complete round of the fleet, so resolvers fall back to the next
+  nameserver while a replica is restarting. Names outside the suffix are still
+  forwarded, and nothing changes once warm. `/ready` now turns ready only on a
+  warm event no plugin dropped. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
