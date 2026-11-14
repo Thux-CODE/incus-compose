@@ -2,6 +2,7 @@ package enricher
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -107,6 +108,13 @@ type sweepArgs struct {
 
 	timeout time.Duration
 	delay   time.Duration
+
+	// retry is how long a run that broke waits before the next, doubling each
+	// time it breaks again up to retryMax: the interval is hours, and a chain
+	// whose run broke would otherwise stay cold, holding every instance read,
+	// for that long.
+	retry    time.Duration
+	retryMax time.Duration
 }
 
 // runSweep reads the fleet once: the projects, then every network of every
@@ -249,7 +257,14 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 // sweepInstances lists each served project's instances and trickles the names.
 // The listing goes over as one message before any of it is trickled, so absence
 // is decided against what was held when the request went out.
+//
+// A project whose listing failed costs its own instances rather than the
+// fleet's, but the run is not whole without it: what is held there has been
+// neither confirmed nor pruned, so the run ends in an error and is tried again
+// rather than called done.
 func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, served []string) error {
+	var failed []error
+
 	for _, project := range served {
 		readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		names, err := a.conn.GetInstanceNames(readCtx, project, nil)
@@ -259,6 +274,8 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 		if err != nil {
 			logger.Warn("the instances of one project could not be listed, keeping what is held",
 				"plugin", name, "project", project, "err", err)
+
+			failed = append(failed, fmt.Errorf("listing the instances of %s: %w", project, err))
 
 			continue
 		}
@@ -288,17 +305,20 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 		}
 	}
 
-	return nil
+	return errors.Join(failed...)
 }
 
 // runSweeper goes round the fleet for the life of ctx, on a goroutine of its
 // own.
 //
 // The first run goes at no delay, because nothing is served until it lands, and
-// so does one that follows a run that broke.
+// so does one that follows a run that broke. A run that broke is followed after
+// a backoff rather than the interval: see sweepArgs.retry.
 func runSweeper(ctx context.Context, logger *slog.Logger, a sweepArgs, interval time.Duration) {
 	go func() {
 		fast := true
+
+		var backoff time.Duration
 
 		for ctx.Err() == nil {
 			run := a
@@ -321,13 +341,22 @@ func runSweeper(ctx context.Context, logger *slog.Logger, a sweepArgs, interval 
 				msg = sweepMsg{action: sweepActionFailed, err: err}
 			}
 
+			wait := interval
+
+			if msg.action == sweepActionFailed {
+				backoff = min(max(2*backoff, a.retry), a.retryMax, interval)
+				wait = backoff
+			} else {
+				backoff = 0
+			}
+
 			err = sweepSend(ctx, a.sweepOut, msg)
 			if err != nil {
 				return
 			}
 
 			select {
-			case <-time.After(interval):
+			case <-time.After(wait):
 			case <-ctx.Done():
 				return
 			}

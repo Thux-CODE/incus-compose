@@ -103,6 +103,18 @@ type fixture struct {
 	fleet   *testlib.Project
 	listErr error
 	lists   atomic.Int32
+
+	// instancesErr fails the instance listings alone, and instanceLists counts
+	// them, failed or not.
+	instancesErr  error
+	instanceLists atomic.Int32
+}
+
+// sweepRetry sets the backoff after a run that broke. The fixture's default is
+// an hour, so a test about something else never sees a second run it did not
+// start.
+func sweepRetry(d time.Duration) Option {
+	return func(o *options) { o.sweepRetry, o.sweepRetryMax = d, d }
 }
 
 // errNoFleet is what the listings answer until a test sets one.
@@ -152,9 +164,19 @@ func (h *fixture) GetNetworkNames(_ context.Context, project string) ([]string, 
 }
 
 func (h *fixture) GetInstanceNames(_ context.Context, project string, _ *iclient.GetInstancesArgs) ([]string, error) {
+	h.instanceLists.Add(1)
+
 	fleet, err := h.listing()
 	if err != nil {
 		return nil, err
+	}
+
+	h.mu.Lock()
+	failWith := h.instancesErr
+	h.mu.Unlock()
+
+	if failWith != nil {
+		return nil, failWith
 	}
 
 	var out []string
@@ -221,7 +243,7 @@ func newFixture(t *testing.T, opts ...Option) *fixture {
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &fixture{
 		t:         t,
-		p:         New(slog.Default(), append([]Option{Workers(8), ReadTimeout(time.Second)}, opts...)...),
+		p:         New(slog.Default(), append([]Option{Workers(8), ReadTimeout(time.Second), sweepRetry(time.Hour)}, opts...)...),
 		out:       make(chan *iutil.Event, 64),
 		in:        make(chan iutil.Command),
 		raised:    make(chan iutil.Command, 8),
@@ -1807,4 +1829,72 @@ func TestInstanceStartedSupersedesInFlightUpdatedRead(t *testing.T) {
 	require.NoError(t, ev2.Err())
 	assert.Equal(t, incusapi.EventLifecycleInstanceStarted, ev2.Action())
 	assert.NotNil(t, ev2.Instance())
+}
+
+// TestABrokenRunIsTriedAgainSoon: a run that broke leaves what is held as old as
+// whatever went wrong, and every instance read held until a run reaches the
+// networks. Waiting the interval for the next would be hours of both.
+func TestABrokenRunIsTriedAgainSoon(t *testing.T) {
+	t.Parallel()
+
+	h := newFixture(t, sweepRetry(10*time.Millisecond))
+
+	// The run Run started has refused at least once.
+	require.Eventually(t, func() bool { return h.lists.Load() > 0 },
+		2*time.Second, time.Millisecond, "the first run never asked for a fleet")
+
+	// The daemon answers again, and nothing announces it.
+	fleet := testlib.NewProject("p", 1, 1)
+	fleet.Project.Config[iutil.FeaturesNetworks] = "true"
+
+	h.mu.Lock()
+	h.fleet = fleet
+	h.mu.Unlock()
+
+	for {
+		ev := h.next()
+		if ev.Action() == iutil.ActionSweepEnd {
+			break
+		}
+	}
+}
+
+// TestARunMissingAnInstanceListingIsNotDone: a project whose instances could
+// not be listed has had nothing it holds confirmed or pruned, so a run past it
+// is not one that read the fleet whole. It is tried again, and the end of a run
+// - which is what makes the chain warm - comes only from one that was.
+func TestARunMissingAnInstanceListingIsNotDone(t *testing.T) {
+	t.Parallel()
+
+	h := newFixture(t, sweepRetry(10*time.Millisecond))
+
+	h.mu.Lock()
+	h.instancesErr = errors.New("incusd said no")
+	h.mu.Unlock()
+
+	fleet := testlib.NewProject("p", 1, 1)
+	fleet.Project.Config[iutil.FeaturesNetworks] = "true"
+	h.setFleet(fleet)
+
+	require.Equal(t, iutil.ActionConnected, h.next().Action())
+
+	// Tried again, each time without the listing.
+	require.Eventually(t, func() bool { return h.instanceLists.Load() >= 3 },
+		2*time.Second, time.Millisecond, "a run missing a listing was not tried again")
+
+	for len(h.out) > 0 {
+		assert.NotEqual(t, iutil.ActionSweepEnd, (<-h.out).Action(),
+			"a run that could not list a project's instances was called done")
+	}
+
+	h.mu.Lock()
+	h.instancesErr = nil
+	h.mu.Unlock()
+
+	for {
+		ev := h.next()
+		if ev.Action() == iutil.ActionSweepEnd {
+			break
+		}
+	}
 }

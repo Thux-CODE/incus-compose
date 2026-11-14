@@ -31,6 +31,11 @@ const (
 
 	defaultSweepInterval = 6 * time.Hour
 
+	// defaultSweepRetry and defaultSweepRetryMax bound the wait after a run
+	// that broke: a second, doubling, never more than half a minute.
+	defaultSweepRetry    = time.Second
+	defaultSweepRetryMax = 30 * time.Second
+
 	// defaultStoreInterval is how often what this plugin holds is written, and
 	// so how much of a fleet a start finds stale.
 	defaultStoreInterval = 5 * time.Second
@@ -139,6 +144,11 @@ type options struct {
 	ReadDelay     time.Duration
 	SweepInterval time.Duration
 	StoreInterval time.Duration
+
+	// sweepRetry and sweepRetryMax are the backoff after a run that broke.
+	// Unexported: a test shortens them, nothing else has a reason to.
+	sweepRetry    time.Duration
+	sweepRetryMax time.Duration
 	TTL           time.Duration
 	Project       func(p *incusapi.Project) bool
 	Instance      func(i *incusapi.Instance) bool
@@ -222,6 +232,8 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		ReadDelay:     defaultReadDelay,
 		SweepInterval: defaultSweepInterval,
 		StoreInterval: defaultStoreInterval,
+		sweepRetry:    defaultSweepRetry,
+		sweepRetryMax: defaultSweepRetryMax,
 	}
 
 	for _, opt := range opts {

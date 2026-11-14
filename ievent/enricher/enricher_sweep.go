@@ -20,6 +20,8 @@ func (p *Plugin) sweepArgs() sweepArgs {
 		serves:   p.opts.Project,
 		timeout:  p.opts.ReadTimeout,
 		delay:    p.opts.ReadDelay,
+		retry:    p.opts.sweepRetry,
+		retryMax: p.opts.sweepRetryMax,
 	}
 }
 

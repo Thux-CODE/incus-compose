@@ -11,6 +11,17 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Fixed
+
+- The `ievent` enricher retries a sweep that failed (projects not listed, or a
+  project's instances not listed) after a backoff of 1 s doubling up to 30 s,
+  instead of waiting the 6 h sweep interval, and no longer ends a sweep that
+  could not list a project's instances as complete. `ic-dns` no longer stays
+  cold, holding every instance read, for hours after one failed sweep. (by
+  @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
