@@ -35,12 +35,13 @@ against the events that caused it, which is the same argument the end of a round
 rests on. Edges rather than a level, so whoever folds them starts not-ready: the
 truth before anything has been read.
 
-`ready` latches true on `ChainWarm` and clears on `ChainCold`, so it can flap -
-a fleet that drops back to cold is not-ready again until the chain warms back
-up. `connected` is its own atomic, set straight off `ActionConnected` /
-`ActionDisconnected`: readiness does not imply the stream is up, and the reverse
-doesn't hold either, which is why `/ready` checks both and fails on whichever
-one is missing.
+`ready` latches true on `ChainWarm` - from an event no plugin dropped, since a
+dropped one was folded by nobody and may have overtaken what it follows - and
+clears on `ChainCold`, so it can flap - a fleet that drops back to cold is
+not-ready again until the chain warms back up. `connected` is its own atomic,
+set straight off `ActionConnected` / `ActionDisconnected`: readiness does not
+imply the stream is up, and the reverse doesn't hold either, which is why
+`/ready` checks both and fails on whichever one is missing.
 
 ## /health And /ready Answer Different Questions
 

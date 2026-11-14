@@ -324,6 +324,77 @@ already been stamped by the time that event reaches here. `dns` only reads it -
 `step` takes it as whether a serial may move, since a step is a claim the zone
 changed and cold has confirmed nothing.
 
+## A Cold Server Fails Its Misses
+
+Between a start and the first `enricher/sweep-end`, what is published is only
+what has been read so far: a project not reached yet has no zone, and a zone
+being filled lacks the instances still to come. Answering from that as if it
+were whole hands out wrong answers that look final - a name under `--suffix`
+with no zone fell through to `--forward`, whose `NXDOMAIN` the client believes,
+may cache, and does not retry on its next `nameserver`.
+
+So until then every miss is `SERVFAIL` with the extended error `Not Ready`:
+inside a zone (missing, invisible, or a querier not placed yet - its own
+instance may be the one still unread), and anywhere under `--suffix`, which
+`dns` hands the engine as `ECSView.Claims` (an empty or root suffix claims
+nothing). Hits, `NODATA` and the apex answer as usual, and names outside both
+fall through, so the internet keeps resolving.
+
+glibc, musl and Go move on to the next listed server on `SERVFAIL`, which is
+what lets two `ic-dns` in `dns.nameservers` ride out a rolling restart. With a
+single server the cost is a temporary failure instead of a wrong answer, and on
+musl each such miss blocks for its 5 s timeout first. The measurements are in
+[ecs_view's README](https://github.com/lxc/incus-compose/blob/main/cmd/ic-dns/dns/ecs_view/README.md#before-the-first-read);
+systemd-resolved has not been measured.
+
+The claim is the whole suffix. A deployment that forwards part of it to another
+`ic-dns` - two serving different projects under one suffix - gets `SERVFAIL` for
+those names too while this one is cold.
+
+### What Warm Means
+
+Warm is the end of a round, not a complete read. A round reaches its end past a
+project whose instance listing failed (`continue` in `sweepInstances`) and past
+reads that timed out, so the view can turn warm with holes, and those names are
+`NXDOMAIN` until a later round fills them.
+
+A round that fails outright - `GetProjectNames` timing out, say - raises no
+sweep-end, and today nothing runs again before `SweepInterval` (6 h by default):
+the view stays cold and every miss is `SERVFAIL` for that long. A retry with
+backoff is being done separately (`ievent-sweep-retry`); this behaviour depends
+on it.
+
+### Turning Warm, In Order
+
+Warm is the engine's own latch rather than `ChainState`. It sets on the first
+`SetHealthy(true)`, which only `rounded` makes, and it never clears.
+`ChainState` drops to cold on every lost stream, while the zones it leaves
+behind are full - failing misses for a blip would fail them on every replica at
+once, since an Incus outage drops every stream together. A lost stream clamps
+the TTL and nothing more, as before.
+
+`rounded` runs only on an ordered signal, because warming early turns names not
+read yet into final `NXDOMAIN`s:
+
+- a sweep-end that was not dropped. One dropped on the way - at a full enricher
+  inbox, say - skipped the line and overtook the reads still in flight before
+  it, so it rounds nothing;
+- while never warm, any other event stamped `ChainWarm` that was not dropped: it
+  walked the chain behind the sweep-end, so everything that round read has been
+  folded. One stamped before the last lost stream is a debounced leftover and
+  does not count.
+
+A sweep-end that cannot be used - dropped at `dns`'s own full inbox, or arriving
+dropped - is asked for again: `dns` raises `dns/round-lost`, which enters at the
+head behind everything already in the chain and comes back stamped warm. Without
+it a quiet fleet could leave the view cold until the next round.
+
+`/ready` follows the same signal. `http` turns ready on a warm event only when
+it was not dropped, and it sits after `dns`, so the event that makes it ready is
+one `dns` has already folded: `/ready` is never up while misses still fail. It
+also goes unready on a lost stream, which the answers deliberately do not
+follow.
+
 ## Readiness Is An Event
 
 `dns` raises `dns/ready` through `Command` when what it published becomes worth
@@ -399,11 +470,11 @@ would start, answer, and serve nothing.
 
 ## HTTP Endpoints & Liveness
 
-| Path       | Description                                                                     |
-| ---------- | ------------------------------------------------------------------------------- |
-| `/metrics` | Prometheus metrics for all CoreDNS and ievent plugins                           |
-| `/health`  | Liveness check (stream is connected and has processed events recently)          |
-| `/ready`   | Readiness check (fleet has been fully enumerated and the event stream is alive) |
+| Path       | Description                                                                    |
+| ---------- | ------------------------------------------------------------------------------ |
+| `/metrics` | Prometheus metrics for all CoreDNS and ievent plugins                          |
+| `/health`  | Liveness check (stream is connected and has processed events recently)         |
+| `/ready`   | Readiness check (a round of the fleet has ended and the event stream is alive) |
 
 The two answer different questions on purpose. The only sensible response to
 `/health` failing is a restart, and a restart does not fix an Incus that is down
@@ -422,6 +493,14 @@ the event stream at the same time. The first round after a start or a reconnect
 ignores both and runs flat out, because nothing is served until it lands.
 
 ## Known Gaps
+
+- **Cold misses outside `--suffix` are claimed only once their zone exists.** A
+  zone named by `user.label.dns.zone` outside the suffix, and a reverse zone,
+  answer `SERVFAIL` for a miss before warm only after something has been read
+  into them; before that the query falls through to `--forward`. The cold store
+  holds every zone published last time, but not whether it was `Fallthrough`,
+  and claiming the parent domain of an absolute alias would fail every other
+  name in it.
 
 - **Upstream metrics label off `metrics.WithServer`**, which reads a context key
   `core/dnsserver` sets - and nothing here runs it. So `coredns_cache_*` and

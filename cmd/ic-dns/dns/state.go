@@ -1,6 +1,8 @@
 package dns
 
 import (
+	"time"
+
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
 	"github.com/koji-hirono/go-critbit"
 
@@ -38,6 +40,12 @@ type state struct {
 
 	// chain is what the last event carried.
 	chain iutil.ChainState
+
+	// warm is a round having ended here, which is what turns the view warm for
+	// good; lost is when the stream last went, so a warm stamp older than that
+	// is not taken for one.
+	warm bool
+	lost time.Time
 }
 
 // newState builds the working copy a fold starts from, with the serials a

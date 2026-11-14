@@ -44,6 +44,13 @@ form.
   restricted to `projects: []`) now removes every name at the first sweep, where
   v1.4.0 kept answering. (by @sandroden)
 
+- `ic-dns` answers `SERVFAIL` (extended error `Not Ready`) instead of `NXDOMAIN`
+  or forwarding upstream for names under its suffix that it cannot answer before
+  the first complete round of the fleet, so resolvers fall back to the next
+  nameserver while a replica is restarting. Names outside the suffix are still
+  forwarded, and nothing changes once warm. `/ready` now turns ready only on a
+  warm event no plugin dropped. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

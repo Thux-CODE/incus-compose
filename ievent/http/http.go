@@ -124,7 +124,12 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 		p.ready.Store(false)
 
 	case iutil.ChainWarm:
-		p.ready.Store(true)
+		// Dropped on the way, it was folded by nobody before here, so it says
+		// nothing about what is served: the next warm event that was is
+		// what does.
+		if ev.Err() == nil {
+			p.ready.Store(true)
+		}
 	}
 
 	p.next(ev)
