@@ -5,7 +5,7 @@
 # same file serves both:
 #   ic-dns-trusted-client   -> 1.4.0-trusted     (v1.4.0 + --trusted-client)
 #   ic-dns-53c7e15-trusted  -> 53c7e15-trusted   (what ran from 2026-09-14)
-#   ic-dns-coldwarm-test    -> 1.4.0-coldwarm.2  (trial: cold store + SERVFAIL until warm)
+#   ic-dns-coldwarm-test    -> 1.4.0-coldwarm.3  (trial: cold store + SERVFAIL until warm)
 # plus the short commit sha, so a deployment can pin what it pulled.
 name: ic-dns image
 
@@ -37,7 +37,7 @@ jobs:
           case "${GITHUB_REF_NAME}" in
             ic-dns-trusted-client)  tag=1.4.0-trusted ;;
             ic-dns-53c7e15-trusted) tag=53c7e15-trusted ;;
-            ic-dns-coldwarm-test)   tag=1.4.0-coldwarm.2 ;;
+            ic-dns-coldwarm-test)   tag=1.4.0-coldwarm.3 ;;
             *) echo "no image tag for branch ${GITHUB_REF_NAME}" >&2; exit 1 ;;
           esac
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/incus-compose/ic-dns"
