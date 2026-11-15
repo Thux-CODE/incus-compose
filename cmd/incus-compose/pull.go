@@ -24,6 +24,11 @@ type pullArgs struct {
 	IgnoreBuildable    bool
 	IgnorePullFailures bool
 
+	// NoTools leaves the helper images (ic-healthd, ic-sleep, ic-dns) alone,
+	// for a caller that creates no sidecar. A one-off or init runner fetches
+	// ic-sleep itself when it needs it.
+	NoTools bool
+
 	Pull    client.PullMode
 	Scale   map[string]int
 	Workers int
@@ -80,9 +85,11 @@ func pull(ctx context.Context, p *project.Project, c *client.Client, args pullAr
 		}
 	}
 
-	err = downloadTools(ctx, c)
-	if err != nil {
-		c.LogWarn("While downloading tools", "error", err)
+	if !args.NoTools {
+		err = downloadTools(ctx, c)
+		if err != nil {
+			c.LogWarn("While downloading tools", "error", err)
+		}
 	}
 
 	// Only "always" acts on the answer, and "never" may not touch the source at all.

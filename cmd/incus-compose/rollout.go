@@ -334,9 +334,12 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	pc := c.Clone()
 
+	// The sidecars are not ours to touch, nor are their images in the global
+	// project.
 	err := pull(ctx, p, pc, pullArgs{
 		Services:        []string{svcName},
 		IgnoreBuildable: true,
+		NoTools:         true,
 		Pull:            args.Pull,
 		Workers:         args.Workers,
 		Debug:           args.Debug,
