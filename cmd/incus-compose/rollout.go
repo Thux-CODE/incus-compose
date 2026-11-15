@@ -36,6 +36,12 @@ const (
 	// rolloutStopSettle is how long a stop that reported an error may take to
 	// land before retiring a replica gives up on it.
 	rolloutStopSettle = 30 * time.Second
+
+	// rolloutRestartWindow is how long a new replica kept stopped is watched
+	// for a restart ic-healthd had under way, and rolloutDiscardAttempts how
+	// many times such a replica is stopped before the rollout gives up on it.
+	rolloutRestartWindow   = 10 * time.Second
+	rolloutDiscardAttempts = 3
 )
 
 func newRolloutCommand() *cli.Command {
@@ -754,17 +760,9 @@ func (r *rolloutRunner) stop(ctx context.Context, index int, graceful bool) erro
 	}
 
 	stopped := func(ctx context.Context) (bool, error) {
-		conn, err := r.c.Connection()
-		if err != nil {
-			return false, err
-		}
+		status, err := r.status(ctx, index)
 
-		info, _, err := conn.GetInstance(ctx, r.c.IncusProject(), r.name(index), nil)
-		if err != nil {
-			return false, err
-		}
-
-		return info.StatusCode == incusApi.Stopped, nil
+		return status == incusApi.Stopped, err
 	}
 
 	return retireStop(ctx, stop, stopped, graceful, rolloutStopSettle, time.Second)
@@ -832,24 +830,102 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		}
 	}
 
-	// One kept for a look is let shut down; one going away is killed.
-	err := r.stop(ctx, index, keep)
-	if err != nil {
+	running := func(ctx context.Context) (bool, error) {
+		status, err := r.status(ctx, index)
+
+		return status == incusApi.Running, err
+	}
+
+	stop := func(ctx context.Context) error {
+		// Stop goes by the state read last, which a restart has made stale:
+		// writing the marker reads it afresh.
+		err := inst.SetHealthCheckingStopped(ctx, true)
+		if err != nil {
+			return err
+		}
+
+		// One kept for a look is let shut down; one going away is killed.
+		return r.stop(ctx, index, keep)
+	}
+
+	remove := func(ctx context.Context) error {
+		err := inst.Delete(ctx)
+		if err == nil {
+			delete(r.instances, index)
+		}
+
 		return err
 	}
 
-	if keep {
-		return nil
+	startsAgain := func(ctx context.Context) (bool, error) {
+		deadline := time.Now().Add(rolloutRestartWindow)
+
+		for time.Now().Before(deadline) {
+			err := r.sleep(ctx, time.Second)
+			if err != nil {
+				return false, err
+			}
+
+			again, err := running(ctx)
+			if err == nil && again {
+				return true, nil
+			}
+		}
+
+		return false, nil
 	}
 
-	err = inst.Delete(ctx)
+	return rolloutDiscard(ctx, keep, rolloutDiscardAttempts, stop, remove, running, startsAgain)
+}
+
+// rolloutDiscard takes a new replica away, or with keep leaves it stopped.
+// ic-healthd's restart policy acts on the same unhealthy verdict a rollout
+// gives up on, and a restart it began before the stop marker was written
+// starts the replica again after the rollout stopped it. So it is stopped
+// again, up to attempts times, until it is deleted or, kept, stays stopped.
+func rolloutDiscard(ctx context.Context, keep bool, attempts int, stop, remove func(ctx context.Context) error, running, startsAgain func(ctx context.Context) (bool, error)) error {
+	for attempt := 1; ; attempt++ {
+		err := stop(ctx)
+		if err != nil {
+			return err
+		}
+
+		if keep {
+			again, err := startsAgain(ctx)
+			if err != nil || !again {
+				return err
+			}
+		} else {
+			err = remove(ctx)
+			if err == nil {
+				return nil
+			}
+
+			again, readErr := running(ctx)
+			if readErr != nil || !again {
+				return err
+			}
+		}
+
+		if attempt >= attempts {
+			return fmt.Errorf("started again after %d stops, by ic-healthd's restart policy", attempt)
+		}
+	}
+}
+
+// status reads the replica's status code from Incus.
+func (r *rolloutRunner) status(ctx context.Context, index int) (incusApi.StatusCode, error) {
+	conn, err := r.c.Connection()
 	if err != nil {
-		return err
+		return 0, err
 	}
 
-	delete(r.instances, index)
+	info, _, err := conn.GetInstance(ctx, r.c.IncusProject(), r.name(index), nil)
+	if err != nil {
+		return 0, err
+	}
 
-	return nil
+	return info.StatusCode, nil
 }
 
 // instanceAbsent reports whether Incus has no instance by this name. Failing to

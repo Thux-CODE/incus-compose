@@ -775,6 +775,93 @@ func TestRolloutRetireStop(t *testing.T) {
 	})
 }
 
+func TestRolloutDiscard(t *testing.T) {
+	t.Parallel()
+
+	errRunning := errors.New("Instance is running")
+
+	// restarts is how many times ic-healthd starts the replica again after a
+	// stop; restarted it is running, and a delete then fails.
+	run := func(keep bool, restarts int) (int, int, error) {
+		var (
+			stops, removes int
+			running        bool
+		)
+
+		stop := func(context.Context) error {
+			stops++
+			running = false
+
+			return nil
+		}
+
+		restart := func() {
+			if restarts > 0 {
+				restarts--
+				running = true
+			}
+		}
+
+		remove := func(context.Context) error {
+			removes++
+
+			restart()
+			if running {
+				return errRunning
+			}
+
+			return nil
+		}
+
+		isRunning := func(context.Context) (bool, error) { return running, nil }
+
+		startsAgain := func(context.Context) (bool, error) {
+			restart()
+
+			return running, nil
+		}
+
+		err := rolloutDiscard(t.Context(), keep, 3, stop, remove, isRunning, startsAgain)
+
+		return stops, removes, err
+	}
+
+	t.Run("deleted at the first go", func(t *testing.T) {
+		t.Parallel()
+
+		stops, removes, err := run(false, 0)
+		require.NoError(t, err)
+		assert.Equal(t, 1, stops)
+		assert.Equal(t, 1, removes)
+	})
+
+	t.Run("started again by a restart under way, stopped again and deleted", func(t *testing.T) {
+		t.Parallel()
+
+		stops, removes, err := run(false, 1)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stops)
+		assert.Equal(t, 2, removes)
+	})
+
+	t.Run("kept, it is watched and stopped again", func(t *testing.T) {
+		t.Parallel()
+
+		stops, removes, err := run(true, 1)
+		require.NoError(t, err)
+		assert.Equal(t, 2, stops)
+		assert.Zero(t, removes)
+	})
+
+	t.Run("one that keeps coming back is given up on", func(t *testing.T) {
+		t.Parallel()
+
+		stops, _, err := run(false, 10)
+		require.Error(t, err)
+		assert.Equal(t, 3, stops)
+	})
+}
+
 func TestRolloutBlockers(t *testing.T) {
 	t.Parallel()
 
