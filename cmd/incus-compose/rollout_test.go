@@ -696,6 +696,85 @@ func TestRolloutHealthTimeout(t *testing.T) {
 	}))
 }
 
+func TestRolloutRetireStop(t *testing.T) {
+	t.Parallel()
+
+	errDeadline := errors.New("context deadline exceeded")
+	errPID := errors.New("Invalid PID -1")
+
+	// stops answers the stops in turn; stoppedAfter is how many reads of the
+	// state come before the one that finds it Stopped (-1: never).
+	run := func(graceful bool, stops []error, stoppedAfter int) ([]bool, int, error) {
+		var (
+			calls []bool
+			reads int
+		)
+
+		stop := func(_ context.Context, force bool) error {
+			calls = append(calls, force)
+
+			return stops[len(calls)-1]
+		}
+
+		stopped := func(context.Context) (bool, error) {
+			reads++
+			if stoppedAfter < 0 || reads <= stoppedAfter {
+				return false, errPID
+			}
+
+			return true, nil
+		}
+
+		err := retireStop(t.Context(), stop, stopped, graceful, 50*time.Millisecond, time.Millisecond)
+
+		return calls, reads, err
+	}
+
+	t.Run("a graceful stop is all it takes", func(t *testing.T) {
+		t.Parallel()
+
+		calls, reads, err := run(true, []error{nil}, -1)
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false}, calls)
+		assert.Zero(t, reads)
+	})
+
+	t.Run("a graceful stop that runs out is followed by a kill", func(t *testing.T) {
+		t.Parallel()
+
+		calls, reads, err := run(true, []error{errDeadline, nil}, -1)
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false, true}, calls)
+		assert.Zero(t, reads)
+	})
+
+	t.Run("a kill that cannot read the instance back counts once it is stopped", func(t *testing.T) {
+		t.Parallel()
+
+		calls, reads, err := run(true, []error{errDeadline, errPID}, 3)
+		require.NoError(t, err)
+		assert.Equal(t, []bool{false, true}, calls)
+		assert.Equal(t, 4, reads)
+	})
+
+	t.Run("an instance that never stops is an error with every cause", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := run(true, []error{errDeadline, errPID}, -1)
+		require.Error(t, err)
+		require.ErrorIs(t, err, errDeadline)
+		require.ErrorIs(t, err, errPID)
+	})
+
+	t.Run("without graceful it is killed straight away", func(t *testing.T) {
+		t.Parallel()
+
+		calls, _, err := run(false, []error{errPID}, 0)
+		require.NoError(t, err)
+		assert.Equal(t, []bool{true}, calls)
+	})
+}
+
 func TestRolloutBlockers(t *testing.T) {
 	t.Parallel()
 

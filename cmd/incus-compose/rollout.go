@@ -32,6 +32,10 @@ const (
 	rolloutHealthMargin = 30 * time.Second
 
 	rolloutPoll = 2 * time.Second
+
+	// rolloutStopSettle is how long a stop that reported an error may take to
+	// land before retiring a replica gives up on it.
+	rolloutStopSettle = 30 * time.Second
 )
 
 func newRolloutCommand() *cli.Command {
@@ -718,14 +722,9 @@ func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) erro
 func (r *rolloutRunner) retire(ctx context.Context, index int) error {
 	inst := r.instances[index]
 
-	err := inst.Stop(ctx, client.OptionTimeout(r.stopTimeout))
-	if err != nil && !errors.Is(err, client.ErrNotRunning) {
-		// The graceful stop and its deadline end together, which can leave
-		// the kill after it unsent.
-		forceErr := inst.Stop(ctx, client.OptionTimeout(r.stopTimeout), client.OptionForce())
-		if forceErr != nil && !errors.Is(forceErr, client.ErrNotRunning) {
-			return errors.Join(err, forceErr)
-		}
+	err := r.stop(ctx, index, true)
+	if err != nil {
+		return err
 	}
 
 	err = inst.Delete(ctx)
@@ -736,6 +735,80 @@ func (r *rolloutRunner) retire(ctx context.Context, index int) error {
 	delete(r.instances, index)
 
 	return nil
+}
+
+// stop stops a replica, see retireStop.
+func (r *rolloutRunner) stop(ctx context.Context, index int, graceful bool) error {
+	inst := r.instances[index]
+
+	stop := func(ctx context.Context, force bool) error {
+		opts := []client.Option{client.OptionTimeout(r.stopTimeout)}
+		if force {
+			opts = append(opts, client.OptionForce())
+		}
+
+		return inst.Stop(ctx, opts...)
+	}
+
+	stopped := func(ctx context.Context) (bool, error) {
+		conn, err := r.c.Connection()
+		if err != nil {
+			return false, err
+		}
+
+		info, _, err := conn.GetInstance(ctx, r.c.IncusProject(), r.name(index), nil)
+		if err != nil {
+			return false, err
+		}
+
+		return info.StatusCode == incusApi.Stopped, nil
+	}
+
+	return retireStop(ctx, stop, stopped, graceful, rolloutStopSettle, time.Second)
+}
+
+// retireStop stops a replica: with graceful within its grace period and then
+// by force, otherwise by force alone. Incus can still be carrying a stop out
+// when the client's deadline for it passes - the graceful one and its deadline
+// end together, and the kill sent after it may find the instance halfway down,
+// whose state does not read back ("Invalid PID -1"). So a stop that reports an
+// error counts as done once the instance reads Stopped within settle.
+func retireStop(ctx context.Context, stop func(ctx context.Context, force bool) error, stopped func(ctx context.Context) (bool, error), graceful bool, settle, poll time.Duration) error {
+	var err error
+
+	if graceful {
+		err = stop(ctx, false)
+		if err == nil || errors.Is(err, client.ErrNotRunning) {
+			return nil
+		}
+	}
+
+	forceErr := stop(ctx, true)
+	if forceErr == nil || errors.Is(forceErr, client.ErrNotRunning) {
+		return nil
+	}
+
+	deadline := time.Now().Add(settle)
+
+	for {
+		ok, readErr := stopped(ctx)
+		if readErr == nil && ok {
+			return nil
+		}
+
+		if !time.Now().Before(deadline) {
+			return errors.Join(err, forceErr, readErr)
+		}
+
+		t := time.NewTimer(poll)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+
+			return errors.Join(err, forceErr, ctx.Err())
+		case <-t.C:
+		}
+	}
 }
 
 func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error {
@@ -756,13 +829,9 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		}
 	}
 
-	opts := []client.Option{client.OptionForce()}
-	if keep {
-		opts = []client.Option{client.OptionTimeout(r.stopTimeout)}
-	}
-
-	err := inst.Stop(ctx, opts...)
-	if err != nil && !errors.Is(err, client.ErrNotRunning) {
+	// One kept for a look is let shut down; one going away is killed.
+	err := r.stop(ctx, index, keep)
+	if err != nil {
 		return err
 	}
 
