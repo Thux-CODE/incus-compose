@@ -66,6 +66,26 @@ func testClusterMembers() []incusApi.ClusterMember {
 	}
 }
 
+func TestMembersInGroups(t *testing.T) {
+	t.Parallel()
+
+	names := func(members []incusApi.ClusterMember) []string {
+		out := []string{}
+		for _, m := range members {
+			out = append(out, m.ServerName)
+		}
+
+		return out
+	}
+
+	all := testClusterMembers()
+
+	assert.Equal(t, names(all), names(membersInGroups(all, nil)), "an unrestricted project keeps every member")
+	assert.Equal(t, []string{"node3"}, names(membersInGroups(all, []string{"compute"})))
+	assert.Equal(t, []string{"node1", "node2", "node3"}, names(membersInGroups(all, []string{"web", "compute"})))
+	assert.Empty(t, membersInGroups(all, []string{"gpu"}))
+}
+
 func TestFilterClusterMembers(t *testing.T) {
 	t.Parallel()
 

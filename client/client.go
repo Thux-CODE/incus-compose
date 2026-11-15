@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 
 	incusApi "github.com/lxc/incus/v7/shared/api"
@@ -189,6 +190,25 @@ func (c *Client) Clone() *Client {
 // FeaturesNetworks reports whether the project has features.networks enabled.
 func (c *Client) FeaturesNetworks() bool {
 	return c.projectConfig["features.networks"] == "true"
+}
+
+// AllowedClusterGroups returns the cluster groups a restricted project may
+// place instances on, nil when it may use every member.
+func (c *Client) AllowedClusterGroups() []string {
+	if c.projectConfig["restricted"] != "true" {
+		return nil
+	}
+
+	var groups []string
+
+	for g := range strings.SplitSeq(c.projectConfig["restricted.cluster.groups"], ",") {
+		g = strings.TrimSpace(g)
+		if g != "" {
+			groups = append(groups, g)
+		}
+	}
+
+	return groups
 }
 
 // NetworkType reports the default network type for the project ("ovn" or "bridge").

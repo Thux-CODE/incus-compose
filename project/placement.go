@@ -66,6 +66,10 @@ func (p *Project) resolveServicePlacement(c *client.Client, service types.Servic
 			return 0, nil, fmt.Errorf("service %q: listing cluster members: %w", service.Name, err)
 		}
 
+		// A target outside the groups the project is restricted to is refused
+		// by Incus ("Project isn't allowed to use this cluster member").
+		members = membersInGroups(members, c.AllowedClusterGroups())
+
 		remotePool, err := p.isServiceStorageRemote(c, service)
 		if err != nil {
 			return 0, nil, fmt.Errorf("service %q: checking storage pool: %w", service.Name, err)
@@ -240,6 +244,24 @@ func (p *Project) isServiceStorageRemote(c *client.Client, service types.Service
 }
 
 // filterClusterMembers filters online cluster members against Compose placement constraints.
+// membersInGroups keeps the members that belong to one of groups; no groups
+// keeps them all.
+func membersInGroups(members []incusApi.ClusterMember, groups []string) []incusApi.ClusterMember {
+	if len(groups) == 0 {
+		return members
+	}
+
+	var out []incusApi.ClusterMember
+
+	for _, m := range members {
+		if slices.ContainsFunc(m.Groups, func(g string) bool { return slices.Contains(groups, g) }) {
+			out = append(out, m)
+		}
+	}
+
+	return out
+}
+
 func filterClusterMembers(members []incusApi.ClusterMember, constraints []string) ([]incusApi.ClusterMember, error) {
 	parsed := make([]placementConstraint, 0, len(constraints))
 	for _, raw := range constraints {
