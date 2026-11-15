@@ -39,8 +39,18 @@ type fakeRollout struct {
 	failCreate map[int]bool
 	creates    int
 
-	// onSleep runs before each sleep, with how long it is for.
-	onSleep func(d time.Duration)
+	// onSleep runs before each sleep, with how long it is for; afterSleep runs
+	// once it is over.
+	onSleep    func(d time.Duration)
+	afterSleep func(d time.Duration)
+
+	// onHealth runs after each read of a replica's health.
+	onHealth func(status string)
+
+	// fail makes the operation an event names fail; healthErrs fails that
+	// many reads of a new replica's health before it answers.
+	fail       map[string]error
+	healthErrs int
 
 	now    time.Time
 	events []string
@@ -55,6 +65,7 @@ func newFakeRollout(t *testing.T, present map[int]*fakeReplica, scripts ...[]str
 		replicas:   present,
 		scripts:    scripts,
 		failCreate: map[int]bool{},
+		fail:       map[string]error{},
 		now:        time.Unix(0, 0),
 	}
 
@@ -87,7 +98,30 @@ func (f *fakeRollout) record(format string, args ...any) {
 	assert.GreaterOrEqual(f.t, f.ready(), f.minReady, "after %q the service is left with fewer ready replicas", f.events[len(f.events)-1])
 }
 
-func (f *fakeRollout) create(_ context.Context, index int) error {
+// op is the start of every operation but a health read: what a canceled
+// context or an injected failure does to it.
+func (f *fakeRollout) op(ctx context.Context, event string) error {
+	err := ctx.Err()
+	if err != nil {
+		f.events = append(f.events, event+" canceled")
+		return err
+	}
+
+	err = f.fail[event]
+	if err != nil {
+		f.events = append(f.events, event+" failed")
+		return err
+	}
+
+	return nil
+}
+
+func (f *fakeRollout) create(ctx context.Context, index int) error {
+	err := f.op(ctx, fmt.Sprintf("create web-%d", index))
+	if err != nil {
+		return err
+	}
+
 	f.creates++
 
 	if f.failCreate[f.creates] {
@@ -108,6 +142,11 @@ func (f *fakeRollout) health(ctx context.Context, index int) (string, bool, erro
 	}
 
 	r := f.replicas[index]
+	if r.fresh && f.healthErrs > 0 {
+		f.healthErrs--
+		return "", false, errors.New("connection reset")
+	}
+
 	if len(r.statuses) > 0 {
 		r.seen = r.statuses[0]
 		if len(r.statuses) > 1 {
@@ -119,29 +158,48 @@ func (f *fakeRollout) health(ctx context.Context, index int) (string, bool, erro
 		r.running = false
 	}
 
+	if f.onHealth != nil {
+		f.onHealth(r.seen)
+	}
+
 	return r.seen, r.running, nil
 }
 
-func (f *fakeRollout) drain(_ context.Context, index int, drained bool) error {
-	f.replicas[index].drained = drained
-
-	if drained {
-		f.record("drain web-%d", index)
-	} else {
-		f.record("undrain web-%d", index)
+func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error {
+	event := fmt.Sprintf("drain web-%d", index)
+	if !drained {
+		event = "un" + event
 	}
+
+	err := f.op(ctx, event)
+	if err != nil {
+		return err
+	}
+
+	f.replicas[index].drained = drained
+	f.record("%s", event)
 
 	return nil
 }
 
-func (f *fakeRollout) retire(_ context.Context, index int) error {
+func (f *fakeRollout) retire(ctx context.Context, index int) error {
+	err := f.op(ctx, fmt.Sprintf("retire web-%d", index))
+	if err != nil {
+		return err
+	}
+
 	delete(f.replicas, index)
 	f.record("retire web-%d", index)
 
 	return nil
 }
 
-func (f *fakeRollout) discard(_ context.Context, index int, keep bool) error {
+func (f *fakeRollout) discard(ctx context.Context, index int, keep bool) error {
+	err := f.op(ctx, fmt.Sprintf("discard web-%d", index))
+	if err != nil {
+		return err
+	}
+
 	r, ok := f.replicas[index]
 	if !ok {
 		f.record("discard web-%d (absent)", index)
@@ -172,6 +230,10 @@ func (f *fakeRollout) sleep(ctx context.Context, d time.Duration) error {
 	}
 
 	f.now = f.now.Add(d)
+
+	if f.afterSleep != nil {
+		f.afterSleep(d)
+	}
 
 	return nil
 }
@@ -268,11 +330,11 @@ func TestRolloutReplacesEveryReplica(t *testing.T) {
 			events:   []string{"create web-1", "drain web-2", "retire web-2"},
 		},
 		{
-			name:     "one replica too many gives back the drained one first",
+			name:     "a replica a killed rollout left drained is put back first",
 			replicas: 1,
 			present:  map[int]*fakeReplica{1: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
 			creates:  1,
-			events:   []string{"drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"},
+			events:   []string{"undrain web-1", "drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"},
 		},
 		{
 			name:     "a stopped old replica goes first and is not drained",
@@ -468,6 +530,137 @@ func TestRolloutInterrupted(t *testing.T) {
 	}
 }
 
+// An interrupt that lands between two steps leaves both replicas serving, and
+// one that lands as the old replica is stopped lets the stop finish.
+func TestRolloutInterruptedBetweenSteps(t *testing.T) {
+	t.Parallel()
+
+	t.Run("after the new replica is healthy, before the drain", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		f.onHealth = func(status string) {
+			if status == shared.HealthStatusHealthy {
+				cancel()
+			}
+		}
+
+		err := rollout(ctx, f, f.plan(1))
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "interrupted")
+
+		assert.Equal(t, []string{"create web-2"}, f.events)
+		assert.Equal(t, []string{"web-1 old", "web-2 new"}, f.final())
+	})
+
+	t.Run("at the end of the grace, as the stop begins", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
+		plan := f.plan(1)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		f.afterSleep = func(d time.Duration) {
+			if d == plan.Grace {
+				cancel()
+			}
+		}
+
+		err := rollout(ctx, f, plan)
+		require.ErrorIs(t, err, context.Canceled)
+
+		assert.Equal(t, []string{"create web-2", "drain web-1", "retire web-1"}, f.events)
+		assert.Equal(t, []string{"web-2 new"}, f.final())
+	})
+}
+
+// A step that fails says so and leaves nothing drained that should serve.
+func TestRolloutStepFails(t *testing.T) {
+	t.Parallel()
+
+	broken := errors.New("api down")
+
+	for _, tt := range []struct {
+		name   string
+		fail   string
+		events []string
+		final  []string
+		says   []string
+	}{
+		{
+			name:   "the drain",
+			fail:   "drain web-1",
+			events: []string{"create web-2", "drain web-1 failed", "undrain web-1"},
+			final:  []string{"web-1 old", "web-2 new"},
+			says:   []string{"web-1: draining: api down"},
+		},
+		{
+			name:   "the retire, after the new one serves",
+			fail:   "retire web-1",
+			events: []string{"create web-2", "drain web-1", "retire web-1 failed"},
+			final:  []string{"web-1 old drained", "web-2 new"},
+			says:   []string{"web-1: retiring: api down"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
+			f.fail[tt.fail] = broken
+
+			err := rollout(t.Context(), f, f.plan(1))
+			require.ErrorIs(t, err, broken)
+
+			for _, s := range tt.says {
+				assert.Contains(t, err.Error(), s)
+			}
+
+			assert.Equal(t, tt.events, f.events)
+			assert.Equal(t, tt.final, f.final())
+		})
+	}
+
+	t.Run("taking the failed replica away", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, []string{shared.HealthStatusUnhealthy})
+		f.fail["discard web-2"] = broken
+
+		err := rollout(t.Context(), f, f.plan(1))
+		require.ErrorIs(t, err, errRolloutUnhealthy)
+		require.ErrorIs(t, err, broken)
+		assert.Contains(t, err.Error(), "taking web-2 away")
+	})
+
+	t.Run("a few health reads in a row are tolerated", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart, slowStart)
+		f.healthErrs = rolloutHealthReads - 1
+
+		err := rollout(t.Context(), f, f.plan(1))
+		require.NoError(t, err)
+	})
+
+	t.Run("more health reads in a row are not", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
+		f.healthErrs = rolloutHealthReads
+
+		err := rollout(t.Context(), f, f.plan(1))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "connection reset")
+		assert.Equal(t, []string{"create web-2", "discard web-2"}, f.events)
+	})
+}
+
 // With one replica too many, the unhealthy one is given back first, so the
 // healthy one keeps serving throughout.
 func TestRolloutSurplusGivesBackTheUnhealthyOne(t *testing.T) {
@@ -526,6 +719,7 @@ func TestRolloutBlockers(t *testing.T) {
 		service   string
 		health    map[string]string
 		old       func(i *incusApi.Instance)
+		declared  map[string]map[string]string
 		pools     map[string]string
 		clustered bool
 		want      []string
@@ -591,6 +785,17 @@ func TestRolloutBlockers(t *testing.T) {
 			want: []string{`its proxy device "metrics" binds a host address the new and the old replica cannot both hold`},
 		},
 		{
+			name:     "a proxy device only the compose file has so far",
+			service:  "image: docker.io/library/busybox",
+			declared: map[string]map[string]string{"admin": {"type": "proxy", "listen": "tcp:0.0.0.0:9000"}},
+			want:     []string{`its proxy device "admin" binds a host address the new and the old replica cannot both hold`},
+		},
+		{
+			name:    "a rollout key that is not a boolean refuses",
+			service: "image: docker.io/library/busybox\n    x-incus-compose:\n      rollout: [no]",
+			want:    []string{"x-incus-compose.rollout must be true or false"},
+		},
+		{
 			name:    "a volume on a block pool of a cluster",
 			service: "image: docker.io/library/busybox",
 			old: func(i *incusApi.Instance) {
@@ -637,7 +842,12 @@ func TestRolloutBlockers(t *testing.T) {
 				tt.old(inst)
 			}
 
-			got := rolloutBlockers(p.Services["web"], health, inst, tt.pools, tt.clustered)
+			declared := tt.declared
+			if declared == nil {
+				declared = map[string]map[string]string{}
+			}
+
+			got := rolloutBlockers(p.Services["web"], health, inst.Config, []map[string]map[string]string{inst.ExpandedDevices, declared}, tt.pools, tt.clustered)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -699,9 +909,9 @@ func TestE2ERolloutLeavesDependentsAlone(t *testing.T) {
 	assert.NotEqual(t, backend, uuid("backend1-1"), "backend1-1 is a new instance")
 	assert.Equal(t, frontend, uuid("frontend-1"), "the dependent is left alone")
 
-	exists, err := c.InstanceExists("backend1-2")
+	absent, err := instanceAbsent(ctx, c, "backend1-2")
 	require.NoError(t, err)
-	assert.False(t, exists, "the spare is gone")
+	assert.True(t, absent, "the spare is gone")
 }
 
 // TestE2ERolloutNeverHealthy gives the new replica a check that never passes:
@@ -740,7 +950,7 @@ func TestE2ERolloutNeverHealthy(t *testing.T) {
 	assert.Equal(t, incusApi.Running, after.StatusCode)
 	assert.NotEqual(t, "true", after.Config[shared.DNSDrainKey], "the old replica is not left drained")
 
-	exists, err := c.InstanceExists("backend1-2")
+	absent, err := instanceAbsent(ctx, c, "backend1-2")
 	require.NoError(t, err)
-	assert.False(t, exists, "the failed replica is gone")
+	assert.True(t, absent, "the failed replica is gone")
 }

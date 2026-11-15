@@ -18,6 +18,9 @@ var (
 	errRolloutStopped   = errors.New("stopped before it was healthy")
 )
 
+// rolloutHealthReads is how many reads of a starting replica may fail in a row.
+const rolloutHealthReads = 3
+
 // rolloutOps is what a rollout does to the replicas of one service, by index.
 type rolloutOps interface {
 	// create creates the replica from the compose file and starts it, without
@@ -89,6 +92,12 @@ func rollout(ctx context.Context, ops rolloutOps, plan rolloutPlan) error {
 	err := rolloutSteps(ctx, ops, plan, slots)
 	if err != nil {
 		_, _ = fmt.Fprintf(plan.Out, "%s: stopped, left %s\n", plan.Service, rolloutState(plan, slots))
+
+		// `up` reconciles by index, and would recreate what has moved.
+		if !rolloutDeclared(slots, plan.Replicas) {
+			_, _ = fmt.Fprintf(plan.Out, "%s: run `rollout %s` again to finish, not `up`\n", plan.Service, plan.Service)
+		}
+
 		return err
 	}
 
@@ -99,6 +108,22 @@ func rollout(ctx context.Context, ops rolloutOps, plan rolloutPlan) error {
 
 func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) error {
 	n := plan.Replicas
+
+	// Only a rollout drains, and only right before a stop, so a replica that
+	// runs drained was left so by one that was killed. Put back, it serves
+	// again until its turn comes.
+	for _, r := range slots {
+		if !r.running || !r.drained {
+			continue
+		}
+
+		err := rolloutUndrain(ctx, ops, plan, r)
+		if err != nil {
+			return err
+		}
+
+		_, _ = fmt.Fprintf(plan.Out, "%s: drained by an earlier rollout, put back\n", plan.Name(r.index))
+	}
 
 	for {
 		if rolloutDone(slots, n) {
@@ -163,6 +188,19 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 
 		delete(slots, victim)
 	}
+}
+
+// rolloutDeclared reports whether the replicas are the names `up` expects,
+// 1 to n, whatever their age.
+func rolloutDeclared(slots map[int]*replica, n int) bool {
+	for i := 1; i <= n; i++ {
+		_, ok := slots[i]
+		if !ok {
+			return false
+		}
+	}
+
+	return len(slots) == n
 }
 
 // rolloutDone reports whether every name up to n holds a new replica and the
@@ -277,7 +315,12 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, r *rep
 	name := plan.Name(r.index)
 
 	if r.running {
-		err := ops.drain(ctx, r.index, true)
+		err := ctx.Err()
+		if err != nil {
+			return fmt.Errorf("interrupted: %w", err)
+		}
+
+		err = ops.drain(ctx, r.index, true)
 		if err != nil {
 			return errors.Join(fmt.Errorf("%s: draining: %w", name, err), rolloutUndrain(ctx, ops, plan, r))
 		}
@@ -321,11 +364,26 @@ func rolloutWaitHealthy(ctx context.Context, ops rolloutOps, plan rolloutPlan, i
 
 	_, _ = fmt.Fprintf(plan.Out, "%s: started, waiting up to %s for healthy\n", plan.Name(index), plan.HealthTimeout)
 
+	failed := 0
+
 	for {
 		status, running, err := ops.health(ctx, index)
 		if err != nil {
-			return err
+			// A wait of minutes outlives a hiccup of the API.
+			failed++
+			if ctx.Err() != nil || failed >= rolloutHealthReads {
+				return err
+			}
+
+			err = ops.sleep(ctx, plan.Poll)
+			if err != nil {
+				return fmt.Errorf("interrupted: %w", err)
+			}
+
+			continue
 		}
+
+		failed = 0
 
 		elapsed := plan.Now().Sub(start).Round(time.Second)
 

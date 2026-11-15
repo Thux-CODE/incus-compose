@@ -35,7 +35,9 @@ read the same variables as `up`.
 `rollout` acts on exactly the named services. It never follows `depends_on` and
 never recreates or restarts a dependent: a service that depends on the one being
 rolled out keeps the instance it has. It does not touch the ic-healthd or ic-dns
-sidecars either, where `up` would update them.
+sidecars either, where `up` would update them. A network or volume the compose
+file has gained since the last `up` is created for the new replica, as `up`
+would; existing ones are only read.
 
 ## What it does
 
@@ -115,11 +117,17 @@ second one kills it outright.
 A rollout that stopped, for whatever reason, can be run again and picks up from
 what is there. Every replica found counts as one to replace. If the spare is
 there as well (an interrupt while draining), one replica is given back first: a
-stopped one, a drained one or one that is not healthy before a healthy one, so
-the service keeps N replicas serving.
+stopped one or one that is not healthy before a healthy one, so the service
+keeps N replicas serving.
 
-A replica left drained by a rollout that was killed is retired first by the next
-one. `up` does not clear the drain label.
+A running replica left drained by a rollout that was killed is put back into
+the service name first: only a rollout drains, right before a stop. `up` does
+not clear the drain label.
+
+After a failure in the second half the replicas may not have the names `up`
+expects (with one replica, `web-2` alone). The last line says so: run `rollout`
+again rather than `up`, which would create `web-1` and delete `web-2` at the
+same time.
 
 ## Requirements
 
@@ -138,7 +146,11 @@ needs both of these:
 
 With an ic-dns that has neither, the rollout still keeps a healthy replica in
 place at every step, but clients can reach the new replica before it is ready
-and the old one until it stops.
+and the old one until it stops. Nothing detects which ic-dns runs.
+
+The service names incus-compose writes into dnsmasq on a bridge network without
+ic-dns are not maintained by `rollout`: they would list the new replica before
+it is ready. Run `up` afterwards on such a project.
 
 ## What it refuses
 
@@ -159,10 +171,15 @@ update those:
   (`ceph`, `linstor`, `lvmcluster`, ...) is mounted on one member at a time, and
   the new replica may land on another. On a standalone server both replicas
   mount it from the same host. The paths an image declares as volumes become
-  volumes too; `x-incus-compose.auto-volumes: false` leaves them to the image;
+  volumes too; `x-incus-compose.auto-volumes: false` leaves them to the image.
+  A volume that is accepted is mounted by both replicas at once: a service that
+  must be its data's only writer (a database) is to be marked as below;
 - `deploy.mode: global`: one replica per cluster member;
 - `deploy.replicas: 0`, or a service with no replica yet (create it with `up`);
 - a service marked `x-incus-compose.rollout: false` (below).
+
+Devices are checked both on a replica as Incus has it (with what profiles and
+the image added) and as the compose file declares them now.
 
 ### Services that must not run twice
 

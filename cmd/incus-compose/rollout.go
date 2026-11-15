@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"maps"
+	"net/http"
 	"os"
 	"os/signal"
 	"slices"
@@ -110,7 +111,7 @@ func newRolloutCommand() *cli.Command {
 			}
 			defer c.WarnError(c.Done, "Failure during Client.Done()")
 
-			services := cmd.Args().Slice()
+			services := slices.Compact(slices.Clone(cmd.Args().Slice()))
 			if len(services) == 0 {
 				c.LogError("Name the services to roll out")
 				return errLogged.WithText("no service")
@@ -158,14 +159,11 @@ func newRolloutCommand() *cli.Command {
 				p.InstanceMarks["oci.dns.search"] = strings.TrimSuffix(dnsZone(p, c), ".")
 			}
 
+			// No DNSWatcher: it writes a service's dnsmasq record from the
+			// instances one run has seen, which here is the new replica alone,
+			// before it is healthy. A rollout leaves the names to ic-dns.
 			c.IgnoreError(client.ActionStart, client.ErrRunning)
 			c.IgnoreError(client.ActionStop, client.ErrNotRunning)
-
-			err = c.RegisterDNSWatcher()
-			if err != nil {
-				c.LogError("Registering the DNS watcher", "project", p.Name, "error", err)
-				return errLogged.Wrap(err)
-			}
 
 			order, err := p.ServiceOrder(false)
 			if err != nil {
@@ -281,12 +279,12 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	instances := map[int]*client.Instance{}
 
 	for i := 1; i <= n+2; i++ {
-		exists, err := c.InstanceExists(name(i))
+		absent, err := instanceAbsent(ctx, c, name(i))
 		if err != nil {
 			return nil, rolloutPlan{}, err
 		}
 
-		if !exists {
+		if absent {
 			continue
 		}
 
@@ -362,17 +360,25 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		return nil, rolloutPlan{}, err
 	}
 
-	var health map[string]string
+	var (
+		health   map[string]string
+		declared map[string]map[string]string
+	)
+
 	for _, r := range resources[svcName] {
 		inst, ok := r.(*client.Instance)
-		if ok {
-			health, err = inst.HealthConfig()
-			if err != nil {
-				return nil, rolloutPlan{}, err
-			}
-
-			break
+		if !ok {
+			continue
 		}
+
+		health, err = inst.HealthConfig()
+		if err != nil {
+			return nil, rolloutPlan{}, err
+		}
+
+		declared = declaredDevices(inst, c.Config().DefaultStoragePool)
+
+		break
 	}
 
 	pools := map[string]string{}
@@ -384,21 +390,24 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 			return nil, rolloutPlan{}, err
 		}
 
-		for _, dev := range first.ExpandedDevices {
-			if dev["type"] != "disk" || dev["path"] == "/" || dev["pool"] == "" {
-				continue
-			}
+		for _, devices := range []map[string]map[string]string{first.ExpandedDevices, declared} {
+			for _, dev := range devices {
+				_, known := pools[dev["pool"]]
+				if dev["type"] != "disk" || dev["path"] == "/" || dev["pool"] == "" || known {
+					continue
+				}
 
-			pool, _, err := conn.GetStoragePool(ctx, dev["pool"])
-			if err != nil {
-				return nil, rolloutPlan{}, fmt.Errorf("getting storage pool %q: %w", dev["pool"], err)
-			}
+				pool, _, err := conn.GetStoragePool(ctx, dev["pool"])
+				if err != nil {
+					return nil, rolloutPlan{}, fmt.Errorf("getting storage pool %q: %w", dev["pool"], err)
+				}
 
-			pools[pool.Name] = pool.Driver
+				pools[pool.Name] = pool.Driver
+			}
 		}
 	}
 
-	blockers := rolloutBlockers(service, health, first, pools, clustered)
+	blockers := rolloutBlockers(service, health, first.Config, []map[string]map[string]string{first.ExpandedDevices, declared}, pools, clustered)
 	if len(blockers) > 0 {
 		return nil, rolloutPlan{}, fmt.Errorf("%s; `restart` it instead", strings.Join(blockers, "; "))
 	}
@@ -445,10 +454,42 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	return runner, plan, nil
 }
 
+// declaredDevices returns the devices the compose file gives a new replica, in
+// the shape Incus reports them.
+func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[string]string {
+	out := map[string]map[string]string{}
+
+	for _, dev := range inst.Config.Devices {
+		m := maps.Clone(dev.Config.Extensions)
+		if m == nil {
+			m = map[string]string{}
+		}
+
+		m["type"] = dev.Config.DeviceType
+
+		if dev.Config.DeviceType == client.InstanceDeviceTypeDisk && dev.Config.Disk.StorageVolumeConfig != nil {
+			m["pool"] = dev.Config.Disk.StorageVolumeConfig.Pool
+			if m["pool"] == "" {
+				m["pool"] = defaultPool
+			}
+
+			m["source"] = dev.Config.Disk.Source
+			m["path"] = dev.Config.Disk.Path
+		}
+
+		out[dev.Name] = m
+	}
+
+	maps.Copy(out, inst.Config.ExtraDevices)
+
+	return out
+}
+
 // rolloutBlockers says why the new replicas of a service cannot run next to
-// the old ones, nothing when they can. old is a replica as Incus has it, so
-// what profiles, x-incus and the image added is seen too.
-func rolloutBlockers(service types.ServiceConfig, health map[string]string, old *incusApi.Instance, pools map[string]string, clustered bool) []string {
+// the old ones, nothing when they can. oldConfig and the first device set are
+// a replica as Incus has it, so what profiles and the image added is seen;
+// the others are what the compose file declares now.
+func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldConfig map[string]string, deviceSets []map[string]map[string]string, pools map[string]string, clustered bool) []string {
 	var out []string
 
 	add := func(format string, args ...any) {
@@ -463,7 +504,9 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, old 
 	}
 
 	ok, err := service.Extensions.Get("x-incus-compose", &ext)
-	if err == nil && ok && ext.Rollout != nil && !*ext.Rollout {
+	if err != nil {
+		add("x-incus-compose.rollout must be true or false")
+	} else if ok && ext.Rollout != nil && !*ext.Rollout {
 		add("x-incus-compose.rollout: false marks it as one that must not run twice")
 	}
 
@@ -484,7 +527,7 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, old 
 	}
 
 	fixed := service.MacAddress != ""
-	aliases := old.Config["user.label.dns.aliases"] != "" || service.Labels["dns.aliases"] != ""
+	aliases := oldConfig["user.label.dns.aliases"] != "" || service.Labels["dns.aliases"] != ""
 
 	for _, net := range service.Networks {
 		if net == nil {
@@ -495,20 +538,22 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, old 
 		aliases = aliases || len(net.Aliases) > 0
 	}
 
-	for _, devName := range slices.Sorted(maps.Keys(old.ExpandedDevices)) {
-		dev := old.ExpandedDevices[devName]
+	for _, devices := range deviceSets {
+		for _, devName := range slices.Sorted(maps.Keys(devices)) {
+			dev := devices[devName]
 
-		switch dev["type"] {
-		case "nic":
-			fixed = fixed || dev["ipv4.address"] != "" || dev["ipv6.address"] != "" || dev["hwaddr"] != ""
-		case "proxy":
-			add("its proxy device %q binds a host address the new and the old replica cannot both hold", devName)
-		case "disk":
-			if dev["path"] == "/" || dev["pool"] == "" || !clustered || pools[dev["pool"]] == "cephfs" {
-				continue
+			switch dev["type"] {
+			case "nic":
+				fixed = fixed || dev["ipv4.address"] != "" || dev["ipv6.address"] != "" || dev["hwaddr"] != ""
+			case "proxy":
+				add("its proxy device %q binds a host address the new and the old replica cannot both hold", devName)
+			case "disk":
+				if dev["path"] == "/" || dev["pool"] == "" || !clustered || pools[dev["pool"]] == "cephfs" {
+					continue
+				}
+
+				add("volume %q on pool %q (%s) is attached on one cluster member at a time, and the new replica may land on another", dev["source"], dev["pool"], pools[dev["pool"]])
 			}
-
-			add("volume %q on pool %q (%s) is attached on one cluster member at a time, and the new replica may land on another", dev["source"], dev["pool"], pools[dev["pool"]])
 		}
 	}
 
@@ -614,6 +659,19 @@ func (r *rolloutRunner) create(ctx context.Context, index int) error {
 		return client.ErrNotFound.WithKindName(client.KindInstance, r.name(index))
 	}
 
+	// What discard may delete is only what this run creates, so the name is
+	// checked free first: an Ensure would adopt an instance found there.
+	absent, err := instanceAbsent(ctx, r.c, r.name(index))
+	if err != nil {
+		return err
+	}
+
+	if !absent {
+		return fmt.Errorf("%s exists already, made by something else than this rollout", r.name(index))
+	}
+
+	r.instances[index] = inst
+
 	if !r.debug {
 		progress := newProgressRenderer(r.writer, r.noColor, isatty.IsTerminal(os.Stdout.Fd()))
 		progress.Start(cc)
@@ -631,15 +689,8 @@ func (r *rolloutRunner) create(ctx context.Context, index int) error {
 	// finish and taken away after.
 	err = stack.ForActionF(client.ActionEnsure, only).Run(context.WithoutCancel(ctx), client.ActionEnsure, append(slices.Clone(r.startOpts), client.OptionCreate())...)
 	if err != nil {
-		r.instances[index] = inst
 		return err
 	}
-
-	if !inst.Created() {
-		return fmt.Errorf("%s was created by someone else meanwhile", r.name(index))
-	}
-
-	r.instances[index] = inst
 
 	// The healthcheck is waited for by the rollout, which also gives up on an
 	// unhealthy verdict, and the dependencies are up already.
@@ -669,7 +720,12 @@ func (r *rolloutRunner) retire(ctx context.Context, index int) error {
 
 	err := inst.Stop(ctx, client.OptionTimeout(r.stopTimeout))
 	if err != nil && !errors.Is(err, client.ErrNotRunning) {
-		return err
+		// The graceful stop and its deadline end together, which can leave
+		// the kill after it unsent.
+		forceErr := inst.Stop(ctx, client.OptionTimeout(r.stopTimeout), client.OptionForce())
+		if forceErr != nil && !errors.Is(forceErr, client.ErrNotRunning) {
+			return errors.Join(err, forceErr)
+		}
 	}
 
 	err = inst.Delete(ctx)
@@ -689,8 +745,8 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 	}
 
 	if !inst.IsEnsured() {
-		exists, err := r.c.InstanceExists(r.name(index))
-		if err != nil || !exists {
+		absent, err := instanceAbsent(ctx, r.c, r.name(index))
+		if err != nil || absent {
 			return err
 		}
 
@@ -722,6 +778,26 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 	delete(r.instances, index)
 
 	return nil
+}
+
+// instanceAbsent reports whether Incus has no instance by this name. Failing to
+// read it is an error, not an answer.
+func instanceAbsent(ctx context.Context, c *client.Client, name string) (bool, error) {
+	conn, err := c.Connection()
+	if err != nil {
+		return false, err
+	}
+
+	_, _, err = conn.GetInstance(ctx, c.IncusProject(), name, nil)
+	if err == nil {
+		return false, nil
+	}
+
+	if incusApi.StatusErrorCheck(err, http.StatusNotFound) {
+		return true, nil
+	}
+
+	return false, fmt.Errorf("reading %s: %w", name, err)
 }
 
 func (r *rolloutRunner) sleep(ctx context.Context, d time.Duration) error {
