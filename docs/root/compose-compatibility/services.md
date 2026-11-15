@@ -383,7 +383,8 @@ recreation per service:
   (logs a warning and proceeds to the next batch).
 - `order`: `stop-first` (default). Because Incus instance names (`{service}-1`)
   are unique per project, `start-first` logs a warning and falls back to
-  `stop-first`.
+  `stop-first`. [`rollout`](/cli-reference/extensions/rollout) replaces a
+  service's replicas start-first.
 
 ## Restart Policies
 

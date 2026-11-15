@@ -347,6 +347,7 @@ func newRootCommand() *cli.Command {
 		newStopCommand("stop", "Stop running services"),
 		newStopCommand("kill", "Force stop running services"),
 		newRestartCommand(),
+		newRolloutCommand(),
 		newRunCommand(),
 		newPauseCommand(client.ActionPause),
 		newPauseCommand(client.ActionUnpause),

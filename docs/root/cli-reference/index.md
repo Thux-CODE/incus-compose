@@ -108,9 +108,9 @@ follow that split.
 **extensions** - no `docker compose` counterpart, or better than the one there
 is:
 
-| Page                      | Commands                                                            |
-| ------------------------- | ------------------------------------------------------------------- |
-| [Extensions](extensions/) | `backup`, `list`, `port-forward`, `incus`, `healthd`, `self-update` |
+| Page                      | Commands                                                                       |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| [Extensions](extensions/) | `backup`, `rollout`, `list`, `port-forward`, `incus`, `healthd`, `self-update` |
 
 `version` prints the incus-compose version and belongs to neither:
 

@@ -11,6 +11,22 @@ final version), and the beta suffix gained a dot (`beta.16`) from beta.16 onward
 for correct semver ordering. Headings below preserve each release's announced
 form.
 
+## [Unreleased]
+
+### Added
+
+- `rollout SERVICE...` replaces a service's replicas one at a time, new before
+  old: each new replica is created next to the old ones and an old one is
+  drained from ic-dns (`user.label.dns.drain`), stopped and deleted only once
+  ic-healthd reports the new one `healthy`. A new replica that is not healthy in
+  time is deleted (`--keep-failed` leaves it stopped) and the old ones keep
+  serving; an interrupt leaves no replica drained. It works with a single
+  replica, through a spare `<service>-(N+1)`, keeps the names `up` expects, and
+  touches neither dependents nor sidecars. Services that cannot run twice
+  (no healthcheck, `container_name`, published ports, a fixed address, DNS
+  aliases, a cluster volume on a block pool, or `x-incus-compose.rollout: false`)
+  are refused. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

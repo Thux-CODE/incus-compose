@@ -356,15 +356,7 @@ func newUpCommand() *cli.Command {
 					return errLogged.Wrap(err)
 				}
 
-				zone := p.ClientConfig.DNS.Zone
-				if zone == "" {
-					pConfig, pErr := c.Global().ProjectConfig(p.Name)
-					if pErr == nil && pConfig[shared.DNSZoneKey] != "" {
-						zone = pConfig[shared.DNSZoneKey]
-					} else {
-						zone = p.Name + "." + project.DefaultDNSZoneSuffix
-					}
-				}
+				zone := dnsZone(p, c)
 				dnsProjectConfig := map[string]string{shared.DNSZoneKey: zone}
 				if p.ClientConfig.DNS.Transfer || len(p.ClientConfig.DNS.AllowTransfer) > 0 {
 					dnsProjectConfig[shared.DNSTransferKey] = "true"
@@ -517,6 +509,21 @@ func newUpCommand() *cli.Command {
 			})
 		},
 	}
+}
+
+// dnsZone returns the zone the project's instances are named under:
+// the compose file's, else the one the project carries, else the default.
+func dnsZone(p *project.Project, c *client.Client) string {
+	if p.ClientConfig.DNS.Zone != "" {
+		return p.ClientConfig.DNS.Zone
+	}
+
+	pConfig, err := c.Global().ProjectConfig(p.Name)
+	if err == nil && pConfig[shared.DNSZoneKey] != "" {
+		return pConfig[shared.DNSZoneKey]
+	}
+
+	return p.Name + "." + project.DefaultDNSZoneSuffix
 }
 
 // builtServices returns the in-scope services whose image comes from a build

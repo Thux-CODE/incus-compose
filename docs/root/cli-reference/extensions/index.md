@@ -19,6 +19,7 @@ does the job better than the counterpart does.
 | Command                         | Does                                                |
 | ------------------------------- | --------------------------------------------------- |
 | [`backup`](backup/)             | Snapshot project data volumes into a backup project |
+| [`rollout`](rollout/)           | Replace a service's replicas new before old         |
 | [`list`](#list)                 | List resources - the one to reach for over `ps`     |
 | [`port-forward`](#port-forward) | Forward a local TCP port into an instance           |
 | [`incus`](#incus)               | Run an `incus` command in the project context       |

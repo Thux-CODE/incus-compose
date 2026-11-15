@@ -366,6 +366,21 @@ services:
       mode: global
 ```
 
+### Rollout
+
+`x-incus-compose.rollout: false` on a service makes
+[`rollout`](/cli-reference/extensions/rollout) refuse it, for a service that must
+not run twice, not even while a rollout runs the new replica next to the
+old one (a scheduler such as celery beat):
+
+```yaml
+services:
+  beat:
+    image: registry.example.com/app:latest
+    x-incus-compose:
+      rollout: false
+```
+
 ### Backup
 
 Configure `incus-compose backup` with the top-level `x-incus-compose.backup`
