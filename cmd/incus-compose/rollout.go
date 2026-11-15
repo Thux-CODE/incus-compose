@@ -22,6 +22,7 @@ import (
 	"github.com/urfave/cli/v3"
 
 	"github.com/lxc/incus-compose/client"
+	"github.com/lxc/incus-compose/iclient"
 	"github.com/lxc/incus-compose/project"
 	"github.com/lxc/incus-compose/shared"
 )
@@ -33,15 +34,17 @@ const (
 
 	rolloutPoll = 2 * time.Second
 
-	// rolloutStopSettle is how long a stop that reported an error may take to
-	// land before retiring a replica gives up on it.
+	// rolloutStopSettle is how long a replica being stopped may take to read
+	// Stopped, after its graceful stop, before the rollout gives up on it; it
+	// is killed every rolloutKillEvery while it reads running.
 	rolloutStopSettle = 30 * time.Second
+	rolloutKillEvery  = 5 * time.Second
 
 	// rolloutRestartWindow is how long a new replica kept stopped is watched
-	// for a restart ic-healthd had under way, and rolloutDiscardAttempts how
-	// many times such a replica is stopped before the rollout gives up on it.
-	rolloutRestartWindow   = 10 * time.Second
-	rolloutDiscardAttempts = 3
+	// for a restart ic-healthd had under way, and rolloutTakeDownAttempts how
+	// many times a replica is stopped before the rollout gives up on it.
+	rolloutRestartWindow    = 10 * time.Second
+	rolloutTakeDownAttempts = 3
 )
 
 func newRolloutCommand() *cli.Command {
@@ -729,87 +732,7 @@ func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) erro
 }
 
 func (r *rolloutRunner) retire(ctx context.Context, index int) error {
-	inst := r.instances[index]
-
-	err := r.stop(ctx, index, true)
-	if err != nil {
-		return err
-	}
-
-	err = inst.Delete(ctx)
-	if err != nil {
-		return err
-	}
-
-	delete(r.instances, index)
-
-	return nil
-}
-
-// stop stops a replica, see retireStop.
-func (r *rolloutRunner) stop(ctx context.Context, index int, graceful bool) error {
-	inst := r.instances[index]
-
-	stop := func(ctx context.Context, force bool) error {
-		opts := []client.Option{client.OptionTimeout(r.stopTimeout)}
-		if force {
-			opts = append(opts, client.OptionForce())
-		}
-
-		return inst.Stop(ctx, opts...)
-	}
-
-	stopped := func(ctx context.Context) (bool, error) {
-		status, err := r.status(ctx, index)
-
-		return status == incusApi.Stopped, err
-	}
-
-	return retireStop(ctx, stop, stopped, graceful, rolloutStopSettle, time.Second)
-}
-
-// retireStop stops a replica: with graceful within its grace period and then
-// by force, otherwise by force alone. Incus can still be carrying a stop out
-// when the client's deadline for it passes - the graceful one and its deadline
-// end together, and the kill sent after it may find the instance halfway down,
-// whose state does not read back ("Invalid PID -1"). So a stop that reports an
-// error counts as done once the instance reads Stopped within settle.
-func retireStop(ctx context.Context, stop func(ctx context.Context, force bool) error, stopped func(ctx context.Context) (bool, error), graceful bool, settle, poll time.Duration) error {
-	var err error
-
-	if graceful {
-		err = stop(ctx, false)
-		if err == nil || errors.Is(err, client.ErrNotRunning) {
-			return nil
-		}
-	}
-
-	forceErr := stop(ctx, true)
-	if forceErr == nil || errors.Is(forceErr, client.ErrNotRunning) {
-		return nil
-	}
-
-	deadline := time.Now().Add(settle)
-
-	for {
-		ok, readErr := stopped(ctx)
-		if readErr == nil && ok {
-			return nil
-		}
-
-		if !time.Now().Before(deadline) {
-			return errors.Join(err, forceErr, readErr)
-		}
-
-		t := time.NewTimer(poll)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-
-			return errors.Join(err, forceErr, ctx.Err())
-		case <-t.C:
-		}
-	}
+	return r.takeDown(ctx, index, true, false)
 }
 
 func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error {
@@ -830,22 +753,57 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		}
 	}
 
-	running := func(ctx context.Context) (bool, error) {
-		status, err := r.status(ctx, index)
+	// One kept for a look is let shut down; one going away is killed.
+	return r.takeDown(ctx, index, keep, keep)
+}
 
-		return status == incusApi.Running, err
+// takeDown stops a replica, gracefully within its grace period or not, and
+// deletes it or, with keep, leaves it stopped.
+func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool) error {
+	inst := r.instances[index]
+
+	status := func(ctx context.Context) (incusApi.StatusCode, error) {
+		return r.status(ctx, index)
+	}
+
+	running := func(ctx context.Context) (bool, error) {
+		s, err := status(ctx)
+
+		return rolloutRunning(s), err
+	}
+
+	shutdown := func(ctx context.Context) error {
+		return inst.Stop(ctx, client.OptionTimeout(r.stopTimeout))
+	}
+
+	kill := func(ctx context.Context) error {
+		conn, err := r.c.Connection()
+		if err != nil {
+			return err
+		}
+
+		op, err := conn.UpdateInstanceState(ctx, r.c.IncusProject(), r.name(index), incusApi.InstanceStatePut{
+			Action:  "stop",
+			Force:   true,
+			Timeout: -1,
+		}, "")
+		if err != nil {
+			return err
+		}
+
+		_, err = iclient.WaitOperation(ctx, op)
+
+		return err
 	}
 
 	stop := func(ctx context.Context) error {
-		// Stop goes by the state read last, which a restart has made stale:
-		// writing the marker reads it afresh.
+		// The marker keeps ic-healthd's restart policy off it from here on.
 		err := inst.SetHealthCheckingStopped(ctx, true)
 		if err != nil {
 			return err
 		}
 
-		// One kept for a look is let shut down; one going away is killed.
-		return r.stop(ctx, index, keep)
+		return rolloutStop(ctx, shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery)
 	}
 
 	remove := func(ctx context.Context) error {
@@ -875,15 +833,85 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		return false, nil
 	}
 
-	return rolloutDiscard(ctx, keep, rolloutDiscardAttempts, stop, remove, running, startsAgain)
+	return rolloutTakeDown(ctx, keep, rolloutTakeDownAttempts, stop, remove, running, startsAgain)
 }
 
-// rolloutDiscard takes a new replica away, or with keep leaves it stopped.
-// ic-healthd's restart policy acts on the same unhealthy verdict a rollout
-// gives up on, and a restart it began before the stop marker was written
-// starts the replica again after the rollout stopped it. So it is stopped
-// again, up to attempts times, until it is deleted or, kept, stays stopped.
-func rolloutDiscard(ctx context.Context, keep bool, attempts int, stop, remove func(ctx context.Context) error, running, startsAgain func(ctx context.Context) (bool, error)) error {
+// rolloutRunning reports whether a status is one of a running instance.
+func rolloutRunning(s incusApi.StatusCode) bool {
+	return s == incusApi.Running || s == incusApi.Ready
+}
+
+// rolloutStop stops a replica and returns once Incus reads it Stopped. With
+// graceful it is first asked to shut down within its grace period.
+//
+// What decides is the status read back, not what a stop call returned:
+//   - the graceful stop and the client's deadline for it end together, and Incus
+//     may still be carrying it out (a read of the instance halfway down fails
+//     with "Invalid PID -1");
+//   - a read during a stop can find the instance in Error for a moment, which
+//     the client's Stop takes for "not running" and returns without stopping;
+//   - ic-healthd's restart policy may have the instance in a stop and start of
+//     its own.
+//
+// So it is killed whenever it reads running, again every killEvery while it
+// does, and waited for in between, up to settle.
+func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) error, status func(ctx context.Context) (incusApi.StatusCode, error), graceful bool, settle, poll, killEvery time.Duration) error {
+	var errs []error
+
+	if graceful {
+		err := shutdown(ctx)
+		if err != nil && !errors.Is(err, client.ErrNotRunning) {
+			errs = append(errs, err)
+		}
+	}
+
+	deadline := time.Now().Add(settle)
+
+	var lastKill time.Time
+
+	for {
+		s, err := status(ctx)
+		if err == nil && s == incusApi.Stopped {
+			return nil
+		}
+
+		if err == nil && rolloutRunning(s) && (lastKill.IsZero() || time.Since(lastKill) >= killEvery) {
+			lastKill = time.Now()
+
+			killErr := kill(ctx)
+			if killErr != nil {
+				errs = append(errs, killErr)
+			}
+
+			continue
+		}
+
+		if !time.Now().Before(deadline) {
+			if err == nil {
+				err = fmt.Errorf("still %s after %s", s, settle)
+			}
+
+			return errors.Join(append(errs, err)...)
+		}
+
+		t := time.NewTimer(poll)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+
+			return errors.Join(append(errs, ctx.Err())...)
+		case <-t.C:
+		}
+	}
+}
+
+// rolloutTakeDown stops a replica for good and deletes it, or with keep leaves
+// it stopped. ic-healthd's restart policy acts on the same unhealthy verdict a
+// rollout gives up on, and on an old replica whose checks time out; a restart
+// it began before the stop marker was written starts the replica again after
+// the rollout stopped it. So it is stopped again, up to attempts times, until
+// it is deleted or, kept, stays stopped.
+func rolloutTakeDown(ctx context.Context, keep bool, attempts int, stop, remove func(ctx context.Context) error, running, startsAgain func(ctx context.Context) (bool, error)) error {
 	for attempt := 1; ; attempt++ {
 		err := stop(ctx)
 		if err != nil {

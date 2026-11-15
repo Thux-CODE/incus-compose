@@ -696,86 +696,128 @@ func TestRolloutHealthTimeout(t *testing.T) {
 	}))
 }
 
-func TestRolloutRetireStop(t *testing.T) {
+func TestRolloutStop(t *testing.T) {
 	t.Parallel()
 
 	errDeadline := errors.New("context deadline exceeded")
 	errPID := errors.New("Invalid PID -1")
 
-	// stops answers the stops in turn; stoppedAfter is how many reads of the
-	// state come before the one that finds it Stopped (-1: never).
-	run := func(graceful bool, stops []error, stoppedAfter int) ([]bool, int, error) {
+	// reads are the statuses the instance reads as, in turn, the last one for
+	// good; a kill makes it read Stopped from the next read on, unless
+	// restartAfterKill brings it back to Running once.
+	type world struct {
+		shutdownErr      error
+		reads            []incusApi.StatusCode
+		restartAfterKill bool
+	}
+
+	run := func(graceful bool, w world) (int, int, error) {
 		var (
-			calls []bool
-			reads int
+			shutdowns, kills, read int
+			killed                 bool
 		)
 
-		stop := func(_ context.Context, force bool) error {
-			calls = append(calls, force)
+		shutdown := func(context.Context) error {
+			shutdowns++
 
-			return stops[len(calls)-1]
+			return w.shutdownErr
 		}
 
-		stopped := func(context.Context) (bool, error) {
-			reads++
-			if stoppedAfter < 0 || reads <= stoppedAfter {
-				return false, errPID
+		kill := func(context.Context) error {
+			kills++
+
+			if w.restartAfterKill && kills == 1 {
+				return errPID
 			}
 
-			return true, nil
+			killed = true
+
+			return nil
 		}
 
-		err := retireStop(t.Context(), stop, stopped, graceful, 50*time.Millisecond, time.Millisecond)
+		status := func(context.Context) (incusApi.StatusCode, error) {
+			if killed {
+				return incusApi.Stopped, nil
+			}
 
-		return calls, reads, err
+			s := w.reads[min(read, len(w.reads)-1)]
+			read++
+
+			if s == 0 {
+				return 0, errPID
+			}
+
+			return s, nil
+		}
+
+		err := rolloutStop(t.Context(), shutdown, kill, status, graceful, 200*time.Millisecond, time.Millisecond, 20*time.Millisecond)
+
+		return shutdowns, kills, err
 	}
 
 	t.Run("a graceful stop is all it takes", func(t *testing.T) {
 		t.Parallel()
 
-		calls, reads, err := run(true, []error{nil}, -1)
+		shutdowns, kills, err := run(true, world{reads: []incusApi.StatusCode{incusApi.Stopped}})
 		require.NoError(t, err)
-		assert.Equal(t, []bool{false}, calls)
-		assert.Zero(t, reads)
+		assert.Equal(t, 1, shutdowns)
+		assert.Zero(t, kills)
 	})
 
-	t.Run("a graceful stop that runs out is followed by a kill", func(t *testing.T) {
+	t.Run("a graceful stop that ran out is followed by a kill", func(t *testing.T) {
 		t.Parallel()
 
-		calls, reads, err := run(true, []error{errDeadline, nil}, -1)
+		_, kills, err := run(true, world{shutdownErr: errDeadline, reads: []incusApi.StatusCode{incusApi.Running}})
 		require.NoError(t, err)
-		assert.Equal(t, []bool{false, true}, calls)
-		assert.Zero(t, reads)
+		assert.Equal(t, 1, kills)
 	})
 
-	t.Run("a kill that cannot read the instance back counts once it is stopped", func(t *testing.T) {
+	t.Run("a stop Incus is still carrying out is waited for, not killed", func(t *testing.T) {
 		t.Parallel()
 
-		calls, reads, err := run(true, []error{errDeadline, errPID}, 3)
+		_, kills, err := run(true, world{shutdownErr: errDeadline, reads: []incusApi.StatusCode{0, incusApi.Error, incusApi.Stopping, incusApi.Stopped}})
 		require.NoError(t, err)
-		assert.Equal(t, []bool{false, true}, calls)
-		assert.Equal(t, 4, reads)
+		assert.Zero(t, kills)
 	})
 
-	t.Run("an instance that never stops is an error with every cause", func(t *testing.T) {
+	t.Run("a stop that returned on a passing Error read is checked and killed", func(t *testing.T) {
 		t.Parallel()
 
-		_, _, err := run(true, []error{errDeadline, errPID}, -1)
-		require.Error(t, err)
-		require.ErrorIs(t, err, errDeadline)
-		require.ErrorIs(t, err, errPID)
+		// The client's Stop takes a moment in Error for "not running" and
+		// returns nil without stopping anything.
+		_, kills, err := run(true, world{reads: []incusApi.StatusCode{incusApi.Running}})
+		require.NoError(t, err)
+		assert.Equal(t, 1, kills)
+	})
+
+	t.Run("a kill that does not take is sent again", func(t *testing.T) {
+		t.Parallel()
+
+		_, kills, err := run(false, world{reads: []incusApi.StatusCode{incusApi.Running}, restartAfterKill: true})
+		require.NoError(t, err)
+		assert.Equal(t, 2, kills)
 	})
 
 	t.Run("without graceful it is killed straight away", func(t *testing.T) {
 		t.Parallel()
 
-		calls, _, err := run(false, []error{errPID}, 0)
+		shutdowns, kills, err := run(false, world{reads: []incusApi.StatusCode{incusApi.Running}})
 		require.NoError(t, err)
-		assert.Equal(t, []bool{true}, calls)
+		assert.Zero(t, shutdowns)
+		assert.Equal(t, 1, kills)
+	})
+
+	t.Run("one that never reads Stopped is an error with every cause", func(t *testing.T) {
+		t.Parallel()
+
+		_, _, err := run(true, world{shutdownErr: errDeadline, reads: []incusApi.StatusCode{incusApi.Error}})
+		require.Error(t, err)
+		require.ErrorIs(t, err, errDeadline)
+		assert.Contains(t, err.Error(), "still Error")
 	})
 }
 
-func TestRolloutDiscard(t *testing.T) {
+func TestRolloutTakeDown(t *testing.T) {
 	t.Parallel()
 
 	errRunning := errors.New("Instance is running")
@@ -821,7 +863,7 @@ func TestRolloutDiscard(t *testing.T) {
 			return running, nil
 		}
 
-		err := rolloutDiscard(t.Context(), keep, 3, stop, remove, isRunning, startsAgain)
+		err := rolloutTakeDown(t.Context(), keep, 3, stop, remove, isRunning, startsAgain)
 
 		return stops, removes, err
 	}
