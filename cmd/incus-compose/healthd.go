@@ -22,7 +22,7 @@ import (
 )
 
 // DefaultHealthdImage is the default healthd image to use, a var cause overwriteable by ldflags.
-var DefaultHealthdImage = "ghcr.io/lxc/incus-compose/ic-healthd:{version}"
+var DefaultHealthdImage = "ghcr.io/thux-code/incus-compose/ic-healthd:{version}"
 
 const (
 	defaultHealthdCPU         = "200ms/100ms"

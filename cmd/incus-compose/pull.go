@@ -15,7 +15,7 @@ import (
 )
 
 // DefaultDNSImage ic-dns image.
-const DefaultDNSImage = "ghcr.io/lxc/incus-compose/ic-dns:{version}"
+const DefaultDNSImage = "ghcr.io/thux-code/incus-compose/ic-dns:{version}"
 
 // pullArgs holds the pull() options, mirroring the pull command's flags.
 type pullArgs struct {

@@ -35,7 +35,7 @@ const globalProject = "incus-compose"
 const locksVolume = "locks"
 const toolsVolume = "incus-compose-tools"
 const toolsMount = "/incus-compose-tools"
-const defaultSleepImage = "ghcr.io/lxc/incus-compose/ic-sleep:{version}"
+const defaultSleepImage = "ghcr.io/thux-code/incus-compose/ic-sleep:{version}"
 
 type noColorKey struct{}
 
