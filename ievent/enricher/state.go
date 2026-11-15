@@ -385,7 +385,12 @@ func (s *state) setInstance(
 		}
 	}
 
-	i := iutil.NewInstance(inst.StatusCode == incusapi.Running, held, interfaces, networks)
+	// Ready is Running with the guest's own word that it is up (PATCH
+	// /dev/incus), not a state of its own: a consumer telling a paused or
+	// stopped instance from a running one has to see it as running.
+	running := inst.StatusCode == incusapi.Running || inst.StatusCode == incusapi.Ready
+
+	i := iutil.NewInstance(running, held, interfaces, networks)
 
 	s.project(inst.Project).instances[inst.Name] = i
 

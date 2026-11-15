@@ -103,7 +103,8 @@ form.
 - `ic-dns` no longer answers for a paused (frozen) instance: `incus pause` takes
   it out of its own name and its service name, and `incus resume` puts it back.
   Before, its address kept being served and clients timed out on it instead of
-  trying another replica. (by @sandroden)
+  trying another replica. An instance whose guest reported itself `Ready` is
+  running, and keeps its names. (by @sandroden)
 
 - `ic-dns` and `ic-healthd` no longer miss a change made while the instance was
   being read: an event that arrives after a read of the same instance went out

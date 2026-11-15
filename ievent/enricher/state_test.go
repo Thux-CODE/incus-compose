@@ -799,3 +799,33 @@ func TestASubnetThatMovedIsNews(t *testing.T) {
 	require.NotNil(t, held, "the network the NIC names did not travel with the instance")
 	assert.Equal(t, "10.9.0.1/24", held.IPv4())
 }
+
+// TestPutInstanceRunningStates: Ready is a running instance whose guest said
+// so, and reads as running with its interfaces; Frozen and Stopped do not.
+func TestPutInstanceRunningStates(t *testing.T) {
+	t.Parallel()
+
+	for code, want := range map[incusapi.StatusCode]bool{
+		incusapi.Running: true,
+		incusapi.Ready:   true,
+		incusapi.Frozen:  false,
+		incusapi.Stopped: false,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			t.Parallel()
+
+			p := testlib.NewProject("p", 1, 1)
+			inst := p.Instances[0]
+			inst.StatusCode = code
+			inst.Status = code.String()
+
+			m := newState()
+			storeNetworks(m, p.Networks)
+
+			got, _ := m.setInstance(&inst, p.States[inst.Name])
+			require.NotNil(t, got)
+			assert.Equal(t, want, got.Running())
+			assert.Equal(t, []string{"p/net0"}, sits(got))
+		})
+	}
+}
