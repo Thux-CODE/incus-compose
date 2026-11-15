@@ -696,6 +696,28 @@ func TestRolloutHealthTimeout(t *testing.T) {
 	}))
 }
 
+func TestRolloutDescribe(t *testing.T) {
+	t.Parallel()
+
+	var out bytes.Buffer
+
+	rolloutDescribe(rolloutPlan{
+		Service:  "web",
+		Replicas: 2,
+		Present: []replica{
+			{index: 1, running: true},
+			{index: 2, running: true, drained: true},
+			{index: 3},
+		},
+		Name:          func(index int) string { return fmt.Sprintf("web-%d", index) },
+		HealthTimeout: 54 * time.Second,
+		Grace:         35 * time.Second,
+		Out:           &out,
+	})
+
+	assert.Equal(t, "web: can be rolled out, 2 replicas, now web-1 (running), web-2 (running, drained), web-3 (stopped); up to 3 creates, each new replica healthy within 54s, each old one kept 35s after its drain\n", out.String())
+}
+
 func TestRolloutStop(t *testing.T) {
 	t.Parallel()
 

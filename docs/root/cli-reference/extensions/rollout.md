@@ -25,12 +25,19 @@ incus-compose rollout [options] SERVICE...
 | `--drain-delay`      | Extra time a drained replica keeps running, for requests in flight (default: 5s)                |
 | `--stop-timeout`     | Timeout for stopping an old replica when the service has no `stop_grace_period` (default: 10s)  |
 | `--keep-failed`      | Leave a new replica that did not become healthy stopped instead of deleting it                  |
+| `--dry-run`          | Check the services and print what a rollout would do; creates and stops nothing                 |
 | `--external-healthd` | Use healthd but do not look it up, as for `up`                                                  |
 | `--no-dns`           | Don't point the new replicas at the project's ic-dns, as for `up`                               |
 
 Every option has an `INCUS_COMPOSE_ROLLOUT_*` environment variable
 (`INCUS_COMPOSE_ROLLOUT_DNS_TTL` and so on); `--external-healthd` and `--no-dns`
 read the same variables as `up`.
+
+`--dry-run` goes through every check a rollout makes before it touches a
+replica (the refusals below, ic-healthd running, the replicas present) and
+prints one line per service with the replicas found, the creates and the
+timeouts it would use. It still pulls an image that is missing from the
+project, since the healthcheck an image declares is part of the check.
 
 `rollout` acts on exactly the named services. It never follows `depends_on` and
 never recreates or restarts a dependent: a service that depends on the one being

@@ -71,6 +71,32 @@ type rolloutPlan struct {
 	Out           io.Writer
 }
 
+// rolloutDescribe prints what a rollout of the plan would do, for --dry-run.
+func rolloutDescribe(plan rolloutPlan) {
+	present := make([]string, 0, len(plan.Present))
+
+	for _, r := range plan.Present {
+		state := "stopped"
+		if r.running {
+			state = "running"
+		}
+
+		if r.drained {
+			state += ", drained"
+		}
+
+		present = append(present, fmt.Sprintf("%s (%s)", plan.Name(r.index), state))
+	}
+
+	noun := "replicas"
+	if plan.Replicas == 1 {
+		noun = "replica"
+	}
+
+	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; up to %d creates, each new replica healthy within %s, each old one kept %s after its drain\n",
+		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), plan.Replicas+1, plan.HealthTimeout, plan.Grace)
+}
+
 // rollout replaces every replica of a service with one created from the
 // compose file, one at a time and new before old: a replica is retired only
 // once the one that takes its place reports healthy.

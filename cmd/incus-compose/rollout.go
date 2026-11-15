@@ -100,6 +100,11 @@ func newRolloutCommand() *cli.Command {
 				Sources: cli.EnvVars("INCUS_COMPOSE_EXTERNAL_HEALTHD"),
 			},
 			&cli.BoolFlag{
+				Name:    "dry-run",
+				Usage:   "Check the services and print what a rollout would do, creating and stopping nothing (a missing image is still pulled)",
+				Sources: cli.EnvVars("INCUS_COMPOSE_ROLLOUT_DRY_RUN"),
+			},
+			&cli.BoolFlag{
 				Name:    "no-dns",
 				Usage:   "Don't point the new replicas at the project's ic-dns",
 				Sources: cli.EnvVars("INCUS_COMPOSE_NO_DNS", "INCUS_COMPOSE_DISABLE_DNS"),
@@ -232,6 +237,14 @@ func newRolloutCommand() *cli.Command {
 
 			if errs != nil {
 				return errLogged.Wrap(errs)
+			}
+
+			if cmd.Bool("dry-run") {
+				for _, j := range jobs {
+					rolloutDescribe(j.plan)
+				}
+
+				return nil
 			}
 
 			for _, j := range jobs {
