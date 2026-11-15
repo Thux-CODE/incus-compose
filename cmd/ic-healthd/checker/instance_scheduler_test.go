@@ -1380,3 +1380,32 @@ func TestQueuedStatusSurvivesAFailedWrite(t *testing.T) {
 	res := s.next(t)
 	require.Equal(t, shared.HealthStatusHealthy, res.status)
 }
+
+// TestARestartDuringACheckReportsStarting: a check is out when the instance
+// restarts. The check keeps the instance, as any action in flight does, but
+// the healthy on it is the last run's and the new run has passed nothing yet.
+func TestARestartDuringACheckReportsStarting(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.running(t, inst, instanceChecking, time.Now().Add(time.Minute))
+	live := inst.actionContext
+
+	config := eventConfig(inst.config)
+	config["status"] = shared.HealthStatusHealthy
+	s.eventRead(incusApi.EventLifecycleInstanceRestarted, "web-1", true, healthKeys(config))
+
+	select {
+	case res := <-s.results:
+		require.Equal(t, shared.HealthStatusStarting, res.status)
+	case <-time.After(absenceGrace):
+		t.Fatalf("no starting written; status held is %q", inst.status)
+	}
+
+	require.Equal(t, instanceChecking, inst.state, "the check in flight was taken off the instance")
+	require.Same(t, live, inst.actionContext)
+}

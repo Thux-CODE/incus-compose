@@ -415,8 +415,15 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 			return
 		}
 
-		// An action in flight owns the instance; its result says what comes next.
+		// An action in flight owns the instance; its result says what comes
+		// next. A restart writes starting itself once it lands; a check does
+		// not, and whatever verdict was on the instance is the last run's, so
+		// starting goes now and the check's result follows it.
 		if inst.state == instanceChecking || inst.state == instanceRestarting {
+			if inst.state == instanceChecking {
+				reportStarting(ctx, logger, conn, ev.ProjectName(), results, inst)
+			}
+
 			return
 		}
 
