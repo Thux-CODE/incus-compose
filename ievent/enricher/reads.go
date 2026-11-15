@@ -533,6 +533,17 @@ func (d *deferred) done(ctx context.Context, c *call) {
 		again := c.again
 		c.again = nil
 
+		// A fan-out's own event goes with the read after it. Pushed when this
+		// one lands it would join the line behind everything that arrived
+		// while it was out - the end of a run included - and the events it
+		// should have preceded would then find it filed and go as unchanged:
+		// the change would reach the chain after the round it belongs to.
+		if again.ev == nil {
+			again.ev = c.ev
+		}
+
+		c.ev = nil
+
 		d.send(ctx, again)
 	}
 

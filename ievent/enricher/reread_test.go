@@ -105,3 +105,44 @@ func TestEventsDuringOneReadShareTheNextOne(t *testing.T) {
 	assert.Equal(t, "sync", h.next().Name(), "the ones that said nothing new walked")
 	assert.Equal(t, 2, h.readsOf("p", "web"), "three events cost more than one read")
 }
+
+// TestAFanOutReadAgainKeepsItsPlaceInLine: a fan-out read is out when an event
+// on the same key arrives, and the end of a run right behind it. The event
+// waits for a read of its own; what the fan-out found has to reach the chain
+// with it, ahead of the end, not after it - a consumer that turns warm on the
+// end would otherwise serve the round's correction as news from the next one.
+func TestAFanOutReadAgainKeepsItsPlaceInLine(t *testing.T) {
+	t.Parallel()
+
+	h := seeded(t, 1, 0)
+	web := testlib.InstanceName(0)
+
+	h.mu.Lock()
+	h.gate = make(chan struct{})
+	h.tag = "after"
+	gate := h.gate
+	h.mu.Unlock()
+
+	// The fan-out: every instance of the project, re-read with an event of
+	// its own held on the call.
+	h.send(incusapi.EventLifecycleProfileUpdated, "p", "default")
+	require.Eventually(t, func() bool { return h.readsOf("p", web) == 2 },
+		time.Second, time.Millisecond, "the fan-out read went out")
+
+	h.send(incusapi.EventLifecycleInstanceUpdated, "p", web)
+	h.send(iutil.ActionSweepEnd, "", "")
+	settled(t, h)
+
+	close(gate)
+
+	assert.Equal(t, incusapi.EventLifecycleProfileUpdated, h.next().Action())
+
+	update := h.next()
+	assert.Equal(t, incusapi.EventLifecycleInstanceUpdated, update.Action())
+	assert.Equal(t, web, update.Name())
+	assert.Equal(t, "after", tagOf(update), "the change went behind the end of the run")
+
+	assert.Equal(t, iutil.ActionSweepEnd, h.next().Action())
+	assert.Equal(t, "sync", h.next().Name(), "the fan-out's change was handed on twice")
+	assert.Equal(t, 3, h.readsOf("p", web))
+}
