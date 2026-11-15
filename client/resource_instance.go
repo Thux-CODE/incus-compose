@@ -721,12 +721,7 @@ func (r *Instance) create(ctx context.Context, opts ...Option) error {
 		config[ConfigHashKey] = r.Config.ConfigHash
 	}
 
-	// A healthcheck the compose file declares replaces the image's, disabled or
-	// not, so the image is only read where compose said nothing about health.
-	_, composeTest := r.Config.Extensions[HealthKeyPrefix+"test"]
-	if !composeTest && !util.IsFalse(r.Config.Extensions[shared.HealthEnabledKey]) {
-		ociHealthConfig(config, imageState.Healthcheck)
-	}
+	imageHealthConfig(config, r.Config.Extensions, imageState.Healthcheck)
 
 	err = r.prefetchVolumes(ctx, image, owner)
 	if err != nil {
@@ -872,6 +867,46 @@ func (r *Instance) buildDevices() (map[string]map[string]string, error) {
 	}
 
 	return devices, nil
+}
+
+// imageHealthConfig writes the image's healthcheck into config. A healthcheck
+// the service declares replaces the image's, disabled or not, so the image is
+// only read where the service said nothing about health.
+func imageHealthConfig(config, extensions map[string]string, hc *ociHealthcheck) {
+	_, composeTest := extensions[HealthKeyPrefix+"test"]
+	if !composeTest && !util.IsFalse(extensions[shared.HealthEnabledKey]) {
+		ociHealthConfig(config, hc)
+	}
+}
+
+// HealthConfig returns the healthcheck keys the instance is created with. Its
+// image must be ensured, since a service without a check of its own takes the
+// image's.
+func (r *Instance) HealthConfig() (map[string]string, error) {
+	res, err := r.client.Resource(KindImage, r.Config.Image, &ImageConfig{})
+	if err != nil {
+		return nil, err
+	}
+
+	image, ok := res.(*Image)
+	if !ok {
+		return nil, ErrUnknown.WithResource(res)
+	}
+
+	if !image.IsEnsured() {
+		return nil, ErrDependencyNotEnsured.WithResource(image)
+	}
+
+	config := map[string]string{}
+	imageHealthConfig(config, r.Config.Extensions, image.State().Healthcheck)
+
+	for key, value := range r.Config.Extensions {
+		if strings.HasPrefix(key, HealthKeyPrefix) {
+			config[key] = value
+		}
+	}
+
+	return config, nil
 }
 
 // Start starts the instance.
@@ -2106,6 +2141,25 @@ func (r *Instance) setHealthCheckingStopped(ctx context.Context, stopped bool) e
 	}
 
 	return r.patchConfig(ctx, map[string]string{HealthStoppedKey: value})
+}
+
+// SetDrained sets or clears shared.DNSDrainKey, which takes the instance out of
+// its service name in ic-dns while it keeps answering at its own.
+func (r *Instance) SetDrained(ctx context.Context, drained bool) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	err := r.fetch(ctx, nil)
+	if err != nil {
+		return err
+	}
+
+	value := strconv.FormatBool(drained)
+	if r.State().IncusInstance.Config[shared.DNSDrainKey] == value {
+		return nil
+	}
+
+	return r.patchConfig(ctx, map[string]string{shared.DNSDrainKey: value})
 }
 
 // Exec runs a command in the instance and waits for it to finish, discarding

@@ -16,6 +16,10 @@ const (
 	// DNSTransferKey is the project config key opting a project into zone transfers.
 	DNSTransferKey = "user.label.dns.transfer"
 
+	// DNSDrainKey when "true" on an instance takes it out of its service name
+	// while it keeps answering at its own.
+	DNSDrainKey = "user.label.dns.drain"
+
 	DNSScopeProject = "project"
 	DNSScopeGlobal  = "global"
 )

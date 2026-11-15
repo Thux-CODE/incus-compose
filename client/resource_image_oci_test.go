@@ -225,6 +225,48 @@ func TestOCIHealthConfig(t *testing.T) {
 	}
 }
 
+// The service's own declaration decides whether the image's check is read at
+// all, which is what a rollout asks before it creates anything.
+func TestImageHealthConfig(t *testing.T) {
+	t.Parallel()
+
+	image := &ociHealthcheck{Test: []string{"CMD", "true"}, Retries: 2}
+
+	for _, tt := range []struct {
+		name       string
+		extensions map[string]string
+		want       map[string]string
+	}{
+		{
+			name: "a service saying nothing takes the image's check",
+			want: map[string]string{
+				shared.HealthEnabledKey:     "true",
+				HealthKeyPrefix + "test":    `["CMD","true"]`,
+				HealthKeyPrefix + "retries": "2",
+			},
+		},
+		{
+			name:       "a test of the service's own replaces the image's",
+			extensions: map[string]string{HealthKeyPrefix + "test": `["CMD","false"]`},
+			want:       map[string]string{},
+		},
+		{
+			name:       "a disabled check keeps the image's away",
+			extensions: map[string]string{shared.HealthEnabledKey: "false"},
+			want:       map[string]string{},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := map[string]string{}
+			imageHealthConfig(got, tt.extensions, image)
+
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestOCIPickManifest(t *testing.T) {
 	t.Parallel()
 
