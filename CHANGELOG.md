@@ -43,7 +43,9 @@ form.
   service off the air. After a restart a ready replica read in this run outranks
   one only restored from the cold store, whose address may have moved while
   `ic-dns` was down: the restored ready replicas answer only where no replica
-  read since is ready. A drained replica is never among them. (by @sandroden)
+  read since is ready. A drained replica is never among them, and neither is
+  one with no address a querier can reach: the choice is made network by
+  network, among the replicas that have one there. (by @sandroden)
 
 ### Changed
 

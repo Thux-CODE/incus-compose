@@ -240,15 +240,7 @@ func (s *state) refresh(ttl uint32) bool {
 	}
 
 	for name, replicas := range carriers {
-		answering := pick(replicas)
-
-		next := ecs_view.ViewAnswer{}
-
-		for _, inst := range answering {
-			for id, records := range s.records(inst, name, ttl) {
-				next[id] = union(next[id], records)
-			}
-		}
+		next := s.service(name, replicas, ttl)
 
 		prev := s.served[name]
 		if sameAnswer(prev, next) {
@@ -276,8 +268,56 @@ func (s *state) refresh(ttl uint32) bool {
 	return changed
 }
 
-// pick is who answers for one service, out of the replicas that carry its
-// name:
+// service is what one service name answers, view by view: in each view, the
+// replicas pick chooses among those with an address there. A replica with none
+// in a view - stopped, paused, not leased yet, or on other networks - is no
+// candidate in it, so it can neither win readiness there and leave the name
+// empty, nor keep a replica the view does reach out of it.
+func (s *state) service(name string, replicas []*instance, ttl uint32) ecs_view.ViewAnswer {
+	type offer struct {
+		inst    *instance
+		records ecs_view.Records
+	}
+
+	offers := map[ecs_view.ViewID][]offer{}
+
+	out := ecs_view.ViewAnswer{}
+
+	for _, inst := range replicas {
+		for id, records := range s.records(inst, name, ttl) {
+			if len(records) == 0 {
+				// The name is there and holds nothing, as a replica with no
+				// lease yet always left it.
+				if _, held := out[id]; !held {
+					out[id] = ecs_view.Records{}
+				}
+
+				continue
+			}
+
+			offers[id] = append(offers[id], offer{inst: inst, records: records})
+		}
+	}
+
+	for id, list := range offers {
+		candidates := make([]*instance, len(list))
+		for i, o := range list {
+			candidates[i] = o.inst
+		}
+
+		answering := pick(candidates)
+
+		for _, o := range list {
+			if slices.Contains(answering, o.inst) {
+				out[id] = union(out[id], o.records)
+			}
+		}
+	}
+
+	return out
+}
+
+// pick is who answers for one service, out of its candidates:
 //
 //  1. the ready ones this run has read;
 //  2. where there are none, the ready ones the cold store restored and no read

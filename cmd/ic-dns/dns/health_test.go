@@ -383,3 +383,102 @@ func TestASingleReplicaGoingUnhealthyStaysPublished(t *testing.T) {
 	s.step(true, 5)
 	assert.Equal(t, born+1, s.serials[zone].Serial)
 }
+
+// downReplica is a replica of frontend that is not running - stopped, or
+// paused - read with the status ic-healthd last wrote, which may still be the
+// previous run's healthy.
+func downReplica(name string, watched bool, status string) *iutil.Event {
+	config := map[string]string{userLabel(labelServiceCompose): "frontend"}
+
+	if watched {
+		config[shared.HealthEnabledKey] = "true"
+		config[shared.HealthKeyPrefix+"test"] = healthTest
+	}
+
+	if status != "" {
+		config[shared.HealthStatusKey] = status
+	}
+
+	return event(incusapi.EventLifecycleInstanceUpdated, "shop", name).
+		WithInstance(read("shop", false, config, netsOf(map[string]string{"net-a": "10.0.0.9"})), true)
+}
+
+// TestAReplicaWithNoAddressIsNoCandidate: readiness picks among the replicas
+// that have an address to give. One stopped or paused with a stale healthy, or
+// one restored and read again down, would otherwise win and leave the service
+// name with nothing in it while another replica is up.
+func TestAReplicaWithNoAddressIsNoCandidate(t *testing.T) {
+	t.Parallel()
+
+	const service = "frontend.shop.example."
+
+	t.Run("down with a stale healthy, the other starting", func(t *testing.T) {
+		t.Parallel()
+
+		snap := fed(t,
+			replica(incusapi.EventLifecycleInstanceStarted, "frontend-2", "10.0.0.6", true, shared.HealthStatusStarting),
+			downReplica("frontend-1", true, shared.HealthStatusHealthy),
+		).state.snapshot()
+
+		assert.Equal(t, []string{"10.0.0.6"}, answered(t, snap, service, "10.0.0.6"))
+	})
+
+	t.Run("a restored replica read again down does not take the restored service", func(t *testing.T) {
+		t.Parallel()
+
+		p := New(slog.Default(), Suffix("example"))
+		p.next = func(_ *iutil.Event) {}
+
+		p.fold(replica(incusapi.EventLifecycleInstanceUpdated, "frontend-1", "10.0.0.5", false, "").WithRestored())
+		p.fold(downReplica("frontend-2", false, "").WithRestored())
+		require.True(t, p.state.write(0))
+		require.Equal(t, []string{"10.0.0.5"}, answered(t, p.state.snapshot(), service, "10.0.0.5"))
+
+		// The first round reads the one that is down first, unchanged.
+		p.fold(downReplica("frontend-2", false, ""))
+		p.state.write(0)
+
+		assert.Equal(t, []string{"10.0.0.5"}, answered(t, p.state.snapshot(), service, "10.0.0.5"))
+	})
+
+	t.Run("a sole replica with no lease yet leaves the name empty, not gone", func(t *testing.T) {
+		t.Parallel()
+
+		ev := event(incusapi.EventLifecycleInstanceStarted, "shop", "frontend-1").
+			WithInstance(read("shop", true, map[string]string{userLabel(labelServiceCompose): "frontend"},
+				map[string]onNet{"net-a": {project: iutil.DefaultProject, subnet: "10.0.0.0/24"}}), true)
+
+		_, held := fed(t, ev).state.snapshot().Answers(service)
+		assert.True(t, held)
+	})
+}
+
+// TestReadinessIsDecidedViewByView: a service whose replicas sit on different
+// networks answers each querier from the replicas it can reach. One ready
+// replica elsewhere is no reason to leave a querier with none.
+func TestReadinessIsDecidedViewByView(t *testing.T) {
+	t.Parallel()
+
+	on := func(name, net, addr, status string) *iutil.Event {
+		config := map[string]string{
+			userLabel(labelServiceCompose):  "frontend",
+			shared.HealthEnabledKey:         "true",
+			shared.HealthKeyPrefix + "test": healthTest,
+			shared.HealthStatusKey:          status,
+		}
+
+		return event(incusapi.EventLifecycleInstanceStarted, "shop", name).
+			WithInstance(read("shop", true, config, netsOf(map[string]string{net: addr})), true)
+	}
+
+	snap := fed(t,
+		on("frontend-1", "net-a", "10.0.0.5", shared.HealthStatusHealthy),
+		on("frontend-2", "net-a", "10.0.0.6", shared.HealthStatusStarting),
+		on("frontend-3", "net-b", "10.0.1.6", shared.HealthStatusStarting),
+	).state.snapshot()
+
+	assert.Equal(t, []string{"10.0.0.5"}, answered(t, snap, "frontend.shop.example.", "10.0.0.6"),
+		"net-a has a ready replica")
+	assert.Equal(t, []string{"10.0.1.6"}, answered(t, snap, "frontend.shop.example.", "10.0.1.6"),
+		"net-b reaches only the one starting")
+}
