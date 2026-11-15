@@ -40,7 +40,10 @@ form.
   (`<instance>.<zone>`) is answered throughout. Replicas without a healthcheck
   are served as before, and where no replica is ready the name answers with all
   of them, so a stopped `ic-healthd` or a single failing replica never takes a
-  service off the air. (by @sandroden)
+  service off the air. After a restart a ready replica read in this run outranks
+  one only restored from the cold store, whose address may have moved while
+  `ic-dns` was down: the restored ready replicas answer only where no replica
+  read since is ready. A drained replica is never among them. (by @sandroden)
 
 ### Changed
 

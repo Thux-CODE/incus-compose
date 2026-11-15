@@ -196,10 +196,9 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 	return out
 }
 
-// refresh writes every service name from the replicas that carry it: the ready
-// ones, or every one where none is - readiness picks between replicas, it never
-// takes a service off the air. A drained replica carries no service name, so it
-// is never among them.
+// refresh writes every service name from the replicas that carry it, as pick
+// chooses them. A drained replica carries no service name, so it is never among
+// them.
 //
 // Rebuilt from everything held rather than patched per instance, since one
 // replica becoming ready changes what the others contribute. The one way in, so
@@ -234,17 +233,14 @@ func (s *state) refresh(ttl uint32) bool {
 
 		s.dropName(name, held)
 		delete(s.served, name)
-		s.dirty(s.servedZone[name])
+		s.dirty(s.servedZone[name], true)
 		delete(s.servedZone, name)
 
 		changed = true
 	}
 
 	for name, replicas := range carriers {
-		answering := slices.DeleteFunc(slices.Clone(replicas), func(inst *instance) bool { return !inst.ready })
-		if len(answering) == 0 {
-			answering = replicas
-		}
+		answering := pick(replicas)
 
 		next := ecs_view.ViewAnswer{}
 
@@ -267,8 +263,11 @@ func (s *state) refresh(ttl uint32) bool {
 		s.served[name] = next
 		s.servedZone[name] = zones[name]
 
+		// Owed only where this run has read a replica of it: one made of
+		// restored replicas alone is the replay's, which the stored serial
+		// already describes.
 		if !sameRecords(flatten(prev), flatten(next)) {
-			s.dirty(zones[name])
+			s.dirty(zones[name], slices.ContainsFunc(replicas, func(inst *instance) bool { return !inst.Restored() }))
 		}
 
 		changed = true
@@ -277,14 +276,52 @@ func (s *state) refresh(ttl uint32) bool {
 	return changed
 }
 
-// dirty marks one zone as moved, so publish steps its serial.
-func (s *state) dirty(zone string) {
+// pick is who answers for one service, out of the replicas that carry its
+// name:
+//
+//  1. the ready ones this run has read;
+//  2. where there are none, the ready ones the cold store restored and no read
+//     has confirmed yet - what a previous run last saw, address and health
+//     included;
+//  3. where there are none of those either, every one of them.
+//
+// A read in this run outranks a restored one because a restored address may
+// have moved while this process was down. The last step is fail-open:
+// readiness picks between replicas, it never takes a service off the air.
+func pick(replicas []*instance) []*instance {
+	var fresh, restored []*instance
+
+	for _, inst := range replicas {
+		switch {
+		case !inst.ready:
+		case inst.Restored():
+			restored = append(restored, inst)
+		default:
+			fresh = append(fresh, inst)
+		}
+	}
+
+	switch {
+	case len(fresh) > 0:
+		return fresh
+	case len(restored) > 0:
+		return restored
+	default:
+		return replicas
+	}
+}
+
+// dirty marks one zone as moved, so publish steps its serial, and as owing a
+// step once warm where owe says the change is not one the stored serial
+// already describes.
+func (s *state) dirty(zone string, owe bool) {
 	held, known := s.serials[zone]
 	if !known {
 		return
 	}
 
 	held.dirty = true
+	held.Owed = held.Owed || owe
 	s.serials[zone] = held
 }
 

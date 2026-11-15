@@ -81,6 +81,10 @@ func newState(serials map[string]zoneSerial) *state {
 func (s *state) write(ttl uint32) bool {
 	moved := false
 
+	// confirmed is a restored replica read unchanged: its own records stay, but
+	// a replica this run has read outranks restored ones in its service.
+	confirmed := false
+
 	for key, next := range s.pending {
 		delete(s.pending, key)
 
@@ -91,6 +95,8 @@ func (s *state) write(ttl uint32) bool {
 		// as restored for ever once a live read confirmed it unchanged.
 		if next != nil && prev != nil && next.Equal(prev.Event) {
 			s.held[key] = next
+
+			confirmed = confirmed || (next.service != "" && prev.Restored() != next.Restored())
 
 			continue
 		}
@@ -106,8 +112,8 @@ func (s *state) write(ttl uint32) bool {
 
 	// After every instance has moved: a service name is written from all of
 	// its replicas at once.
-	if moved {
-		s.refresh(ttl)
+	if (moved || confirmed) && s.refresh(ttl) {
+		moved = true
 	}
 
 	return moved
