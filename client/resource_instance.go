@@ -2154,10 +2154,13 @@ func (r *Instance) SetDrained(ctx context.Context, drained bool) error {
 		return err
 	}
 
-	value := strconv.FormatBool(drained)
-	if r.State().IncusInstance.Config[shared.DNSDrainKey] == value {
+	// Clearing a drain that was never set leaves the config alone.
+	current := util.IsTrue(r.State().IncusInstance.Config[shared.DNSDrainKey])
+	if current == drained {
 		return nil
 	}
+
+	value := strconv.FormatBool(drained)
 
 	return r.patchConfig(ctx, map[string]string{shared.DNSDrainKey: value})
 }
