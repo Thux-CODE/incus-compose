@@ -27,6 +27,102 @@ form.
   aliases, a cluster volume on a block pool, or `x-incus-compose.rollout: false`)
   are refused. (by @sandroden)
 
+- `ic-dns --trusted-client` (`INCUS_COMPOSE_DNS_TRUSTED_CLIENTS`): CIDRs whose
+  queries are answered from every view at once instead of from the networks
+  their address sits on, for an edge router that proxies into every project's
+  own network. Matched on the source address, never on an EDNS client subnet;
+  empty (the default) trusts nobody. (by @sandroden)
+
+- `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
+  set to `false`, names it already holds are also answered `SERVFAIL` (extended
+  error `Not Ready`) until the first complete round of the fleet, like the names
+  it cannot answer yet, so a client listing a second `ic-dns` asks that one
+  instead of taking a record that may be out of date. Keep the default with a
+  single server. (by @sandroden)
+
+- `ic-dns` honours `user.label.dns.drain=true` on an instance: it leaves its
+  service name (`<service>.<zone>`) and keeps answering at its own name
+  (`<instance>.<zone>`), so a replica can be taken out of rotation before it is
+  restarted or updated. Setting it back to `false` or unsetting it puts the
+  replica back. Instance-only: a project setting it is ignored. (by @sandroden)
+
+- `ic-dns` answers a service name (`<service>.<zone>`) with the replicas
+  `ic-healthd` reports `healthy`: a replica with a healthcheck enabled stays out
+  of it while `starting`, `unhealthy` or not yet checked, and its own name
+  (`<instance>.<zone>`) is answered throughout. Replicas without a healthcheck
+  are served as before, and where no replica is ready the name answers with all
+  of them, so a stopped `ic-healthd` or a single failing replica never takes a
+  service off the air. After a restart a ready replica read in this run outranks
+  one only restored from the cold store, whose address may have moved while
+  `ic-dns` was down: the restored ready replicas answer only where no replica
+  read since is ready. A drained replica is never among them, and neither is
+  one with no address a querier can reach: the choice is made network by
+  network, among the replicas that have one there. (by @sandroden)
+
+### Changed
+
+- `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an
+  instance with a healthcheck starts, restarts or resumes, as docker does,
+  instead of leaving the previous run's `healthy` or `stopped` until the first
+  check. Without a `start_period` it stays `starting` until a check passes or
+  the retries run out. Status writes to one instance no longer overlap, so a
+  quick first check can no longer leave `starting` behind on a healthy instance.
+  (by @sandroden)
+
+### Fixed
+
+- The `ievent` enricher retries a sweep that failed (projects not listed, or a
+  project's instances not listed) after a backoff of 1 s doubling up to 30 s,
+  instead of waiting the 6 h sweep interval, and no longer ends a sweep that
+  could not list a project's instances as complete. `ic-dns` no longer stays
+  cold, holding every instance read, for hours after one failed sweep. (by
+  @sandroden)
+
+- `ic-dns` answers from its cold store right after a restart instead of falling
+  through to the forwarders until the first sweep of the fleet ends (12-45 s
+  against a slow Incus). The enricher reads `enricher-cold-store.json` back,
+  dropping projects the current `--project` or marker no longer serves, and
+  replays it as cold events marked `Restored`; the sweep then corrects and
+  deletes what changed or went while it was down. Zone serials no longer go
+  backwards when a zone is republished before its names are replayed, and a
+  change found while the chain is cold steps its zone's serial once the chain is
+  warm, so secondaries transfer it. An instance of a project that is no longer
+  listed, or one a read finds deleted, now reaches the chain as
+  `instance-deleted`: a project listing that succeeds empty (a certificate
+  restricted to `projects: []`) now removes every name at the first sweep, where
+  v1.4.0 kept answering. (by @sandroden)
+
+- `ic-dns` answers `SERVFAIL` (extended error `Not Ready`) instead of `NXDOMAIN`
+  or forwarding upstream for names under its suffix that it cannot answer before
+  the first complete round of the fleet, so resolvers fall back to the next
+  nameserver while a replica is restarting. A name under the suffix outside
+  every project zone read so far is still forwarded, and an upstream `NOERROR`
+  is passed on, records or not, so hosts the upstream knows under the suffix
+  keep resolving, an empty AAAA included; an upstream `NXDOMAIN` is
+  `SERVFAIL`. Names outside the suffix are forwarded, and nothing changes once
+  warm. `/ready` now turns ready only on a warm event no plugin dropped, and
+  once ready only a lost Incus event stream takes it back, until the next
+  complete round: a failed read, or an event read before the first round ended
+  and landing after it, no longer leaves it at 503 until the next round, hours
+  later. (by @sandroden)
+
+- `ic-dns` answers a `--trusted-client` asking for an alias two instances claim
+  `SERVFAIL` (`Not Ready`) instead of `NXDOMAIN` before the first complete
+  round, as it already did every other querier: after a restart the claimant
+  that has to go may only not have been read yet, and the router took the
+  `NXDOMAIN` as final. (by @sandroden)
+
+- `ic-dns` no longer answers for a paused (frozen) instance: `incus pause` takes
+  it out of its own name and its service name, and `incus resume` puts it back.
+  Before, its address kept being served and clients timed out on it instead of
+  trying another replica. An instance whose guest reported itself `Ready` is
+  running, and keeps its names. (by @sandroden)
+
+- `ic-dns` and `ic-healthd` no longer miss a change made while the instance was
+  being read: an event that arrives after a read of the same instance went out
+  (a label set right after a start, while the start waits for an address) gets a
+  read of its own instead of the older answer. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

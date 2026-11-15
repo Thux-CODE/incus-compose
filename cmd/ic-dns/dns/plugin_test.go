@@ -104,6 +104,48 @@ func TestPluginServesWhatItWasFed(t *testing.T) {
 			},
 		},
 		{
+			// A paused instance keeps its addresses - Incus still reports them -
+			// but answers on none of them, so a record would have a client wait
+			// out a timeout instead of trying the next replica.
+			name: "a paused instance stops answering",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", map[string]string{metaService: "frontend"}, map[string]string{"net-a": "10.0.0.5"}),
+				eventOn(started, "shop", "api", map[string]string{metaService: "frontend"}, map[string]string{"net-a": "10.0.0.6"}),
+				event(incusapi.EventLifecycleInstancePaused, "shop", "web").
+					WithInstance(read("shop", false, ours(metaService, "frontend"), netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.6"},
+				{qname: "frontend.shop.example.", from: "10.0.0.6", want: []string{"10.0.0.6"}},
+			},
+		},
+		{
+			// What a round reads off a frozen instance is the same read, whatever
+			// event it arrives on.
+			name: "a frozen instance read again stays unanswered",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+				eventOn(started, "shop", "db", nil, map[string]string{"net-a": "10.0.0.6"}),
+				event(incusapi.EventLifecycleInstanceUpdated, "shop", "web").
+					WithInstance(read("shop", false, nil, netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.6"},
+			},
+		},
+		{
+			name: "a resumed instance answers again",
+			feed: []*iutil.Event{
+				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+				event(incusapi.EventLifecycleInstancePaused, "shop", "web").
+					WithInstance(read("shop", false, nil, netsOf(map[string]string{"net-a": "10.0.0.5"})), true),
+				eventOn(incusapi.EventLifecycleInstanceResumed, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
+			},
+			want: []resolves{
+				{qname: "web.shop.example.", from: "10.0.0.5", want: []string{"10.0.0.5"}},
+			},
+		},
+		{
 			name: "a rename answers to the new name and not the old",
 			feed: []*iutil.Event{
 				eventOn(started, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}),
@@ -248,7 +290,7 @@ func TestReconnectClaimsNothingAboutAFleetThatDidNotMove(t *testing.T) {
 	}
 
 	// The replay off disk, then the round that reads Incus.
-	r.feed(t, updated("10.0.0.5"), event(iutil.ActionSweepEnd, "", ""))
+	r.feed(t, updated("10.0.0.5").WithRestored(), event(iutil.ActionSweepEnd, "", ""))
 	assert.True(t, r.p.view.Ready(), "a round that finished serves")
 
 	// A live change while warm.
@@ -292,7 +334,7 @@ func TestColdBecomesWarm(t *testing.T) {
 	// read. Then the round that reads Incus and finds the fleet has moved.
 	r.feed(t,
 		eventOn(incusapi.EventLifecycleInstanceStarted, "shop", "web", nil,
-			map[string]string{"net-a": "10.0.0.5"}),
+			map[string]string{"net-a": "10.0.0.5"}).WithRestored(),
 		event(iutil.ActionSweepEnd, "", ""))
 
 	r.feed(t,
@@ -336,4 +378,116 @@ func TestPluginStoresTheSerialsItPublished(t *testing.T) {
 
 	assert.Equal(t, uint32(1), back["shop.example."].Serial)
 	assert.Zero(t, back["shop.example."].names, "what a zone is made of is folded again, not stored")
+}
+
+// TestAZoneTheReplayHasNotReachedKeepsItsSerial: a replay is not folded in one
+// window, and a zone whose names have not come back by the first publish is as
+// likely late as gone. Forgetting its serial there would publish it at 1 when
+// they do - a serial going backwards, which a secondary never transfers past.
+// Once warm, a zone nothing came back to is gone, and so is its serial.
+func TestAZoneTheReplayHasNotReachedKeepsItsSerial(t *testing.T) {
+	const (
+		shop = "shop.example."
+		blog = "blog.example."
+	)
+
+	seed, err := encodeCold(map[string]zoneSerial{shop: {Serial: 7}, blog: {Serial: 4}, "gone.example.": {Serial: 2}})
+	require.NoError(t, err)
+
+	p := New(slog.Default(), Suffix("example"), ColdMemory(seed))
+	p.next = func(_ *iutil.Event) {}
+	p.state = newState(p.cold.load())
+
+	updated := incusapi.EventLifecycleInstanceUpdated
+
+	// The first window of the replay holds shop alone.
+	p.fold(eventOn(updated, "shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}).WithRestored())
+	p.write()
+
+	// blog arrives in the next.
+	p.fold(eventOn(updated, "blog", "api", nil, map[string]string{"net-a": "10.0.0.6"}).WithRestored())
+	p.write()
+
+	assert.Equal(t, uint32(7), p.state.serials[shop].Serial)
+	assert.Equal(t, uint32(4), p.state.serials[blog].Serial,
+		"a zone the first window had not reached was published as new")
+	assert.Equal(t, []string{"10.0.0.6"}, answered(t, p.state.snapshot(), "api."+blog, "10.0.0.6"))
+
+	// The round reaches its end and nothing came back to gone.
+	p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+
+	assert.NotContains(t, p.state.serials, "gone.example.", "a zone nothing came back to outlived warm")
+	assert.Equal(t, uint32(4), p.state.serials[blog].Serial, "warm stepped a zone that did not change")
+}
+
+// TestALiveReadReplacesARestoredOne: a read in this run that finds what the
+// cold store restored changes no record, so the trees are left alone - but
+// what is held has to say it is no longer a restored answer, or anything that
+// asks would wait for a fresh one for ever.
+func TestALiveReadReplacesARestoredOne(t *testing.T) {
+	p := New(slog.Default(), Suffix("example"))
+	p.next = func(_ *iutil.Event) {}
+
+	updated := func() *iutil.Event {
+		return eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", nil,
+			map[string]string{"net-a": "10.0.0.5"})
+	}
+
+	p.fold(updated().WithRestored())
+	require.True(t, p.state.write(0))
+	require.True(t, p.state.held[heldKey("shop", "web")].Restored())
+
+	p.fold(updated())
+
+	assert.False(t, p.state.write(0), "a read that changed nothing moved the trees")
+	assert.False(t, p.state.held[heldKey("shop", "web")].Restored(),
+		"what is held still reads as restored after a live read")
+}
+
+// TestWhatTheFirstRoundCorrectsStepsOnceWarm: an address that changed while
+// the process was down is corrected by the first round, which is cold. The
+// stored serial described the old address, so the first warm publish steps it
+// once - or a secondary holding that serial keeps the old address until some
+// later change happens to step it.
+func TestWhatTheFirstRoundCorrectsStepsOnceWarm(t *testing.T) {
+	const zone = "shop.example."
+
+	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}})
+	require.NoError(t, err)
+
+	p := New(slog.Default(), Suffix("example"), ColdMemory(seed))
+	p.next = func(_ *iutil.Event) {}
+	p.state = newState(p.cold.load())
+
+	updated := func(addr string) *iutil.Event {
+		return eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", nil,
+			map[string]string{"net-a": addr})
+	}
+
+	// The replay, then the round's cold read of what moved.
+	p.fold(updated("10.0.0.5").WithRestored())
+	p.write()
+	p.fold(updated("10.0.0.9"))
+	p.write()
+
+	assert.Equal(t, uint32(7), p.state.serials[zone].Serial, "cold stepped a serial")
+
+	p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	assert.Equal(t, uint32(8), p.state.serials[zone].Serial, "the correction was never announced")
+
+	p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	assert.Equal(t, uint32(8), p.state.serials[zone].Serial, "the correction was announced twice")
+}
+
+// TestWhatIsOwedSurvivesARestart: a restart between a cold change and the
+// first warm publish must still owe the step, so the mark goes to the store
+// with the serial.
+func TestWhatIsOwedSurvivesARestart(t *testing.T) {
+	b, err := encodeCold(map[string]zoneSerial{"shop.example.": {Serial: 7, Owed: true}})
+	require.NoError(t, err)
+
+	back, err := decodeCold(b)
+	require.NoError(t, err)
+
+	assert.Equal(t, zoneSerial{Serial: 7, Owed: true}, back["shop.example."])
 }

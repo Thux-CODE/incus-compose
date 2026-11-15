@@ -14,6 +14,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	incusapi "github.com/lxc/incus/v7/shared/api"
+	"github.com/miekg/dns"
 
 	"github.com/lxc/incus-compose/cmd/ic-dns/dns/ecs_view"
 	"github.com/lxc/incus-compose/ievent/iutil"
@@ -24,6 +25,11 @@ const name = "dns"
 
 // defaultInboxSize is what the inbox holds before a drop is the only answer.
 const defaultInboxSize = 1024
+
+// actionRoundLost is what this plugin raises when a sweep-end was dropped, here
+// or before here. It walks the chain behind everything already in it and, stamped
+// warm, arrives as the ordered signal that sweep-end would have been.
+const actionRoundLost = "dns/round-lost"
 
 // publishWindow is how long patches collect before one snapshot is published.
 // Trailing edge only, and invisible against a TTL measured in seconds.
@@ -49,9 +55,18 @@ type Config struct {
 	// Metrics turns on the engine's counters and gauges.
 	Metrics bool
 
+	// ColdAnswers serves what the zones hold before the first round has ended.
+	// Off, those queries are SERVFAIL like a cold miss. On unless turned off.
+	ColdAnswers bool
+
 	// AllowTransfer is who may ask for a zone transfer. Empty allows nobody, so
 	// a transfer is opt-in at the listener as well as at the zone.
 	AllowTransfer []netip.Prefix
+
+	// TrustedClients are the queriers answered from every view at once rather
+	// than from the one they sit on. Empty trusts nobody, which is the
+	// per-querier filter as it stands without this.
+	TrustedClients []netip.Prefix
 
 	// ColdDir is where the cold store lives, the same directory the certificate
 	// is in. Empty disables it, and nothing writes to disk without it.
@@ -150,8 +165,18 @@ func AllowTransfer(prefixes []netip.Prefix) Option {
 	return func(cfg *Config) { cfg.AllowTransfer = prefixes }
 }
 
+// TrustedClients sets who is answered from every view at once instead of the
+// one their address places them on. Empty trusts nobody.
+func TrustedClients(prefixes []netip.Prefix) Option {
+	return func(cfg *Config) { cfg.TrustedClients = prefixes }
+}
+
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
+
+// ColdAnswers sets whether what the zones hold is served before the first
+// round has ended, or SERVFAIL like a cold miss.
+func ColdAnswers(v bool) Option { return func(cfg *Config) { cfg.ColdAnswers = v } }
 
 // ColdDir sets where the cold store lives. Empty writes nothing to disk.
 func ColdDir(dir string) Option { return func(cfg *Config) { cfg.ColdDir = dir } }
@@ -179,7 +204,8 @@ func Project(fn func(p *incusapi.Project) bool) Option {
 // listener and cold store included.
 func New(logger *slog.Logger, opts ...Option) *Plugin {
 	cfg := Config{
-		InboxSize: defaultInboxSize,
+		InboxSize:   defaultInboxSize,
+		ColdAnswers: true,
 	}
 
 	for _, opt := range opts {
@@ -191,7 +217,17 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	view := ecs_view.New(logger)
 	view.EchoSubnet = cfg.EchoSubnet
 	view.Metrics = cfg.Metrics
+	view.ColdAnswers = cfg.ColdAnswers
 	view.Server = cfg.Listen
+	view.Trusted = cfg.TrustedClients
+
+	// Every project zone is built under the suffix, so the suffix is ours before
+	// any of them has been read. Empty or "." claims nothing: claiming the root
+	// would fail every name on the internet until warm.
+	claim := dns.CanonicalName(cfg.Suffix)
+	if claim != "." {
+		view.Claims = []string{claim}
+	}
 
 	p := &Plugin{
 		cfg:    cfg,
@@ -243,6 +279,7 @@ func (p *Plugin) Wants() []iutil.Want {
 		{Action: incusapi.EventLifecycleInstanceStarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceRestarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceResumed, Enrich: wantsInstance},
+		{Action: incusapi.EventLifecycleInstancePaused, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceStopped, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceShutdown, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceUpdated, Enrich: wantsInstance, Debounce: true},
@@ -268,6 +305,23 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 	case p.inbox <- ev:
 	default:
 		p.next(ev.WithDropped(name))
+		p.roundLost(ev)
+	}
+}
+
+// roundLost asks for an end of round again when one could not be used, since
+// it is what turns the view warm - until then every miss is SERVFAIL - and,
+// after a lost stream, healthy and ready again. Its own request counts too, or
+// one dropped in turn would end the asking.
+// Non-blocking, from either goroutine: a full door drops it like any event.
+func (p *Plugin) roundLost(ev *iutil.Event) {
+	if ev.Action() != iutil.ActionSweepEnd && ev.Action() != actionRoundLost {
+		return
+	}
+
+	select {
+	case p.commandOut <- iutil.Command{Action: actionRoundLost}:
+	default:
 	}
 }
 
@@ -399,17 +453,37 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	}
 
 	// A lost stream drops no record, but nothing is confirming them any more,
-	// which is what unready says.
+	// which is what unready says, until a round has ended again. The view stays
+	// warm: what it holds is as good as any other server's.
 	if ev.Action() == iutil.ActionDisconnected {
 		p.view.SetHealthy(false)
+		p.state.fresh = false
+		p.state.lost = ev.At()
 
 		return
 	}
 
-	if ev.Action() == iutil.ActionSweepEnd {
+	// Only an end that came the whole way in order. One dropped on the way
+	// overtook the reads still in flight before it, and rounding on it would
+	// turn the view warm over names nobody has read yet.
+	if ev.Action() == iutil.ActionSweepEnd && ev.Err() == nil {
 		p.rounded()
 
 		return
+	}
+
+	if ev.Err() != nil && !p.state.fresh {
+		p.roundLost(ev)
+	}
+
+	// The same end arriving another way: anything stamped warm that was not
+	// dropped walked the chain behind it, so the round it closed is folded by
+	// now even if the sweep-end itself was lost. Stamped before the stream was
+	// lost, it is a debounced leftover and says nothing about the stream since.
+	// The rule http follows for /ready, so the two agree. Nothing else -
+	// a failed read, or a cold stamp after the round - takes it back.
+	if !p.state.fresh && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
+		p.rounded()
 	}
 
 	if ev.Err() != nil || !slices.Contains(p.actions, ev.Action()) {
@@ -459,6 +533,7 @@ func (p *Plugin) rounded() {
 	p.publish()
 
 	p.view.SetHealthy(true)
+	p.state.fresh = true
 }
 
 // write applies what has arrived and publishes it. Nothing arrived is nothing

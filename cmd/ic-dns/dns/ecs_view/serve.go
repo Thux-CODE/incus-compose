@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/netip"
 
+	"github.com/coredns/coredns/plugin/pkg/nonwriter"
 	"github.com/coredns/coredns/request"
 	"github.com/miekg/dns"
 )
@@ -58,18 +59,29 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 	}
 
-	// Nothing relayed the query, so the source address is the querier: what a
-	// client naming this server in resolv.conf sends.
+	// Where the packet came from, whatever the option says. Nothing relayed the
+	// query means this is the querier too: what a client naming this server in
+	// resolv.conf sends.
+	src, haveSrc := sourceAddr(w.RemoteAddr())
+
 	if !haveClient {
-		client, haveClient = sourceAddr(w.RemoteAddr())
+		client, haveClient = src, haveSrc
 	}
 
 	snap := v.current.Load()
+
+	// Before the first whole read, every miss below may be a name not read yet
+	// rather than one that is not there, so none of them is answered as final.
+	cold := !v.warm.Load()
 
 	// Zones first, and the zone tree is zones deep rather than names deep: a name
 	// outside every zone is the common case and never touches the name tree.
 	z := snap.ZoneOf(qname)
 	if z == nil {
+		if cold && v.claimed(qname) {
+			return v.askNext(ctx, w, r, opt)
+		}
+
 		v.logger.Debug("unknown, falling through", "zone", qname)
 
 		return false, dns.RcodeSuccess, nil
@@ -80,9 +92,19 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	// A zone claiming only the names in it, the apex included: naming a server
 	// for a domain we hold one name in would claim the rest of that domain too.
 	if z.Shadowing && !held {
+		if cold && v.claimed(qname) {
+			return v.askNext(ctx, w, r, opt)
+		}
+
 		v.logger.Debug("not claimed, falling through", "name", qname, "zone", z.Name)
 
 		return false, dns.RcodeSuccess, nil
+	}
+
+	// Inside a zone of ours and asked not to answer from it before warm: a hit
+	// may be a record from before the restart, so it fails like a miss would.
+	if cold && !v.ColdAnswers {
+		return v.notReady(w, r, opt)
 	}
 
 	server := v.Server
@@ -111,6 +133,11 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	if !held {
+		// A zone of ours, whatever Claims says.
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		deny(m, z, clamp)
 
 		if v.Metrics {
@@ -118,6 +145,13 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		}
 
 		return write(w, m)
+	}
+
+	// A trusted querier is placed on every network at once instead of the one it
+	// sits on, so it is answered everything this name holds. Before the gate
+	// below, which is what it is exempt from.
+	if haveSrc && v.trusts(src) {
+		return v.answerTrusted(w, r, opt, m, z, answers, qtype, clamp, cold)
 	}
 
 	// Fail closed. Without an address there is no network to answer from, and any
@@ -132,6 +166,11 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 	}
 
 	if !known || view == AmbiguousView {
+		// The querier's own instance may be what has not been read yet.
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		if v.Metrics {
 			deniedCount.WithLabelValues(server).Inc()
 			requestCount.WithLabelValues(server, "denied").Inc()
@@ -154,6 +193,10 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	// Unreachable reads exactly like missing.
 	if !visible {
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
 		deny(m, z, clamp)
 
 		if v.Metrics {
@@ -179,6 +222,120 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	if v.Metrics {
 		requestCount.WithLabelValues(server, "success").Inc()
+	}
+
+	return write(w, m)
+}
+
+// answerTrusted answers one name from every view at once, which only a querier
+// in Trusted reaches. The records are the union of what the views hold, so a
+// name answering on two networks is two records in one answer rather than the
+// one set its querier's own address would have chosen.
+func (v *ECSView) answerTrusted(
+	w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT, m *dns.Msg,
+	z *Zone, answers ViewAnswer, qtype uint16, clamp, cold bool,
+) (bool, int, error) {
+	// Two instances claiming one alias wrote one CNAME each, and a name may hold
+	// only one. Refusing beats picking here exactly as it does for everybody
+	// else, and it reads as missing - so before warm it is a miss like any
+	// other: the claimant that has to go may only not have been read yet.
+	if len(answers.UnionFor(dns.TypeCNAME)) > 1 {
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
+		deny(m, z, clamp)
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nxdomain").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	rrs := answers.UnionFor(qtype)
+	if len(rrs) == 0 {
+		// The name is here, this type is not.
+		m.Ns = []dns.RR{authority(z.SOA, clamp)}
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nodata").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	m.Answer = withTTL(rrs, clamp)
+
+	if v.Metrics {
+		requestCount.WithLabelValues(v.Server, "trusted").Inc()
+	}
+
+	return write(w, m)
+}
+
+// claimed reports whether qname is under one of Claims.
+func (v *ECSView) claimed(qname string) bool {
+	for _, domain := range v.Claims {
+		if dns.IsSubDomain(domain, qname) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// askNext is a cold miss under a claim that no zone we know holds: either a
+// name the next plugin resolves - the hosts of the cluster under the same
+// suffix, say - or one in a project not read yet. It goes where a warm miss
+// would, with the reply caught rather than written. A NOERROR is passed on as it
+// came, records or not: NODATA says upstream holds the name, so it is no project
+// of ours, and failing it would fail a whole lookup on musl, which asks for A
+// and AAAA at once and gives up on either's SERVFAIL. So is a truncated reply,
+// whatever it says, so the client asks again over TCP and that reply is judged
+// on its own. NXDOMAIN, another rcode, a failure or nothing written may just as
+// well be the project not read yet, so those fail like any other cold miss.
+func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
+	if v.Next == nil {
+		return v.notReady(w, r, opt)
+	}
+
+	caught := nonwriter.New(w)
+
+	_, err := v.Next.ServeDNS(ctx, caught, r)
+
+	got := caught.Msg
+	if err != nil || got == nil || (got.Rcode != dns.RcodeSuccess && !got.Truncated) {
+		return v.notReady(w, r, opt)
+	}
+
+	v.logger.Debug("not warm, answered by the next plugin", "name", r.Question[0].Name)
+
+	return write(w, got)
+}
+
+// notReady is SERVFAIL: unlike NXDOMAIN, glibc, musl and Go do not take it as
+// final where another server is listed. With EDNS it carries RFC 8914's Not
+// Ready, and no client subnet: nothing about it was tailored to the querier.
+func (v *ECSView) notReady(w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
+	v.logger.Debug("not warm, failing", "name", r.Question[0].Name)
+
+	if v.Metrics {
+		requestCount.WithLabelValues(v.Server, "servfail").Inc()
+	}
+
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeServerFailure)
+
+	if opt != nil {
+		out := &dns.OPT{
+			Hdr:    dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT},
+			Option: []dns.EDNS0{&dns.EDNS0_EDE{InfoCode: dns.ExtendedErrorCodeNotReady}},
+		}
+
+		out.SetUDPSize(opt.UDPSize())
+
+		m.Extra = []dns.RR{out}
 	}
 
 	return write(w, m)

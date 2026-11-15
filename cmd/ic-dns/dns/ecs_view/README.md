@@ -79,7 +79,8 @@ type Sink interface {
     // Replace swaps everything served for snap, which holds every zone the
     // source serves.
     Replace(snap *Snapshot)
-    // SetHealthy says whether the source's data is currently fresh.
+    // SetHealthy says whether the source's data is currently fresh. The
+    // first true also turns the view warm, for good.
     SetHealthy(healthy bool)
 }
 ```
@@ -176,12 +177,105 @@ healthy server.
 The clamp is deliberately coarse: it applies to every zone, not only the ones
 affected. It errs toward shorter TTLs.
 
+## Before The First Read
+
+Until its source first reports itself healthy, the view is cold: what it holds
+may be only part of what exists, so a miss may be a name that has not been read
+yet rather than one that is not there. Every miss is then answered `SERVFAIL`,
+with the [RFC 8914](https://datatracker.ietf.org/doc/html/rfc8914) extended
+error `Not Ready` (14) when the query carries EDNS (none when it does not):
+
+- a name a zone does not hold, a name the querier cannot see, and a querier on
+  no known network - the three answers that are `NXDOMAIN` once warm. A name
+  two instances claim as an alias reads as one the querier cannot see, for a
+  trusted querier as for anybody: the claimant that has to go may only not have
+  been read yet;
+- a name under one of `Claims` that no zone holds yet, unless the next plugin
+  answers it `NOERROR` or truncated. A source sets `Claims` to the domains it
+  serves before any zone in them has been published: for _incus_, the suffix
+  project zones are built under.
+
+A name of the last kind is still handed to the next plugin, as a warm miss would
+be, with the reply caught instead of written. A `NOERROR` is passed on as it
+came, records or not - for _incus_, a cluster node named under the same suffix
+that the uplink's resolver knows keeps resolving across a restart. `NODATA`
+counts too: it says the name exists upstream, so it is no zone of ours, and a
+`SERVFAIL` for the AAAA of an IPv4-only node would fail the node's whole lookup
+on musl, which asks for A and AAAA together. A truncated reply is passed on
+whatever its rcode, so the client asks again over TCP and that reply is judged
+on its own. `NXDOMAIN`, any other rcode, a failure, or no reply at all may be a
+zone not read yet, and is `SERVFAIL` as above. A zone invented for an alias
+(`Shadowing`) counts only for the names it holds, so a miss in it is asked the
+same way. Asking costs what a warm miss costs: a forwarder that does not answer
+holds the query up to its own timeout - 5 s for CoreDNS's _forward_ - before the
+`SERVFAIL`. Reverse names are not under a claim: a miss in a reverse zone is a
+miss in a zone, and an address outside every one falls through as usual.
+
+Hits, `NODATA` and the apex are answered as usual, clamped while unhealthy -
+unless `ColdAnswers` is off. Anything outside every zone and every claim falls
+through as usual, so names on the internet keep resolving while the fleet is
+being read.
+
+`ColdAnswers` (on unless the source turns it off, set once before anything
+serves) decides what happens to what a zone does hold before warm. On, it is
+answered: with a single server a name that may be a few seconds out of date
+beats no name at all. Off, every query inside a zone - hit, `NODATA` and apex
+included, from a querier in `Trusted` as from anybody - is `SERVFAIL` in exactly
+the shape of a cold miss, `Not Ready` and the `servfail` counter included. There
+is no telling a record read since the start from one carried over from before
+it, so it is all of them. Turn it off where every client lists a second server:
+a source that replays what it held before a restart publishes records that may
+be out of date - an address changed while the server was down is served as a
+final `NOERROR` until a read replaces it - and failing them sends the client to
+the other server instead. Names outside every zone are not touched by it.
+
+Healthy means the source says it has been all the way round, not that it read
+everything: _incus_ reports it at the end of a round that may have skipped a
+project whose listing failed, or an instance whose read timed out. The view
+turns warm with those holes, and from then on they are `NXDOMAIN` until a later
+round fills them.
+
+A claim is the whole domain. Where another server answers part of it - a second
+`ic-dns` serving other projects under the same suffix, reached by forwarding -
+its `NOERROR` answers, `NODATA` included, are passed on while this view is
+cold, and its `NXDOMAIN` is `SERVFAIL` here until warm.
+
+`SERVFAIL` because, unlike `NXDOMAIN`, the common stub resolvers do not take it
+as final where another server is listed. What they do with it, measured:
+
+| resolver | the first of two servers `SERVFAIL`s      | the only server `SERVFAIL`s                         |
+| -------- | ----------------------------------------- | --------------------------------------------------- |
+| glibc    | asks the next, answered in ~0.02 s        | `EAI_AGAIN` at once, each `search` domain tried     |
+| musl     | asks both at once, ignores the `SERVFAIL` | `EAI_AGAIN` after 5 s, at the first `search` domain |
+| Go       | temporary error, asks the next            | temporary error                                     |
+
+systemd-resolved has not been measured. A forwarder's `NXDOMAIN` for a name it
+has never heard of is final for all three, may be cached negatively, and is
+wrong. With two servers listed, a cold one costs a client nothing measurable.
+With a single cold server it costs a temporary failure instead of a wrong
+answer, and on musl every such miss blocks for 5 s first. A hidden name and an
+absent one still answer alike.
+
+The same table is the cost of turning `ColdAnswers` off, now for every name in a
+zone rather than only the misses: free with two servers listed, every lookup of
+an internal name failing until warm with one. So it stays on for a single
+server.
+
+Warm latches. A source that reports unhealthy again - _incus_ does when its
+event stream drops - leaves the view warm: the zones are as full as when it last
+confirmed them, the TTL clamp already says they are stale, and an Incus outage
+drops the stream of every replica at once, so failing misses then would fail
+them everywhere at the same time.
+
 ## Metrics
 
 With the _prometheus_ plugin enabled:
 
 - `coredns_ecs_view_requests_total{server,result}` - requests by result, where
-  result is `success`, `nodata`, `nxdomain` or `denied`.
+  result is `success`, `nodata`, `nxdomain`, `denied` or `servfail` (a miss
+  answered before warm, or anything inside a zone with `ColdAnswers` off, see
+  [Before The First Read](#before-the-first-read)). A cold miss the next plugin
+  answered is not counted, like any warm fall through.
 - `coredns_ecs_view_unidentified_clients_total{server}` - requests refused
   because the querier could not be placed on any known network.
 - `coredns_ecs_view_zones` - zones currently served.
@@ -194,7 +288,12 @@ here, but detecting the clash belongs to the source - see
 ## Ready
 
 This plugin reports readiness to the _ready_ plugin. It turns ready once a
-source has published a snapshot and reports itself healthy.
+source has published a snapshot and reports itself healthy - which is also the
+moment it turns warm. Only the source reporting itself unhealthy takes it back -
+for incus, a lost event stream, until a round has ended again - and warm stays:
+the answers do not go back to `SERVFAIL`. A read that failed is not the source
+going unhealthy, and neither ready nor warm moves for one. ic-dns's `/ready`
+follows the same edges.
 
 An empty fleet publishes an empty snapshot, which is not the same as never
 having published: only one of those is ready.

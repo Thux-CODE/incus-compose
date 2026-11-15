@@ -204,6 +204,17 @@ zone changed, and cold has confirmed nothing, so it has no standing to make one.
 Its first publish is a birth rather than a step, since a secondary reads zero as
 "no zone here".
 
+What changes while cold is **owed** instead: the zone is marked, and the first
+publish once warm steps it once, however many changes it collected. Without it a
+secondary already holding the serial would keep what that serial described - an
+address the first round after a restart or a reconnect corrected - until a later
+change happened to step it. The replay of what the cold store restored, landing
+where nothing was held, owes nothing: it is what the stored serial was published
+with. The mark goes to the cold store with the serial, so a restart before the
+first warm publish still owes the step. A zone born cold may be stepped once
+more when warm, since the names it collected after its birth were not confirmed
+either.
+
 The plugin stamps it because it is the only thing that knows what it published
 last - the engine is a read-only view and holds nothing to compare against.
 
@@ -259,6 +270,29 @@ from the enricher's own store or an Incus fleet read; a serial cannot be
 recovered from anywhere, and a secondary reading one going backwards
 re-transfers on every restart of this process. Serials are the whole of it.
 
+On a restart the enricher replays what it held before it has read anything, as
+`instance-updated` events stamped cold and marked `Restored`, so names are
+answered from the first publish - one `publishWindow` after the start - rather
+than falling through to the forwarders until the first round ends. Nothing is
+`Ready` and every answer is clamped until that round does, and no serial moves
+while cold: a zone comes back under the serial it was stored with. A zone whose
+names have not come back by a publish stops being served but keeps its serial
+until the chain is warm - the replay may simply not have reached it yet, and
+forgetting it would publish it at 1. Once warm, a zone nothing came back to is
+gone, serial and all.
+
+A read in this run that finds what was restored changes no record and moves no
+serial, but replaces the event held for that instance, so what is held stops
+reading as restored. What the round finds changed while the process was down is
+published at once under the serial the zone was stored with, and owed one step
+at the first warm publish (see Zone Serials), which is when a secondary
+transfers it.
+
+How long that takes is how long the first round takes. One that breaks - Incus
+refusing the listings at start, say - leaves the restored names served, clamped
+and not `Ready`, until a round reaches its end; how soon one is tried again is
+the enricher's (see the sweep retry in [[developer/ievent/enricher|enricher]]).
+
 Encoding happens on the fold goroutine and writing on its own, so a slow disk
 cannot stall the chain. What crosses between them is a finished `[]byte`, which
 is why the writer _cannot_ reach into live state rather than merely not doing
@@ -290,6 +324,133 @@ already been stamped by the time that event reaches here. `dns` only reads it -
 `step` takes it as whether a serial may move, since a step is a claim the zone
 changed and cold has confirmed nothing.
 
+## A Cold Server Fails Its Misses
+
+Between a start and the first `enricher/sweep-end`, what is published is only
+what has been read so far: a project not reached yet has no zone, and a zone
+being filled lacks the instances still to come. Answering from that as if it
+were whole hands out wrong answers that look final - a name under `--suffix`
+with no zone fell through to `--forward`, whose `NXDOMAIN` the client believes,
+may cache, and does not retry on its next `nameserver`.
+
+So until then every miss is `SERVFAIL` with the extended error `Not Ready`:
+inside a zone (missing, invisible, or a querier not placed yet - its own
+instance may be the one still unread), and anywhere under `--suffix`, which
+`dns` hands the engine as `ECSView.Claims` (an empty or root suffix claims
+nothing). Hits, `NODATA` and the apex answer as usual, clamped to 5 s, unless
+`--cold-answers` is off (below), and names outside both fall through, so the
+internet keeps resolving.
+
+A name under `--suffix` in no zone known so far is not failed outright: names
+there that no project builds - the cluster members', which the uplink's dnsmasq
+resolves - would otherwise fail on every restart, and a client checking an
+instance through one of them (an `ic-healthd` talking to its Incus node) would
+see the instance go down with it. The engine hands it to `Next`, the query chain
+a warm miss falls through to, through a
+[`nonwriter`](https://pkg.go.dev/github.com/coredns/coredns/plugin/pkg/nonwriter)
+that catches the reply. `NOERROR` goes out as the forwarder wrote it, not
+authoritative and not clamped, with records or without: `NODATA` says upstream
+holds the name, so no project builds it, and the AAAA of an IPv4-only node is
+exactly that - failing it would fail the node's whole lookup on musl, which
+sends A and AAAA together and gives up on either's `SERVFAIL`. A truncated reply
+goes out as it came too, whatever its rcode, so the client retries over TCP and
+the TCP reply is judged on its own. Anything else - `NXDOMAIN`, another rcode,
+an error, nothing written - is what an unread project looks like from upstream
+too, so it is the cold `SERVFAIL`. A forwarder that does not answer holds the
+query for `forward`'s own 5 s first, as it would warm. The cache sits in front
+of `forward`, so what it stores here is what upstream said and changes nothing
+once warm: a project's zone answers before the cache is reached.
+
+glibc, musl and Go move on to the next listed server on `SERVFAIL`, which is
+what lets two `ic-dns` in `dns.nameservers` ride out a rolling restart. With a
+single server the cost is a temporary failure instead of a wrong answer, and on
+musl each such miss blocks for its 5 s timeout first. The measurements are in
+[ecs_view's README](https://github.com/lxc/incus-compose/blob/main/cmd/ic-dns/dns/ecs_view/README.md#before-the-first-read);
+systemd-resolved has not been measured.
+
+The claim is the whole suffix. A deployment that forwards part of it to another
+`ic-dns` - two serving different projects under one suffix - gets that one's
+`NOERROR` answers, `NODATA` included, passed on while this one is cold, and
+`SERVFAIL` where it says `NXDOMAIN`.
+
+### Hits Before Warm: `--cold-answers`
+
+What a cold server answers is what has been read so far and, where the enricher
+replays what it held before the restart, records from then, which can be out of
+date: an address changed while the server was down is served as a final
+`NOERROR` until the round reads it again. `--cold-answers`
+(`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`) decides what to do about it:
+
+- **on** (the default): hits, `NODATA` and the apex are answered, TTL clamped to
+  5 s. With a single server a name that may be a few seconds old beats no name
+  at all.
+- **off**: every query inside a zone of ours is `SERVFAIL` until warm, in the
+  same shape as a cold miss - extended error `Not Ready`, `AA` unset, counted as
+  `servfail`, reverse zones and a `--trusted-client` included: the router's
+  answer from every view is as old as anybody's. There is no per-record
+  provenance: a name read since the start fails along with one carried over from
+  before it.
+
+Turn it off only when every client lists a second `ic-dns`: glibc, musl and Go
+then ask the other one instead of taking a stale record. With a single server it
+turns every internal lookup into a temporary failure until warm. Names outside
+the zones are forwarded either way, and once warm it changes nothing.
+
+### What Warm Means
+
+Warm is the end of a round, not a complete read. A round reaches its end past a
+project whose instance listing failed (`continue` in `sweepInstances`) and past
+reads that timed out, so the view can turn warm with holes, and those names are
+`NXDOMAIN` until a later round fills them.
+
+A round that fails outright - `GetProjectNames` timing out, say - raises no
+sweep-end, and today nothing runs again before `SweepInterval` (6 h by default):
+the view stays cold and every miss is `SERVFAIL` for that long, but those the
+forwarder answers `NOERROR`. A retry with backoff is being done separately
+(`ievent-sweep-retry`); this behaviour depends on it.
+
+### Turning Warm, In Order
+
+Warm is the engine's own latch rather than `ChainState`. It sets on the first
+`SetHealthy(true)`, which only `rounded` makes, and it never clears.
+`ChainState` drops to cold on every lost stream, while the zones it leaves
+behind are full - failing misses for a blip would fail them on every replica at
+once, since an Incus outage drops every stream together. A lost stream clamps
+the TTL and nothing more, as before.
+
+`rounded` runs only on an ordered signal, because warming early turns names not
+read yet into final `NXDOMAIN`s:
+
+- a sweep-end that was not dropped. One dropped on the way - at a full enricher
+  inbox, say - skipped the line and overtook the reads still in flight before
+  it, so it rounds nothing;
+- while no round has ended since the stream was last lost (`state.fresh`), any
+  other event stamped `ChainWarm` that was not dropped: it walked the chain
+  behind the sweep-end, so everything that round read has been folded. One
+  stamped before the last lost stream is a debounced leftover and does not
+  count.
+
+A sweep-end that cannot be used - dropped at `dns`'s own full inbox, or arriving
+dropped - is asked for again: `dns` raises `dns/round-lost`, which enters at the
+head behind everything already in the chain and comes back stamped warm. Without
+it a quiet fleet could leave the view cold until the next round. After a lost
+stream the same holds for healthy: a dropped first sweep-end after the
+reconnect is asked for again too, or the view would stay unhealthy, and
+`/ready` down, until the next round.
+
+`/ready` follows the same signal, with the same rule. `http` turns ready on a
+warm event only when it was not dropped and was stamped after the last lost
+stream, and it sits after `dns`, so the event that makes it ready is one `dns`
+has already folded: `/ready` is never up while misses still fail. Once up, only
+a lost stream takes it back - the moment `dns` marks the view unhealthy - and
+it comes back with the next round, as healthy does. Nothing else does: an
+event stamped `ChainCold` after the round, a read that failed or was dropped,
+says when that event was minted, not what is served. A read sent before the
+round ended can land after it still stamped cold, and clearing on it left
+`/ready` at 503 until the next round, hours later. The answers stay warm
+through a lost stream, deliberately: `/ready` down is "nothing is confirming
+this", not "this is cold".
+
 ## Readiness Is An Event
 
 `dns` raises `dns/ready` through `Command` when what it published becomes worth
@@ -298,8 +459,9 @@ and http holds none to it: the event goes in at the head and is folded in order
 against the events that caused it.
 
 That announcement is for whoever is watching the chain. What `/ready` itself
-latches on is `ChainState`, which rides on the same sweep-end - so the two agree
-without either plugin knowing the other exists.
+latches on is `ChainState`, which rides on the same sweep-end, and the stream's
+own `source/disconnected` - the two edges `dns` turns healthy on and off - so
+the two agree without either plugin knowing the other exists.
 
 Edges rather than a level, so whoever folds them starts not-ready - the truth
 before anything has been read.
@@ -353,6 +515,7 @@ Every flag has a matching environment variable:
 | `--sweep-project-delay` | `INCUS_COMPOSE_DNS_SWEEP_PROJECT_DELAY` | `30s`   | Delay between consecutive project sweeps                  |
 | `--sweep-read-delay`    | `INCUS_COMPOSE_DNS_SWEEP_READ_DELAY`    | `5s`    | Delay between instance reads in a sweep                   |
 | `--echo-subnet`         | `INCUS_COMPOSE_DNS_ECHO_SUBNET`         | `false` | Echo back RFC 7871 client subnet                          |
+| `--cold-answers`        | `INCUS_COMPOSE_DNS_COLD_ANSWERS`        | `true`  | Serve held names before warm; `false` makes them SERVFAIL |
 | `--exclude`             | `INCUS_COMPOSE_DNS_EXCLUDE`             |         | Chain position(s) to leave out (`debounce`, `http`, etc.) |
 | `--log`                 | `INCUS_COMPOSE_DNS_LOG`                 | `INFO`  | Log level (`TRACE`, `DEBUG`, `INFO`, `WARN`, `ERROR`)     |
 
@@ -365,20 +528,21 @@ would start, answer, and serve nothing.
 
 ## HTTP Endpoints & Liveness
 
-| Path       | Description                                                                     |
-| ---------- | ------------------------------------------------------------------------------- |
-| `/metrics` | Prometheus metrics for all CoreDNS and ievent plugins                           |
-| `/health`  | Liveness check (stream is connected and has processed events recently)          |
-| `/ready`   | Readiness check (fleet has been fully enumerated and the event stream is alive) |
+| Path       | Description                                                                    |
+| ---------- | ------------------------------------------------------------------------------ |
+| `/metrics` | Prometheus metrics for all CoreDNS and ievent plugins                          |
+| `/health`  | Liveness check (stream is connected and has processed events recently)         |
+| `/ready`   | Readiness check (a round of the fleet has ended and the event stream is alive) |
 
 The two answer different questions on purpose. The only sensible response to
 `/health` failing is a restart, and a restart does not fix an Incus that is down
 — it throws away everything held and answers nothing until the fleet has been
 re-read. So **a lost stream is unready, never unhealthy.**
 
-A round does not make it unready. One is always running and the server answers
-from what it published last throughout, so `/ready` stays up and nothing pulls
-the process out of rotation for it.
+A round does not make it unready, and neither does a read that failed. One is
+always running and the server answers from what it published last throughout,
+so `/ready` stays up and nothing pulls the process out of rotation for it. Once
+up it comes down only with the event stream, and back with the next round.
 
 The fleet is read a name at a time rather than all at once, so those two delays
 are what decides how long a change nothing announced goes unnoticed: roughly
@@ -388,6 +552,14 @@ the event stream at the same time. The first round after a start or a reconnect
 ignores both and runs flat out, because nothing is served until it lands.
 
 ## Known Gaps
+
+- **Cold misses outside `--suffix` are claimed only once their zone exists.** A
+  zone named by `user.label.dns.zone` outside the suffix, and a reverse zone,
+  answer `SERVFAIL` for a miss before warm only after something has been read
+  into them; before that the query falls through to `--forward`. The cold store
+  holds every zone published last time, but not whether it was `Fallthrough`,
+  and claiming the parent domain of an absolute alias would fail every other
+  name in it.
 
 - **Upstream metrics label off `metrics.WithServer`**, which reads a context key
   `core/dnsserver` sets - and nothing here runs it. So `coredns_cache_*` and

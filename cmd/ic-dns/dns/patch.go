@@ -15,6 +15,11 @@ import (
 func (s *state) apply(key string, next *instance, ttl uint32) {
 	prev := s.held[key]
 
+	// Whether this is a change the stored serial does not already describe: an
+	// instance that moved, went, or was read in this run. Only the replay of
+	// what was restored, landing where nothing was held, is not one.
+	owe := prev != nil || next == nil || !next.Restored()
+
 	// Dropped while its claim still stands, or the views it answered in are no
 	// longer the views it is written under.
 	if prev != nil {
@@ -22,7 +27,7 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 			s.dropName(name, answer)
 		}
 
-		s.moved(prev)
+		s.moved(prev, owe)
 
 		for range prev.names {
 			s.leave(prev.zone, prev.ns, ttl, true, prev.transfer)
@@ -71,32 +76,28 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 		s.enter(s.aliasZone(name), nil, ttl, false, false)
 	}
 
-	s.moved(next)
+	s.moved(next, owe)
 	s.addAddrs(next, own)
 	s.backfill(fresh, ttl)
 }
 
 // moved marks every zone this instance has a name in, so publish knows which
-// serials to step.
-func (s *state) moved(inst *instance) {
-	for _, zone := range append([]string{inst.zone}, s.aliasZones(inst)...) {
+// serials to step, and which of them owe a step once warm.
+func (s *state) moved(inst *instance, owe bool) {
+	zones := append([]string{inst.zone}, s.aliasZones(inst)...)
+	for _, on := range inst.ptrs {
+		zones = append(zones, on.zone)
+	}
+
+	for _, zone := range zones {
 		held, known := s.serials[zone]
 		if !known {
 			continue
 		}
 
 		held.dirty = true
+		held.Owed = held.Owed || owe
 		s.serials[zone] = held
-	}
-
-	for _, on := range inst.ptrs {
-		held, known := s.serials[on.zone]
-		if !known {
-			continue
-		}
-
-		held.dirty = true
-		s.serials[on.zone] = held
 	}
 }
 
@@ -112,17 +113,28 @@ func (s *state) aliasZones(inst *instance) []string {
 
 // step moves the serial of every zone a patch touched, and renders it under the
 // new one. Only while warm: a step is a claim the zone changed, and cold has
-// confirmed nothing, so it has no standing to make one.
+// confirmed nothing, so it has no standing to make one. What changed while cold
+// is owed instead, and the first warm publish steps each zone owing once - a
+// secondary already holding the stored serial would otherwise never transfer
+// what the first round corrected.
+//
+// A zone nothing is left in stops being served either way, but its serial is
+// forgotten only once warm. Cold, an empty zone is as likely one the replay has
+// not reached yet as one that went, and forgetting it would publish it at 1
+// when its names come back - a serial going backwards.
 func (s *state) step(warm bool, ttl uint32) {
 	for name, held := range s.serials {
 		if held.names <= 0 {
-			delete(s.serials, name)
 			s.zones.Delete(ecs_view.NameKey(name))
+
+			if warm {
+				delete(s.serials, name)
+			}
 
 			continue
 		}
 
-		if !held.dirty {
+		if !held.dirty && (!warm || !held.Owed) {
 			continue
 		}
 
@@ -131,10 +143,13 @@ func (s *state) step(warm bool, ttl uint32) {
 		switch {
 		case held.Serial == 0:
 			// Its first publish is a birth rather than a step, and a secondary
-			// takes zero as "no zone here".
+			// takes zero as "no zone here". Nothing was published before it, so
+			// nothing is owed.
 			held.Serial = 1
+			held.Owed = false
 		case warm:
 			held.Serial++
+			held.Owed = false
 		}
 
 		s.serials[name] = held
@@ -162,6 +177,11 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 	out := make(map[string]ecs_view.ViewAnswer, len(inst.names)+len(inst.alias)+len(inst.ptrs))
 
 	for _, name := range inst.names {
+		// Written for every replica at once, by refresh.
+		if name == inst.service {
+			continue
+		}
+
 		out[name] = s.records(inst, name, ttl)
 	}
 
@@ -171,6 +191,221 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 
 	for name, on := range inst.ptrs {
 		out[name] = s.reverse(inst, name, on.key, ttl)
+	}
+
+	return out
+}
+
+// refresh writes every service name from the replicas that carry it, as pick
+// chooses them. A drained replica carries no service name, so it is never among
+// them.
+//
+// Rebuilt from everything held rather than patched per instance, since one
+// replica becoming ready changes what the others contribute. The one way in, so
+// whatever else rewrites views calls this too. It reports whether any name was
+// rewritten.
+//
+// A name is rewritten where its answer changed view by view, but its zone is
+// marked as moved only where what a transfer carries changed: the records
+// flattened over every view. A change in which view sees what is not a change
+// to the zone, and stepping its serial for one would have every secondary
+// transfer it back.
+func (s *state) refresh(ttl uint32) bool {
+	carriers := map[string][]*instance{}
+	zones := map[string]string{}
+
+	for _, inst := range s.held {
+		if inst.service == "" {
+			continue
+		}
+
+		carriers[inst.service] = append(carriers[inst.service], inst)
+		zones[inst.service] = inst.zone
+	}
+
+	changed := false
+
+	for name, held := range s.served {
+		_, still := carriers[name]
+		if still {
+			continue
+		}
+
+		s.dropName(name, held)
+		delete(s.served, name)
+		s.dirty(s.servedZone[name], true)
+		delete(s.servedZone, name)
+
+		changed = true
+	}
+
+	for name, replicas := range carriers {
+		next := s.service(name, replicas, ttl)
+
+		prev := s.served[name]
+		if sameAnswer(prev, next) {
+			continue
+		}
+
+		if prev != nil {
+			s.dropName(name, prev)
+		}
+
+		s.addName(name, next)
+		s.served[name] = next
+		s.servedZone[name] = zones[name]
+
+		// Owed only where this run has read a replica of it: one made of
+		// restored replicas alone is the replay's, which the stored serial
+		// already describes.
+		if !sameRecords(flatten(prev), flatten(next)) {
+			s.dirty(zones[name], slices.ContainsFunc(replicas, func(inst *instance) bool { return !inst.Restored() }))
+		}
+
+		changed = true
+	}
+
+	return changed
+}
+
+// service is what one service name answers, view by view: in each view, the
+// replicas pick chooses among those with an address there. A replica with none
+// in a view - stopped, paused, not leased yet, or on other networks - is no
+// candidate in it, so it can neither win readiness there and leave the name
+// empty, nor keep a replica the view does reach out of it.
+func (s *state) service(name string, replicas []*instance, ttl uint32) ecs_view.ViewAnswer {
+	type offer struct {
+		inst    *instance
+		records ecs_view.Records
+	}
+
+	offers := map[ecs_view.ViewID][]offer{}
+
+	out := ecs_view.ViewAnswer{}
+
+	for _, inst := range replicas {
+		for id, records := range s.records(inst, name, ttl) {
+			if len(records) == 0 {
+				// The name is there and holds nothing, as a replica with no
+				// lease yet always left it.
+				if _, held := out[id]; !held {
+					out[id] = ecs_view.Records{}
+				}
+
+				continue
+			}
+
+			offers[id] = append(offers[id], offer{inst: inst, records: records})
+		}
+	}
+
+	for id, list := range offers {
+		candidates := make([]*instance, len(list))
+		for i, o := range list {
+			candidates[i] = o.inst
+		}
+
+		answering := pick(candidates)
+
+		for _, o := range list {
+			if slices.Contains(answering, o.inst) {
+				out[id] = union(out[id], o.records)
+			}
+		}
+	}
+
+	return out
+}
+
+// pick is who answers for one service, out of its candidates:
+//
+//  1. the ready ones this run has read;
+//  2. where there are none, the ready ones the cold store restored and no read
+//     has confirmed yet - what a previous run last saw, address and health
+//     included;
+//  3. where there are none of those either, every one of them.
+//
+// A read in this run outranks a restored one because a restored address may
+// have moved while this process was down. The last step is fail-open:
+// readiness picks between replicas, it never takes a service off the air.
+func pick(replicas []*instance) []*instance {
+	var fresh, restored []*instance
+
+	for _, inst := range replicas {
+		switch {
+		case !inst.ready:
+		case inst.Restored():
+			restored = append(restored, inst)
+		default:
+			fresh = append(fresh, inst)
+		}
+	}
+
+	switch {
+	case len(fresh) > 0:
+		return fresh
+	case len(restored) > 0:
+		return restored
+	default:
+		return replicas
+	}
+}
+
+// dirty marks one zone as moved, so publish steps its serial, and as owing a
+// step once warm where owe says the change is not one the stored serial
+// already describes.
+func (s *state) dirty(zone string, owe bool) {
+	held, known := s.serials[zone]
+	if !known {
+		return
+	}
+
+	held.dirty = true
+	held.Owed = held.Owed || owe
+	s.serials[zone] = held
+}
+
+// sameAnswer reports whether two answers for one name say the same thing in
+// every view. union sorts what it builds, so equal answers line up record for
+// record.
+func sameAnswer(a, b ecs_view.ViewAnswer) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for id, records := range a {
+		other, ok := b[id]
+		if !ok || !sameRecords(records, other) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// sameRecords reports whether two sets of records hold the same ones, type by
+// type, each sorted the way union leaves it.
+func sameRecords(a, b ecs_view.Records) bool {
+	if len(a) != len(b) {
+		return false
+	}
+
+	for qtype, rrs := range a {
+		if !slices.EqualFunc(rrs, b[qtype], sameRR) {
+			return false
+		}
+	}
+
+	return true
+}
+
+// flatten is every record of an answer whatever view it is in, which is what a
+// zone transfer carries.
+func flatten(answer ecs_view.ViewAnswer) ecs_view.Records {
+	out := ecs_view.Records{}
+
+	for _, records := range answer {
+		out = union(out, records)
 	}
 
 	return out

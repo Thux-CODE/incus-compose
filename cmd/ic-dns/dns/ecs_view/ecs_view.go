@@ -3,6 +3,7 @@ package ecs_view
 import (
 	"context"
 	"log/slog"
+	"net/netip"
 	"sync/atomic"
 
 	"github.com/coredns/coredns/plugin"
@@ -21,7 +22,8 @@ type Sink interface {
 	// must be finished and unreferenced: from here on every reader shares it.
 	Replace(snap *Snapshot)
 	// SetHealthy says whether the source's data is fresh. While it is not,
-	// answers are clamped so stale records expire fast.
+	// answers are clamped so stale records expire fast. The first true is also
+	// what turns the view warm, for good: see ECSView.Claims.
 	SetHealthy(healthy bool)
 }
 
@@ -43,6 +45,30 @@ type ECSView struct {
 	// Metrics turns on the counters and gauges.
 	Metrics bool
 
+	// Trusted are the queriers exempt from the filter, set once before anything
+	// serves. A query arriving from one of these prefixes is answered from every
+	// view at once rather than from the one its address sits on: what a router
+	// reaching every network needs, and nothing else should be given. Empty
+	// trusts nobody, which is the filter as it stands without this.
+	Trusted []netip.Prefix
+
+	// Claims holds the domains this server answers for whether or not a zone in
+	// them has been published yet, set once before anything serves. Until warm,
+	// a miss under one of them is SERVFAIL rather than a fall through: the name
+	// may only not have been read yet, and a forwarder's NXDOMAIN would be a
+	// final answer that also stops the client trying its next server. A miss in
+	// no zone we know is still asked of Next, and a NOERROR, NODATA included, or
+	// a truncated reply is passed on - a host sharing the suffix resolves by
+	// forwarding - while anything else from it fails the same way.
+	Claims []string
+
+	// ColdAnswers serves what the zones hold before warm, clamped like any
+	// unhealthy answer. Off, every query inside a zone is SERVFAIL until warm,
+	// the same as a miss, so a client with another server listed asks that one
+	// instead of taking a record that may be out of date. Set once before
+	// anything serves; New turns it on.
+	ColdAnswers bool
+
 	// current is the published snapshot.
 	current atomic.Pointer[Snapshot]
 
@@ -53,12 +79,18 @@ type ECSView struct {
 	// published says a source has handed over at least one snapshot, which an
 	// empty fleet does and a cold start has not.
 	published atomic.Bool
+
+	// warm says the source has once reported its data fresh: for incus, a round
+	// having reached its end, holes and all. Never cleared: once the zones are full, a lost stream
+	// leaves them as good as any other server's, and failing every miss for it
+	// would fail them on every replica at once.
+	warm atomic.Bool
 }
 
 // New returns an ECSView already holding an empty snapshot, so the query path
 // never has to check for nil.
 func New(logger *slog.Logger) *ECSView {
-	v := &ECSView{logger: logger}
+	v := &ECSView{logger: logger, ColdAnswers: true}
 	v.current.Store(EmptySnapshot())
 
 	return v
@@ -92,10 +124,28 @@ func (v *ECSView) Replace(snap *Snapshot) {
 // SetHealthy implements Sink.
 func (v *ECSView) SetHealthy(healthy bool) {
 	v.healthy.Store(healthy)
+
+	if healthy {
+		v.warm.Store(true)
+	}
+}
+
+// trusts says whether a query from addr is exempt from the filter. The address
+// is the one the packet arrived from: an ECS option is what a querier claims
+// about itself, and trust may not rest on a claim.
+func (v *ECSView) trusts(addr netip.Addr) bool {
+	for _, prefix := range v.Trusted {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // Ready turns true once a snapshot has been published and the source reports
-// itself healthy.
+// itself healthy, and false again only when the source reports itself
+// unhealthy: warm stays where it is.
 func (v *ECSView) Ready() bool {
 	return v.published.Load() && v.healthy.Load()
 }

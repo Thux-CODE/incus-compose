@@ -178,7 +178,9 @@ the `ChainState` riding on `enricher/sweep-end`. Not a pointer to `dns`, not a
 registry, not an interface the chain is walked for: one path, in order against
 the events that caused it, which is the same argument the end of a round rests
 on. Edges rather than a level, so whoever folds them starts not-ready - the
-truth before anything has been read.
+truth before anything has been read. What takes it back is the stream going,
+never a cold stamp: that says when an event was minted, and a read sent before a
+round ended can land after it.
 
 That is also what opens the action namespace. Everything with a slash used to be
 `source/*`; now the prefix names whoever raised it, and the rule doing the work

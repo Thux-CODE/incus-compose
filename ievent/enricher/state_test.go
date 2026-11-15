@@ -29,7 +29,7 @@ func storeNetworks(m *state, networks []incusapi.Network) {
 func filled(t *testing.T, p *testlib.Project) *state {
 	t.Helper()
 
-	m := newState("")
+	m := newState()
 	storeNetworks(m, p.Networks)
 
 	for i := range p.Instances {
@@ -211,7 +211,7 @@ func TestPutInstance(t *testing.T) {
 				tc.change(p)
 			}
 
-			m := newState("")
+			m := newState()
 			storeNetworks(m, p.Networks)
 
 			inst := p.Instances[0]
@@ -253,7 +253,7 @@ func TestPutInstanceInterfacesAreOrdered(t *testing.T) {
 		}
 	}
 
-	m := newState("")
+	m := newState()
 	storeNetworks(m, p.Networks)
 
 	first, _ := m.setInstance(&inst, state)
@@ -345,7 +345,7 @@ func TestPutInstanceConfig(t *testing.T) {
 				tc.change(p)
 			}
 
-			m := newState("")
+			m := newState()
 			storeNetworks(m, p.Networks)
 
 			inst := p.Instances[0]
@@ -432,7 +432,7 @@ func TestDropInstance(t *testing.T) {
 func TestDropInstanceIsPerProject(t *testing.T) {
 	t.Parallel()
 
-	m := newState("")
+	m := newState()
 
 	for _, project := range []string{"one", "two"} {
 		p := testlib.NewProject(project, 1, 1)
@@ -511,7 +511,7 @@ func TestInstancesIn(t *testing.T) {
 func TestProjectInstancesDoesNotInventTheProject(t *testing.T) {
 	t.Parallel()
 
-	m := newState("")
+	m := newState()
 
 	assert.Empty(t, slices.Collect(m.projectInstances("nobody")))
 	assert.Empty(t, slices.Collect(m.networkInstances("nobody", "net0")))
@@ -600,7 +600,7 @@ func TestBridgeResolvesInTheDefaultProject(t *testing.T) {
 	p := testlib.NewProject("p", 1, 1)
 
 	// The bridge belongs to the default project; the instance merely uses it.
-	m := newState("")
+	m := newState()
 	storeNetworks(m, []incusapi.Network{testlib.NewNetwork(iutil.DefaultProject, 0)})
 
 	inst := p.Instances[0]
@@ -618,7 +618,7 @@ func TestTheOwnProjectWinsOverTheDefault(t *testing.T) {
 
 	p := testlib.NewProject("p", 1, 1)
 
-	m := newState("")
+	m := newState()
 	storeNetworks(m, []incusapi.Network{
 		testlib.NewNetwork(iutil.DefaultProject, 0),
 		testlib.NewNetwork("p", 0),
@@ -641,7 +641,7 @@ func TestAnIncompleteReadIsNoRead(t *testing.T) {
 	inst := p.Instances[0]
 	state := p.States[inst.Name]
 
-	m := newState("")
+	m := newState()
 
 	// The network its NIC names has not been read yet.
 	held, missing := m.setInstance(&inst, state)
@@ -798,4 +798,34 @@ func TestASubnetThatMovedIsNews(t *testing.T) {
 	held := now.Network(iutil.NetworkKey("p", testlib.NetworkName(0)))
 	require.NotNil(t, held, "the network the NIC names did not travel with the instance")
 	assert.Equal(t, "10.9.0.1/24", held.IPv4())
+}
+
+// TestPutInstanceRunningStates: Ready is a running instance whose guest said
+// so, and reads as running with its interfaces; Frozen and Stopped do not.
+func TestPutInstanceRunningStates(t *testing.T) {
+	t.Parallel()
+
+	for code, want := range map[incusapi.StatusCode]bool{
+		incusapi.Running: true,
+		incusapi.Ready:   true,
+		incusapi.Frozen:  false,
+		incusapi.Stopped: false,
+	} {
+		t.Run(code.String(), func(t *testing.T) {
+			t.Parallel()
+
+			p := testlib.NewProject("p", 1, 1)
+			inst := p.Instances[0]
+			inst.StatusCode = code
+			inst.Status = code.String()
+
+			m := newState()
+			storeNetworks(m, p.Networks)
+
+			got, _ := m.setInstance(&inst, p.States[inst.Name])
+			require.NotNil(t, got)
+			assert.Equal(t, want, got.Running())
+			assert.Equal(t, []string{"p/net0"}, sits(got))
+		})
+	}
 }

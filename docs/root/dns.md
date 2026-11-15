@@ -223,6 +223,36 @@ sequenceDiagram
 2. **The query's source address**, when no subnet is present (such as when an
    instance's `resolv.conf` targets `ic-dns` directly).
 
+### Right After A Start
+
+Until `ic-dns` has been all the way round the fleet once - seconds to a minute
+after a start, the same moment `/ready` turns ready - a name under the suffix it
+cannot answer yet is `SERVFAIL` rather than `NXDOMAIN`: it may only not have
+been read yet. A name under the suffix outside every project zone read so far is
+still asked of the forwarders, and their `NOERROR` is passed on, with records or
+without, so hosts the upstream resolver knows under the same suffix - the
+cluster members' own names, say - keep resolving, the empty AAAA of an IPv4-only
+node included; their `NXDOMAIN` is `SERVFAIL` instead. Names outside the suffix
+are forwarded as usual throughout, and once warm nothing changes, a lost Incus
+event stream included. Only `/ready` follows a lost stream: it is 503 from the
+moment the stream goes until the next round has ended. A read that fails or
+times out, once ready, moves neither the answers nor `/ready`.
+
+With two `ic-dns` in `dns.nameservers`, glibc, musl and Go resolvers move on to
+the other one on `SERVFAIL`, so a restarting server is skipped instead of
+answering that a name does not exist. With a single server, a client gets a
+temporary failure instead (`EAI_AGAIN`), and on musl-based images such as Alpine
+every such lookup first waits out the 5 s timeout. If another server answers
+part of the suffix through forwarding, its names resolve when it knows them and
+fail the same way when it answers `NXDOMAIN`, until this one is warm.
+
+Names it already holds are answered during that time, with a 5 s TTL. One
+carried over from before a restart, whose address changed meanwhile, can be out
+of date for those seconds. With two `ic-dns` listed, `--cold-answers=false`
+(`INCUS_COMPOSE_DNS_COLD_ANSWERS=false`) fails those too, so clients ask the
+other server instead; leave it on with a single server, where it would fail
+every internal name until warm.
+
 ---
 
 ## Labels That Configure DNS

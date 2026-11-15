@@ -1,6 +1,8 @@
 package dns
 
 import (
+	"time"
+
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
 	"github.com/koji-hirono/go-critbit"
 
@@ -26,6 +28,12 @@ type state struct {
 	// serials is what each zone was published under.
 	serials map[string]zoneSerial
 
+	// served is what each service name was last written with, which is what
+	// refresh compares against and takes back out; servedZone is the zone each
+	// was written in, so a name that went is marked where it was.
+	served     map[string]ecs_view.ViewAnswer
+	servedZone map[string]string
+
 	// names and zones are the working trees. A Tree.Insert is its own Txn and
 	// Commit, so it copies every node on the path and allocates a channel for
 	// each; one transaction per window reuses them instead.
@@ -38,6 +46,12 @@ type state struct {
 
 	// chain is what the last event carried.
 	chain iutil.ChainState
+
+	// fresh is a round having ended here since the stream was last lost: what
+	// turns the view healthy, and the first time warm for good. lost is when
+	// the stream last went, so a warm stamp older than that is not taken for one.
+	fresh bool
+	lost  time.Time
 }
 
 // newState builds the working copy a fold starts from, with the serials a
@@ -50,12 +64,14 @@ func newState(serials map[string]zoneSerial) *state {
 	}
 
 	return &state{
-		held:    map[string]*instance{},
-		pending: map[string]*instance{},
-		nets:    map[string]map[ecs_view.ViewID]int{},
-		serials: serials,
-		names:   iradix.New[ecs_view.ViewAnswer]().Txn(),
-		zones:   iradix.New[*ecs_view.Zone]().Txn(),
+		held:       map[string]*instance{},
+		pending:    map[string]*instance{},
+		nets:       map[string]map[ecs_view.ViewID]int{},
+		serials:    serials,
+		served:     map[string]ecs_view.ViewAnswer{},
+		servedZone: map[string]string{},
+		names:      iradix.New[ecs_view.ViewAnswer]().Txn(),
+		zones:      iradix.New[*ecs_view.Zone]().Txn(),
 	}
 }
 
@@ -65,12 +81,23 @@ func newState(serials map[string]zoneSerial) *state {
 func (s *state) write(ttl uint32) bool {
 	moved := false
 
+	// confirmed is a restored replica read unchanged: its own records stay, but
+	// a replica this run has read outranks restored ones in its service.
+	confirmed := false
+
 	for key, next := range s.pending {
 		delete(s.pending, key)
 
 		prev := s.held[key]
 
+		// The same records, so the trees are left alone - but the event held is
+		// the newer one, or an instance restored from the cold store would read
+		// as restored for ever once a live read confirmed it unchanged.
 		if next != nil && prev != nil && next.Equal(prev.Event) {
+			s.held[key] = next
+
+			confirmed = confirmed || (next.service != "" && prev.Restored() != next.Restored())
+
 			continue
 		}
 
@@ -80,6 +107,12 @@ func (s *state) write(ttl uint32) bool {
 
 		s.apply(key, next, ttl)
 
+		moved = true
+	}
+
+	// After every instance has moved: a service name is written from all of
+	// its replicas at once.
+	if (moved || confirmed) && s.refresh(ttl) {
 		moved = true
 	}
 

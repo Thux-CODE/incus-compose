@@ -87,11 +87,13 @@ func chain(logger *slog.Logger, cfg config) []position {
 			dns.Stop(stop),
 			dns.EchoSubnet(cfg.EchoSubnet),
 			dns.Metrics(cfg.Metrics),
+			dns.ColdAnswers(cfg.ColdAnswers),
 			dns.ColdDir(cfg.DataDir),
 			dns.TTL(uint32(cfg.TTL)),
 			dns.Suffix(cfg.Suffix),
 			dns.Project(serves(logger, cfg)),
 			dns.AllowTransfer(cfg.AllowTransfer),
+			dns.TrustedClients(cfg.TrustedClients),
 		)},
 		// After dns, so a readiness it raises is folded before this position
 		// sees the event that caused it. Any position works; this one reads best.

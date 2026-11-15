@@ -33,6 +33,45 @@ type Records map[uint16][]dns.RR
 // rather than an intersection taken per query.
 type ViewAnswer map[ViewID]Records
 
+// UnionFor is every view's records of one type for a name, as one answer set.
+// It is what a trusted querier gets in place of the single view it would be
+// placed on: the views are walked in name order and records deduplicated by
+// their text, so a name two views hold the same way answers once, and the same
+// way however the fleet's events arrived.
+func (a ViewAnswer) UnionFor(qtype uint16) []dns.RR {
+	if len(a) == 0 {
+		return nil
+	}
+
+	ids := make([]ViewID, 0, len(a))
+	for id := range a {
+		ids = append(ids, id)
+	}
+
+	slices.Sort(ids)
+
+	var out []dns.RR
+
+	seen := make(map[string]struct{})
+
+	for _, id := range ids {
+		for _, rr := range a[id][qtype] {
+			text := rr.String()
+
+			_, dup := seen[text]
+			if dup {
+				continue
+			}
+
+			seen[text] = struct{}{}
+
+			out = append(out, rr)
+		}
+	}
+
+	return out
+}
+
 // Zone is what a denial needs and nothing else. SOA and NS are rendered once at
 // build time, so answering synthesizes nothing.
 type Zone struct {

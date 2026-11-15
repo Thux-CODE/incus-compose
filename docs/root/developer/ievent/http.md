@@ -35,12 +35,19 @@ against the events that caused it, which is the same argument the end of a round
 rests on. Edges rather than a level, so whoever folds them starts not-ready: the
 truth before anything has been read.
 
-`ready` latches true on `ChainWarm` and clears on `ChainCold`, so it can flap -
-a fleet that drops back to cold is not-ready again until the chain warms back
-up. `connected` is its own atomic, set straight off `ActionConnected` /
-`ActionDisconnected`: readiness does not imply the stream is up, and the reverse
-doesn't hold either, which is why `/ready` checks both and fails on whichever
-one is missing.
+`ready` latches true on `ChainWarm` - from an event no plugin dropped, since a
+dropped one was folded by nobody and may have overtaken what it follows, and
+stamped after the stream was last lost, since one from before is a debounced
+leftover - and clears only on `ActionDisconnected`: a lost stream is not-ready
+until the chain warms back up. An event stamped `ChainCold` clears nothing. The
+stamp says what the chain was when the event was minted, and a read the
+enricher sent before a round ended - or one that failed - can walk past here
+after it still cold; clearing on it left `/ready` at 503 until the next round,
+hours later, over a view that was warm all along. These are the edges `dns`
+turns the view healthy and unhealthy on, so the two agree. `connected` is its own atomic,
+set straight off `ActionConnected` / `ActionDisconnected`: readiness does not
+imply the stream is up, and the reverse doesn't hold either, which is why
+`/ready` checks both and fails on whichever one is missing.
 
 ## /health And /ready Answer Different Questions
 
@@ -53,7 +60,7 @@ So **a lost stream is unready, never unhealthy.**
 |           | fails when                                                           |
 | --------- | -------------------------------------------------------------------- |
 | `/health` | the chain has been silent for `Silence` (`Silence > 0`)              |
-| `/ready`  | the stream isn't connected, or nothing has been published yet (cold) |
+| `/ready`  | the stream isn't connected, or no round has ended since it connected |
 
 `Silence` is zero by default, which never fails on silence. A quiet fleet is the
 normal state, and a liveness probe that restarts a process for being idle is

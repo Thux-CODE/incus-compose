@@ -2,10 +2,13 @@ package ecs_view
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net/netip"
 	"testing"
 
+	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/plugin/pkg/dnstest"
 	"github.com/coredns/coredns/plugin/test"
 	iradix "github.com/hashicorp/go-immutable-radix/v2"
@@ -536,4 +539,394 @@ func TestUnhealthyClampsTheTTL(t *testing.T) {
 
 	require.Len(t, again.Answer, 1)
 	assert.EqualValues(t, testTTL, again.Answer[0].Header().Ttl)
+}
+
+// TestColdFailsEveryMiss pins what the engine does before its source first
+// reports healthy: a hit is answered, clamped, and every miss under a claim or
+// inside a zone is SERVFAIL, since it may be a name not read yet. Anything else
+// falls through, and the first healthy ends all of it for good.
+func TestColdFailsEveryMiss(t *testing.T) {
+	t.Parallel()
+
+	// Not an rcode: the query went to the next plugin.
+	const falls = -1
+
+	snap := testPiece()
+	snap.Denial, _, _ = snap.Denial.Insert(NameKey("other.com."), &Zone{
+		Name:      "other.com.",
+		SOA:       testSOA("other.com."),
+		Shadowing: true,
+	})
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+	v.Replace(snap)
+
+	cases := []struct {
+		name   string
+		qname  string
+		client string
+		cold   int
+		warm   int
+	}{
+		{"a hit is answered", "user-api.shop.incus.", "10.0.1.10", dns.RcodeSuccess, dns.RcodeSuccess},
+		{"a name the zone does not hold", "nope.shop.incus.", "10.0.1.10", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a name the querier cannot see", "user-db.shop.incus.", "10.0.1.10", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a querier on no known network", "user-api.shop.incus.", "192.0.2.1", dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a claimed name in no zone yet", "web.blog.incus.", "10.0.1.10", dns.RcodeServerFailure, falls},
+		{"a shadowing zone outside every claim", "www.other.com.", "10.0.1.10", falls, falls},
+		{"a name outside everything", "example.org.", "10.0.1.10", falls, falls},
+	}
+
+	phases := []struct {
+		name    string
+		healthy bool
+	}{
+		{"cold", false},
+		{"warm", true},
+		{"unhealthy again", false},
+	}
+
+	for i, phase := range phases {
+		if i > 0 {
+			v.SetHealthy(phase.healthy)
+		}
+
+		for _, tc := range cases {
+			want := tc.warm
+			if i == 0 {
+				want = tc.cold
+			}
+
+			handled, m := ask(t, v, tc.qname, dns.TypeA, tc.client)
+
+			if want == falls {
+				assert.False(t, handled, "%s, %s", phase.name, tc.name)
+
+				continue
+			}
+
+			require.True(t, handled, "%s, %s", phase.name, tc.name)
+			assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[m.Rcode], "%s, %s", phase.name, tc.name)
+
+			if m.Rcode != dns.RcodeSuccess {
+				continue
+			}
+
+			ttl := uint32(staleTTL)
+			if phase.healthy {
+				ttl = testTTL
+			}
+
+			require.Len(t, m.Answer, 1)
+			assert.Equal(t, ttl, m.Answer[0].Header().Ttl, "%s, %s", phase.name, tc.name)
+		}
+	}
+}
+
+// TestColdWithoutEDNSCarriesNoOPT pins that the extended error rides only on a
+// query that brought an OPT record: one the client did not send is one it may
+// not parse.
+func TestColdWithoutEDNSCarriesNoOPT(t *testing.T) {
+	t.Parallel()
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+
+	r := new(dns.Msg)
+	r.SetQuestion("web.blog.incus.", dns.TypeA)
+
+	w := dnstest.NewRecorder(&test.ResponseWriter{})
+
+	handled, _, err := v.Answer(context.Background(), w, r)
+	require.NoError(t, err)
+	require.True(t, handled)
+
+	assert.Equal(t, dns.RcodeServerFailure, w.Msg.Rcode)
+	assert.False(t, w.Msg.Authoritative)
+	assert.Nil(t, w.Msg.IsEdns0())
+}
+
+// TestColdAnswersOffFailsEveryHit pins the switch: off, nothing inside a zone is
+// answered before warm - a hit, NODATA and the apex fail like a miss, with the
+// same shape - so a client with another server listed asks it rather than take
+// a record that may be out of date. Outside every zone nothing changes, and once
+// warm the switch makes no difference.
+func TestColdAnswersOffFailsEveryHit(t *testing.T) {
+	t.Parallel()
+
+	const falls = -1
+
+	cases := []struct {
+		name   string
+		qname  string
+		qtype  uint16
+		client string
+		on     int
+		off    int
+		warm   int
+	}{
+		{"a hit", "user-api.shop.incus.", dns.TypeA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"nodata", "user-api.shop.incus.", dns.TypeAAAA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"the apex", "shop.incus.", dns.TypeSOA, "10.0.1.10", dns.RcodeSuccess, dns.RcodeServerFailure, dns.RcodeSuccess},
+		{"a miss", "nope.shop.incus.", dns.TypeA, "10.0.1.10", dns.RcodeServerFailure, dns.RcodeServerFailure, dns.RcodeNameError},
+		{"a claimed name in no zone yet", "web.blog.incus.", dns.TypeA, "10.0.1.10", dns.RcodeServerFailure, dns.RcodeServerFailure, falls},
+		{"a name outside everything", "example.org.", dns.TypeA, "10.0.1.10", falls, falls, falls},
+	}
+
+	for _, coldAnswers := range []bool{true, false} {
+		v := New(slog.Default())
+		v.Claims = []string{"incus."}
+		v.ColdAnswers = coldAnswers
+		v.Replace(testPiece())
+
+		for i, phase := range []string{"cold", "warm"} {
+			if i > 0 {
+				v.SetHealthy(true)
+			}
+
+			for _, tc := range cases {
+				want := tc.warm
+
+				switch {
+				case i > 0:
+				case coldAnswers:
+					want = tc.on
+				default:
+					want = tc.off
+				}
+
+				label := fmt.Sprintf("cold answers %t, %s, %s", coldAnswers, phase, tc.name)
+
+				handled, m := ask(t, v, tc.qname, tc.qtype, tc.client)
+
+				if want == falls {
+					assert.False(t, handled, label)
+
+					continue
+				}
+
+				require.True(t, handled, label)
+				assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[m.Rcode], label)
+
+				if m.Rcode == dns.RcodeServerFailure {
+					assert.False(t, m.Authoritative, label)
+					assert.Empty(t, m.Answer, label)
+
+					opt := m.IsEdns0()
+					require.NotNil(t, opt, label)
+					require.Len(t, opt.Option, 1, label)
+
+					ede, ok := opt.Option[0].(*dns.EDNS0_EDE)
+					require.True(t, ok, label)
+					assert.Equal(t, dns.ExtendedErrorCodeNotReady, ede.InfoCode, label)
+
+					continue
+				}
+
+				if tc.name != "a hit" {
+					continue
+				}
+
+				// Served cold, clamped; once warm, the TTL it was built with.
+				ttl := uint32(staleTTL)
+				if i > 0 {
+					ttl = testTTL
+				}
+
+				require.Len(t, m.Answer, 1, label)
+				assert.Equal(t, ttl, m.Answer[0].Header().Ttl, label)
+			}
+		}
+	}
+}
+
+// TestColdAsksTheForwarderOutsideEveryZone pins a cold miss under a claim in no
+// zone we know: it may be a host the forwarder resolves - the cluster's own
+// nodes share the suffix - or a project not read yet. The forwarder is asked as
+// a warm miss would ask it, and a NOERROR is passed on as it came, records or
+// not - NODATA says upstream holds the name - as is a truncated reply, so the
+// client retries over TCP; anything else may be the unread project, so it is
+// SERVFAIL. A miss inside a zone of ours never reaches the forwarder, and warm
+// changes nothing.
+func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
+	t.Parallel()
+
+	// What the forwarder does with each name; a name not listed is NXDOMAIN.
+	type upstream int
+
+	const (
+		nxdomain upstream = iota
+		answers
+		nodata
+		truncated
+		fails
+		writesNothing
+	)
+
+	says := map[string]upstream{
+		"i1.incus.":        answers,
+		"x.www.incus.":     answers,
+		"gone.edge.incus.": answers,
+		"empty.incus.":     nodata,
+		"big.incus.":       truncated,
+		"broken.incus.":    fails,
+		"refused.incus.":   writesNothing,
+	}
+
+	var asked []string
+
+	next := plugin.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+		qname := r.Question[0].Name
+		asked = append(asked, qname)
+
+		m := new(dns.Msg)
+		m.SetReply(r)
+
+		switch says[qname] {
+		case answers:
+			m.Answer = []dns.RR{&dns.A{
+				Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 600},
+				A:   netip.MustParseAddr("10.0.4.1").AsSlice(),
+			}}
+		case nodata:
+		case truncated:
+			// Cut short on the way: whatever the rcode says, the client
+			// asks again over TCP.
+			m.Rcode = dns.RcodeNameError
+			m.Truncated = true
+		case fails:
+			return dns.RcodeServerFailure, errors.New("upstream timed out")
+		case writesNothing:
+			return dns.RcodeRefused, nil
+		default:
+			m.Rcode = dns.RcodeNameError
+		}
+
+		return dns.RcodeSuccess, w.WriteMsg(m)
+	})
+
+	// edge.incus. is a zone invented for one alias: it claims the name it holds
+	// and nothing else, so a miss in it is outside every zone of a project.
+	snap := testPiece()
+	snap.Denial, _, _ = snap.Denial.Insert(NameKey("edge.incus."), &Zone{
+		Name:      "edge.incus.",
+		SOA:       testSOA("edge.incus."),
+		Shadowing: true,
+	})
+
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+	v.Next = next
+	v.Replace(snap)
+
+	cases := []struct {
+		name      string
+		qname     string
+		cold      int
+		warm      int
+		forwarded bool
+	}{
+		{"a host the forwarder resolves", "i1.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"two labels over a name in no project", "x.www.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"a miss in a zone invented for an alias", "gone.edge.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"the forwarder knows nothing of it", "web.blog.incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
+		{"the suffix itself", "incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
+		{"the forwarder has no record of this type", "empty.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
+		{"the forwarder's reply is truncated", "big.incus.", dns.RcodeNameError, dns.RcodeNameError, true},
+		{"the forwarder fails", "broken.incus.", dns.RcodeServerFailure, dns.RcodeServerFailure, true},
+		{"the forwarder writes nothing", "refused.incus.", dns.RcodeServerFailure, dns.RcodeRefused, true},
+		{"a miss inside a project zone", "nope.shop.incus.", dns.RcodeServerFailure, dns.RcodeNameError, false},
+		{"a hit inside a project zone", "user-api.shop.incus.", dns.RcodeSuccess, dns.RcodeSuccess, false},
+	}
+
+	for i, phase := range []string{"cold", "warm"} {
+		if i > 0 {
+			v.SetHealthy(true)
+		}
+
+		for _, tc := range cases {
+			label := phase + ", " + tc.name
+
+			want := tc.cold
+			if i > 0 {
+				want = tc.warm
+			}
+
+			asked = nil
+
+			w := dnstest.NewRecorder(&test.ResponseWriter{})
+
+			rcode, err := v.ServeDNS(context.Background(), w, query(tc.qname, dns.TypeA, "10.0.1.10"))
+
+			// Warm, a forwarder that writes nothing leaves the reply to the
+			// caller, as it always did.
+			if i > 0 && (says[tc.qname] == fails || says[tc.qname] == writesNothing) {
+				assert.Equal(t, says[tc.qname] == fails, err != nil, label)
+				assert.Equal(t, want, rcode, label)
+				assert.Nil(t, w.Msg, label)
+				assert.Equal(t, []string{tc.qname}, asked, label)
+
+				continue
+			}
+
+			require.NoError(t, err, label)
+			require.NotNil(t, w.Msg, label)
+			assert.Equal(t, dns.RcodeToString[want], dns.RcodeToString[w.Msg.Rcode], label)
+
+			if tc.forwarded {
+				assert.Equal(t, []string{tc.qname}, asked, label)
+			} else {
+				assert.Empty(t, asked, label)
+			}
+
+			if w.Msg.Rcode == dns.RcodeServerFailure {
+				// A cold failure, in the shape of every other one.
+				assert.False(t, w.Msg.Authoritative, label)
+				assert.Empty(t, w.Msg.Answer, label)
+				assert.Equal(t, []uint16{dns.ExtendedErrorCodeNotReady}, ede(w.Msg), label)
+
+				continue
+			}
+
+			if !tc.forwarded || (w.Msg.Rcode != dns.RcodeSuccess && !w.Msg.Truncated) {
+				continue
+			}
+
+			// Passed on as the forwarder wrote it: neither ours nor clamped,
+			// and truncated only where it was.
+			assert.False(t, w.Msg.Authoritative, label)
+			assert.Equal(t, says[tc.qname] == truncated, w.Msg.Truncated, label)
+			assert.Nil(t, w.Msg.IsEdns0(), label)
+
+			if says[tc.qname] != answers {
+				assert.Empty(t, w.Msg.Answer, label)
+
+				continue
+			}
+
+			require.Len(t, w.Msg.Answer, 1, label)
+			assert.Equal(t, uint32(600), w.Msg.Answer[0].Header().Ttl, label)
+			assert.Equal(t, "10.0.4.1", w.Msg.Answer[0].(*dns.A).A.String(), label)
+		}
+	}
+}
+
+// ede is the extended error codes a reply carries.
+func ede(m *dns.Msg) []uint16 {
+	opt := m.IsEdns0()
+	if opt == nil {
+		return nil
+	}
+
+	var out []uint16
+
+	for _, o := range opt.Option {
+		e, ok := o.(*dns.EDNS0_EDE)
+		if ok {
+			out = append(out, e.InfoCode)
+		}
+	}
+
+	return out
 }

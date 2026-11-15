@@ -198,3 +198,19 @@ func TestAProjectMayNotNameTheService(t *testing.T) {
 		})
 	}
 }
+
+// TestAProjectMayNotDrain: a drain takes one replica out of its service. A
+// project setting it would take every instance it holds out of every service.
+func TestAProjectMayNotDrain(t *testing.T) {
+	t.Parallel()
+
+	ev := labeled("shop", "web", ours(metaService, "frontend"),
+		map[string]string{labelPrefix + metaDrain: "true"})
+
+	assert.Empty(t, meta(ev)[metaDrain], "a project drained an instance")
+
+	inst := patchInstance(ev, "example.")
+	require.NotNil(t, inst)
+
+	assert.Equal(t, []string{"web.shop.example.", "frontend.shop.example."}, inst.names)
+}

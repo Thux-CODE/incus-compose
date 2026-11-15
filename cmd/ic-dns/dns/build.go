@@ -41,6 +41,15 @@ type instance struct {
 	// alias is every name it claims as a CNAME onto its own.
 	alias []string
 
+	// service is the service name among names, empty where it carries none. Its
+	// records are not this instance's to write: which replicas answer for it
+	// depends on the others too, so services writes it for all of them.
+	service string
+
+	// ready is whether this replica may answer for its service while another
+	// may not.
+	ready bool
+
 	// ptrs is every reverse name it answers to, and where each sits.
 	ptrs map[string]ptrOn
 }
@@ -122,11 +131,18 @@ type ptrOn struct {
 	zone string
 }
 
-// zoneSerial is what a zone was published under. Serial persists; what a zone
-// is made of is rebuilt by folding, so the rest is unexported and the cold
-// store never sees it.
+// zoneSerial is what a zone was published under. Serial and Owed persist; what
+// a zone is made of is rebuilt by folding, so the rest is unexported and the
+// cold store never sees it.
 type zoneSerial struct {
 	Serial uint32
+
+	// Owed is a change made while cold that the serial has not yet answered
+	// for: cold may not step, so the first warm publish steps once for all of
+	// them. Persisted, so a restart before that publish still owes it. Never
+	// set by the replay of what was restored, which is what the stored serial
+	// already describes.
+	Owed bool `json:"owed,omitempty"`
 
 	// dirty is a name in this zone having moved since it was last published. A
 	// serial step is a claim that the zone changed, so only a patch sets it.
@@ -155,7 +171,13 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 		return nil
 	}
 
-	nets := sitsOn(ev.Instance())
+	// A paused instance still holds its addresses, and Incus still reports
+	// them, but nothing behind them answers: it sits nowhere, the same as one
+	// that stopped.
+	nets := map[string]*netOn{}
+	if ev.Instance().Running() {
+		nets = sitsOn(ev.Instance())
+	}
 
 	own := meta(ev)
 	zone := zoneFor(ev.ProjectName(), own, suffix)
@@ -171,9 +193,11 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 		alias:    aliasNames(own, zone),
 	}
 
-	// A scaled service's replicas land under one record.
+	// A scaled service's replicas land under one record. A drained replica
+	// leaves it and keeps its own name, so it can be reached while the
+	// service is not sent to it.
 	service := own[metaService]
-	if service != "" {
+	if service != "" && !incusutil.IsTrue(own[metaDrain]) {
 		inst.names = append(inst.names, dns.CanonicalName(service)+zone)
 	}
 
@@ -195,6 +219,12 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 			inst.ptrs[name] = ptrOn{key: key, zone: zone}
 		}
 	}
+
+	if len(inst.names) > 1 {
+		inst.service = inst.names[1]
+	}
+
+	inst.ready = ready(ev.Instance())
 
 	return inst
 }

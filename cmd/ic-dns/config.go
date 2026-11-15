@@ -68,6 +68,11 @@ type config struct {
 	// allows nobody, so a transfer is opt-in here as well as at the zone.
 	AllowTransfer []netip.Prefix
 
+	// TrustedClients is who is answered from every view at once rather than
+	// from the networks their own address sits on, as CIDR prefixes. Empty
+	// trusts nobody, which is the per-querier filter on its own.
+	TrustedClients []netip.Prefix
+
 	// How the chain behaves.
 	TTL            uint
 	DebounceWindow time.Duration
@@ -78,6 +83,11 @@ type config struct {
 	EchoSubnet     bool
 	Metrics        bool
 	Exclude        []string
+
+	// ColdAnswers serves what is held before the first round of the fleet has
+	// ended. Off, those answers are SERVFAIL too, for a deployment listing a
+	// second server the client can ask instead.
+	ColdAnswers bool
 
 	// Log is the level every chain log position prints a routine event at, and
 	// the process's own log level. Empty leaves the positions out and the
@@ -91,6 +101,7 @@ func newConfig() *config {
 	return &config{
 		ProjectMarker:      defaultProjectMarker,
 		ProjectMarkerValue: defaultProjectMarkerValue,
+		ColdAnswers:        true,
 	}
 }
 

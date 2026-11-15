@@ -1,0 +1,76 @@
+# Thux-CODE fork only: never part of a pull request upstream.
+#
+# Builds container/ic-dns/Containerfile and pushes it to
+# ghcr.io/<owner>/incus-compose/ic-dns. The tag follows the branch, so the
+# same file serves both:
+#   ic-dns-trusted-client   -> 1.4.0-trusted     (v1.4.0 + --trusted-client)
+#   ic-dns-53c7e15-trusted  -> 53c7e15-trusted   (what ran from 2026-09-14)
+#   ic-dns-coldwarm-test    -> 1.4.0-coldwarm.4  (trial: cold store + SERVFAIL until warm)
+#   ic-dns-thux             -> 1.4.0-thux.1      (coldwarm + pause, drain, readiness, reread)
+# plus the short commit sha, so a deployment can pin what it pulled.
+name: ic-dns image
+
+on:
+  push:
+    branches:
+      - ic-dns-trusted-client
+      - ic-dns-53c7e15-trusted
+      - ic-dns-coldwarm-test
+      - ic-dns-thux
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: tags
+        id: tags
+        run: |
+          case "${GITHUB_REF_NAME}" in
+            ic-dns-trusted-client)  tag=1.4.0-trusted ;;
+            ic-dns-53c7e15-trusted) tag=53c7e15-trusted ;;
+            ic-dns-coldwarm-test)   tag=1.4.0-coldwarm.4 ;;
+            ic-dns-thux)            tag=1.4.0-thux.1 ;;
+            *) echo "no image tag for branch ${GITHUB_REF_NAME}" >&2; exit 1 ;;
+          esac
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/incus-compose/ic-dns"
+          sha="${GITHUB_SHA::7}"
+          {
+            echo "version=${tag}+${sha}"
+            echo "tags=${image}:${tag},${image}:${tag}-${sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v4.2.0
+
+      - name: ghcr-login
+        uses: docker/login-action@v4.3.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v7.4.0
+        with:
+          context: .
+          file: container/ic-dns/Containerfile
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            VERSION=${{ steps.tags.outputs.version }}
+          tags: ${{ steps.tags.outputs.tags }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=ic-dns with --trusted-client (Thux-CODE build of ${{ github.ref_name }})
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

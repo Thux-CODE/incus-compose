@@ -50,8 +50,13 @@ type Plugin struct {
 	in  <-chan iutil.Command
 	out chan<- iutil.Command
 
-	// ready latches on the chain turning warm and clears when it turns cold.
+	// ready latches on the first warm event since the stream was last lost, and
+	// clears only when it is lost again: see Handle.
 	ready atomic.Bool
+
+	// lost is when the stream last went, so a warm event stamped before it - a
+	// debounced leftover - is not taken for one since. Handle's goroutine alone.
+	lost time.Time
 
 	// connected is the source's own state, straight off the chain.
 	connected atomic.Bool
@@ -116,14 +121,24 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 		p.connected.Store(true)
 
 	case iutil.ActionDisconnected:
+		// The one thing that takes readiness back: nothing confirms what is
+		// served until a round has been all the way round again.
 		p.connected.Store(false)
+		p.ready.Store(false)
+		p.lost = ev.At()
+
+		p.next(ev)
+
+		return
 	}
 
-	switch ev.ChainState() {
-	case iutil.ChainCold:
-		p.ready.Store(false)
-
-	case iutil.ChainWarm:
+	// Cold says when an event was minted, not what is served now: a read that
+	// failed, or one sent before the round ended and landing after it, still
+	// carries the stamp it was made with, and a round that has ended stays
+	// ended. Only a warm event turns readiness on - and only one nobody
+	// dropped, since a dropped one was folded by nobody before here and may
+	// have overtaken what it follows.
+	if ev.ChainState() == iutil.ChainWarm && ev.Err() == nil && ev.At().After(p.lost) {
 		p.ready.Store(true)
 	}
 

@@ -1201,3 +1201,211 @@ func TestEventsForUnknownInstancesAreHarmless(t *testing.T) {
 		})
 	}
 }
+
+// ----------------------------------------------------------------------------
+// starting: what a fresh run reports before its first check
+// ----------------------------------------------------------------------------
+
+// landed is a status write the way it comes back when Incus took it.
+func landed(res instanceResult) instanceResult {
+	res.err = nil
+
+	return res
+}
+
+// TestStartedReportsStarting pins that a start, by anyone, clears the last
+// run's verdict: until the first check, the instance has none. As in docker,
+// with a start period or without one.
+func TestStartedReportsStarting(t *testing.T) {
+	t.Parallel()
+
+	for _, action := range []string{
+		incusApi.EventLifecycleInstanceStarted,
+		incusApi.EventLifecycleInstanceRestarted,
+		incusApi.EventLifecycleInstanceResumed,
+	} {
+		for _, before := range []string{shared.HealthStatusHealthy, shared.HealthStatusStopped} {
+			t.Run(action+"/"+before, func(t *testing.T) {
+				t.Parallel()
+
+				s := newScheduler(t)
+
+				inst := s.add("web-1", testConfig())
+				inst.status = before
+
+				s.event(action, "web-1")
+
+				res := s.next(t)
+				require.Equal(t, instanceResultStatus, res.kind)
+				require.Equal(t, shared.HealthStatusStarting, res.status)
+			})
+		}
+	}
+}
+
+// TestStartedReportsStartingForANewInstance is the one a deploy creates: no
+// status at all yet, and its first event is the start.
+func TestStartedReportsStartingForANewInstance(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+
+	res := s.next(t)
+	require.Equal(t, instanceResultStatus, res.kind)
+	require.Equal(t, shared.HealthStatusStarting, res.status)
+}
+
+// TestStartedWithoutATestReportsNothing: an instance watched only for its
+// restart policy has no check to wait for, so no verdict to hold back.
+func TestStartedWithoutATestReportsNothing(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	s.eventRead(incusApi.EventLifecycleInstanceStarted, "web-1", true,
+		healthKeys(map[string]string{"restart": "always"}))
+
+	_, ok := s.instances[s.key("web-1")]
+	require.True(t, ok)
+
+	s.silent(t)
+}
+
+// TestRestartResultReportsStarting covers the daemon's own restart, which the
+// start event leaves to the result: the new run starts without a verdict too.
+func TestRestartResultReportsStarting(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusUnhealthy
+
+	s.result(s.restarted(t, inst, nil))
+
+	res := s.next(t)
+	require.Equal(t, instanceResultStatus, res.kind)
+	require.Equal(t, shared.HealthStatusStarting, res.status)
+}
+
+// TestStartingHoldsUntilRetriesWithoutAStartPeriod pins the docker shape
+// without a start period: failures below retries leave starting in place.
+func TestStartingHoldsUntilRetriesWithoutAStartPeriod(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	for i := 1; i < inst.config.retries; i++ {
+		s.result(s.checked(t, inst, errors.New("not up yet")))
+	}
+
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+	s.silent(t)
+
+	s.result(s.checked(t, inst, errors.New("still not up")))
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusUnhealthy, res.status)
+}
+
+// TestStatusWritesDoNotOverlap pins the order on the wire. A start writes
+// starting and its first check may pass before that write lands: sent side by
+// side, the two could land the wrong way round and leave starting on a healthy
+// instance, with nothing left to correct it.
+func TestStatusWritesDoNotOverlap(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, inst.status)
+
+	first := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, first.status)
+	s.silent(t)
+
+	s.result(landed(first))
+
+	second := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, second.status, "the verdict queued behind it")
+
+	s.result(landed(second))
+	s.silent(t)
+}
+
+// TestQueuedStatusAlreadyLandedIsNotRewritten: asked for and then asked back
+// while the write was out, the value on the wire is already the last one.
+func TestQueuedStatusAlreadyLandedIsNotRewritten(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+	inst := s.add("web-1", testConfig())
+
+	reportStatus(s.ctx, slog.Default(), s.conn, s.project, s.results, inst, shared.HealthStatusStarting)
+	reportStatus(s.ctx, slog.Default(), s.conn, s.project, s.results, inst, shared.HealthStatusHealthy)
+	reportStatus(s.ctx, slog.Default(), s.conn, s.project, s.results, inst, shared.HealthStatusStarting)
+
+	s.result(landed(s.next(t)))
+	s.silent(t)
+
+	require.False(t, inst.writing)
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+}
+
+// TestQueuedStatusSurvivesAFailedWrite: the write ahead of it failing is no
+// reason to drop what was asked for after it.
+func TestQueuedStatusSurvivesAFailedWrite(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+	inst := s.add("web-1", testConfig())
+
+	reportStatus(s.ctx, slog.Default(), s.conn, s.project, s.results, inst, shared.HealthStatusStarting)
+	reportStatus(s.ctx, slog.Default(), s.conn, s.project, s.results, inst, shared.HealthStatusHealthy)
+
+	failed := s.next(t)
+	require.Error(t, failed.err)
+	s.result(failed)
+
+	require.Equal(t, shared.HealthStatusHealthy, inst.status, "the queued verdict is still the one wanted")
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, res.status)
+}
+
+// TestARestartDuringACheckReportsStarting: a check is out when the instance
+// restarts. The check keeps the instance, as any action in flight does, but
+// the healthy on it is the last run's and the new run has passed nothing yet.
+func TestARestartDuringACheckReportsStarting(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.running(t, inst, instanceChecking, time.Now().Add(time.Minute))
+	live := inst.actionContext
+
+	config := eventConfig(inst.config)
+	config["status"] = shared.HealthStatusHealthy
+	s.eventRead(incusApi.EventLifecycleInstanceRestarted, "web-1", true, healthKeys(config))
+
+	select {
+	case res := <-s.results:
+		require.Equal(t, shared.HealthStatusStarting, res.status)
+	case <-time.After(absenceGrace):
+		t.Fatalf("no starting written; status held is %q", inst.status)
+	}
+
+	require.Equal(t, instanceChecking, inst.state, "the check in flight was taken off the instance")
+	require.Same(t, live, inst.actionContext)
+}
