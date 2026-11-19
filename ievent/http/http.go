@@ -38,6 +38,11 @@ type Config struct {
 
 	// Pprof enables /debug/pprof; never on in a deployment.
 	Pprof bool
+
+	// Gate is asked once the round has latched: a non-nil error keeps /ready
+	// at 503 with it as the reason. For a plugin that needs more than a round
+	// to answer, read off Incus apart from the events. Nil asks nothing.
+	Gate func() error
 }
 
 // Plugin answers the observability endpoints.
@@ -81,6 +86,9 @@ func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
 
 // Pprof turns /debug/pprof on; not for a deployment.
 func Pprof(v bool) Option { return func(cfg *Config) { cfg.Pprof = v } }
+
+// Gate adds a condition /ready waits on after the round, nil once met.
+func Gate(gate func() error) Option { return func(cfg *Config) { cfg.Gate = gate } }
 
 // New builds the endpoint server. It starts nothing: Run owns the goroutine.
 func New(logger *slog.Logger, opts ...Option) *Plugin {
@@ -252,6 +260,17 @@ func (p *Plugin) serveReady(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("nothing published yet\n"))
 
 	default:
+		// Asked once: the answer may move between two calls.
+		if p.cfg.Gate != nil {
+			err := p.cfg.Gate()
+			if err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = w.Write([]byte(err.Error() + "\n"))
+
+				return
+			}
+		}
+
 		_, _ = w.Write([]byte("ready\n"))
 	}
 }

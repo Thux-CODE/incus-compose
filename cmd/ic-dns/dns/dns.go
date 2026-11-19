@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
@@ -67,6 +68,10 @@ type Config struct {
 	// than from the one they sit on. Empty trusts nobody, which is the
 	// per-querier filter as it stands without this.
 	TrustedClients []netip.Prefix
+	// PeerViews answers a querier from the networks its own are peered with as
+	// well, read off Incus and followed on its network-peer events. Off, which
+	// is the default, the peering is neither read nor looked at.
+	PeerViews bool
 
 	// ColdDir is where the cold store lives, the same directory the certificate
 	// is in. Empty disables it, and nothing writes to disk without it.
@@ -132,6 +137,41 @@ type Plugin struct {
 	// store's own goroutine writes, so a slow disk cannot stall the chain.
 	cold *coldStore
 
+	// peerReader reads the peering, on readPeerLoop's goroutine alone. Nil
+	// without PeerViews, or with no connection to read it from.
+	peerReader peerReader
+
+	// peerAsk asks readPeerLoop for a read of these networks; one slot, so asks
+	// coalesce into the newest.
+	peerAsk chan []string
+
+	// peerIn hands a finished read to Run's goroutine, which owns the state.
+	peerIn chan peerRead
+
+	// peerCovered is the networks the last read that landed read; nil before
+	// one has. Run's goroutine alone.
+	peerCovered map[string]bool
+
+	// peersRestored is a peering having come back from the cold store, which
+	// counts as known until a read lands. Run's goroutine alone.
+	peersRestored bool
+
+	// peerRetry is the backoff after a failed read, first and longest.
+	peerRetry [2]time.Duration
+
+	// peerCallTimeout bounds each call of a read of the peering.
+	peerCallTimeout time.Duration
+
+	// published is a snapshot having gone out in this run: the replay off disk,
+	// or the first round, has been folded and published whole at least once.
+	// Run's goroutine alone.
+	published bool
+
+	// peersRead is the peering having been read in this run, or not being
+	// followed at all. Until it is, no round turns the view warm. Written by
+	// Run's goroutine, read by whoever asks PeeringReady.
+	peersRead atomic.Bool
+
 	// state is everything folding owns - what is held, what has arrived, and the
 	// trees being patched. Run's goroutine alone, never Handle's caller.
 	state *state
@@ -170,6 +210,9 @@ func AllowTransfer(prefixes []netip.Prefix) Option {
 func TrustedClients(prefixes []netip.Prefix) Option {
 	return func(cfg *Config) { cfg.TrustedClients = prefixes }
 }
+
+// PeerViews answers a querier from the networks its own are peered with too.
+func PeerViews(v bool) Option { return func(cfg *Config) { cfg.PeerViews = v } }
 
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
@@ -228,15 +271,21 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	if claim != "." {
 		view.Claims = []string{claim}
 	}
+	view.PeerViews = cfg.PeerViews
 
 	p := &Plugin{
-		cfg:    cfg,
-		logger: logger,
-		view:   view,
-		xfr:    newXFR(logger, cfg.AllowTransfer),
-		cold:   newCold(logger, cfg),
-		state:  newState(map[string]zoneSerial{}),
-		inbox:  make(chan *iutil.Event, cfg.InboxSize),
+		cfg:       cfg,
+		logger:    logger,
+		view:      view,
+		xfr:       newXFR(logger, cfg.AllowTransfer),
+		cold:      newCold(logger, cfg),
+		state:     newState(map[string]zoneSerial{}),
+		inbox:     make(chan *iutil.Event, cfg.InboxSize),
+		peerAsk:   make(chan []string, 1),
+		peerIn:    make(chan peerRead),
+		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
+
+		peerCallTimeout: peerCallTimeout,
 	}
 
 	wants := p.Wants()
@@ -246,6 +295,10 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	}
 
 	p.actions = knownActions
+
+	// Nothing to wait on where the peering is not followed.
+	p.peersRead.Store(!cfg.PeerViews)
+
 	return p
 }
 
@@ -275,7 +328,7 @@ const wantsInstance = iutil.EnrichedInstance |
 func (p *Plugin) Wants() []iutil.Want {
 	// Debounce only where the action repeats. A start or a delete happens once,
 	// so collapsing it buys nothing and costs the whole window in latency.
-	return []iutil.Want{
+	wants := []iutil.Want{
 		{Action: incusapi.EventLifecycleInstanceStarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceRestarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceResumed, Enrich: wantsInstance},
@@ -287,6 +340,17 @@ func (p *Plugin) Wants() []iutil.Want {
 		{Action: incusapi.EventLifecycleInstanceRenamed, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleNetworkUpdated, Enrich: iutil.EnrichedNetwork, Debounce: true},
 	}
+
+	// A peer event only says to read the peering again, so it needs no read.
+	// Never collapsed: debounce keys on project and name, and a peer may share
+	// its name with an instance whose event it would swallow.
+	if p.cfg.PeerViews {
+		for _, action := range peerActions {
+			wants = append(wants, iutil.Want{Action: action})
+		}
+	}
+
+	return wants
 }
 
 // Setup keeps the successor, the two command doors and the connection - what
@@ -294,6 +358,11 @@ func (p *Plugin) Wants() []iutil.Want {
 func (p *Plugin) Setup(args iutil.SetupArgs) error {
 	p.next = args.Next
 	p.commandIn, p.commandOut = args.CommandIn, args.CommandOut
+
+	// A nil *Connection in the interface would read as a reader.
+	if p.cfg.PeerViews && p.peerReader == nil && args.Conn != nil {
+		p.peerReader = args.Conn
+	}
 
 	return nil
 }
@@ -336,7 +405,19 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 	// What each zone was published under, so a serial never goes backwards. The
 	// records themselves are replayed onto this plugin by the enricher.
-	p.state = newState(p.cold.load())
+	serials, peers := p.cold.load()
+	p.state = newState(serials)
+
+	// And the peering they were published under, so the replay writes every
+	// peer half as it lands instead of once the peering has been read again,
+	// a round of reads per served project later. The read corrects it, and
+	// until it has landed what this answers through a peer is as good as the
+	// replayed records themselves.
+	if p.cfg.PeerViews && len(peers) > 0 {
+		p.state.setPeers(peers, p.cfg.TTL)
+		p.peersRestored = true
+		p.logger.Info("restored the network peering from the cold store", "peers", describePeers(peers))
+	}
 
 	loopCtx, stopLoop := context.WithCancelCause(ctx)
 
@@ -354,6 +435,16 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 	if p.cold.enabled() {
 		wg.Go(p.cold.run)
+	}
+
+	// The peering is read off this goroutine, and once before any event asks.
+	if p.cfg.PeerViews && p.peerReader != nil {
+		wg.Go(func() { p.readPeerLoop(loopCtx) })
+
+		p.askPeers()
+	} else {
+		// No connection to read it over, so nothing a round could wait on.
+		p.peersRead.Store(true)
 	}
 
 	// An empty address answers no DNS at all, which is what a build that only
@@ -409,6 +500,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 			p.write()
 
+		case read := <-p.peerIn:
+			p.peered(read)
+
 		case ev := <-p.inbox:
 			p.fold(ev)
 
@@ -424,32 +518,23 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) fold(ev *iutil.Event) {
 	// Unwinding the other way round: hand the event on, then say what it
 	// changed, so the cause reaches the chain ahead of its consequence.
-	defer func() {
-		now := p.view.Ready()
-		if now == p.ready {
-			return
-		}
-
-		p.ready = now
-
-		// Ours to name, since nothing else raises or reads it.
-		action := "dns/not-ready"
-		if now {
-			action = "dns/ready"
-		}
-
-		// Non-blocking: the source may already have stopped reading, and waiting
-		// would hold up the drain this runs inside.
-		select {
-		case p.commandOut <- iutil.Command{Action: action}:
-		default:
-		}
-	}()
+	defer p.announce()
 
 	defer p.next(ev)
 
 	if ev.ChainState() != p.state.chain {
 		p.state.chain = ev.ChainState()
+	}
+
+	// The peering is read again on anything that can have moved it, and once a
+	// round, so an event lost with the stream is caught up on.
+	if peeringMoves(ev) || ev.Action() == iutil.ActionSweepEnd {
+		p.askPeers()
+	}
+
+	// A peer is not an instance: what it moves arrives with the read.
+	if slices.Contains(peerActions, ev.Action()) {
+		return
 	}
 
 	// A lost stream drops no record, but nothing is confirming them any more,
@@ -522,19 +607,71 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	p.state.pending[key] = inst
 }
 
-// rounded takes the end of a round. Healthy is set here and nowhere else: a
-// replay off disk is structurally whole but not fresh, and has to serve clamped
-// until Incus itself has been read.
+// rounded takes the end of a round. Healthy is set here, and by the first read
+// of the peering where a round ended before it: a replay off disk is
+// structurally whole but not fresh, and has to serve clamped until Incus itself
+// has been read.
+//
+// With --peer-views the peering is part of what has to have been read: until
+// it has, a name seen only through a peer is missing or stale, and warm would
+// answer that querier NXDOMAIN for good instead of SERVFAIL. The round still
+// counts as ended, so it is not taken again on every warm event after it.
 //
 // The window is flushed rather than published beside, or the end of a round
 // publishes twice.
 func (p *Plugin) rounded() {
 	p.state.write(p.cfg.TTL)
+	p.askIfGrew()
 	p.publish()
 
-	p.view.SetHealthy(true)
 	p.state.fresh = true
+
+	if !p.settlePeering() {
+		p.logger.Info("a round ended, waiting on a read of the network peering to turn warm")
+
+		return
+	}
+
+	p.view.SetHealthy(true)
 }
+
+// announce raises dns/ready or dns/not-ready where the view's readiness moved
+// since it was last said.
+func (p *Plugin) announce() {
+	now := p.view.Ready()
+	if now == p.ready {
+		return
+	}
+
+	p.ready = now
+
+	// Ours to name, since nothing else raises or reads it.
+	action := "dns/not-ready"
+	if now {
+		action = "dns/ready"
+	}
+
+	// Non-blocking: the source may already have stopped reading, and waiting
+	// would hold up the drain this runs inside.
+	select {
+	case p.commandOut <- iutil.Command{Action: action}:
+	default:
+	}
+}
+
+// PeeringReady is nil once the peering has been read in this run, or where it
+// is not followed; otherwise why not. Safe from any goroutine: it is what the
+// /ready endpoint asks.
+func (p *Plugin) PeeringReady() error {
+	if p.peersRead.Load() {
+		return nil
+	}
+
+	return errPeeringNotRead
+}
+
+// errPeeringNotRead is what PeeringReady says until the first read lands.
+var errPeeringNotRead = errors.New("the network peering has not been read yet")
 
 // write applies what has arrived and publishes it. Nothing arrived is nothing
 // to publish: the window fires once per burst whether or not the burst changed
@@ -544,6 +681,7 @@ func (p *Plugin) write() {
 		return
 	}
 
+	p.askIfGrew()
 	p.publish()
 }
 
@@ -559,9 +697,23 @@ func (p *Plugin) publish() {
 	p.view.Replace(snap)
 	p.xfr.Replace(snap)
 
-	// Encoded on this goroutine, so what crosses to the writer is a finished
-	// []byte and it cannot reach into live state.
-	b, err := encodeCold(p.state.serials)
+	p.published = true
+
+	p.storeCold()
+}
+
+// storeCold hands what a restart needs to the store: the serials published
+// under and, where it is followed, the peering. Encoded on this goroutine, so
+// what crosses to the writer is a finished []byte and it cannot reach into
+// live state.
+func (p *Plugin) storeCold() {
+	// A run without the flag holds no peering worth restoring.
+	var peers map[string][]string
+	if p.cfg.PeerViews {
+		peers = p.state.peers
+	}
+
+	b, err := encodeCold(p.state.serials, peers)
 	if err != nil {
 		p.logger.Warn("encoding the cold store", "err", err)
 

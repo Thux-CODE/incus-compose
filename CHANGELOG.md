@@ -35,6 +35,25 @@ form.
   own network. Matched on the source address, never on an EDNS client subnet;
   empty (the default) trusts nobody. (by @sandroden)
 
+- `ic-dns --peer-views` (`INCUS_COMPOSE_DNS_PEER_VIEWS`): a querier is also
+  answered from the networks its own network is peered with
+  (`incus network peer`, `Created` on both sides, one hop, never transitive),
+  names and PTRs alike. The peering is read at start and followed on
+  `network-peer-*` events without a restart, one peer list per network a served
+  instance sits on (no project or network listing), each call with its own
+  deadline; a side the certificate cannot read, in a project not served, or of a
+  network that cannot peer is ignored. Peer answers count as `result="peer"`.
+  The peering is kept in the cold store with the zone serials, so after a
+  restart the replayed names answer through their peers at once rather than
+  after a round of reads; the first read that lands corrects it, and goes out at
+  once. The restored peering counts as known until a read lands, so a slow or
+  failing read never keeps the server cold. Without one, until a read has
+  covered every network a name is on the server is not warm, even after a
+  complete round: misses stay `SERVFAIL` instead of `NXDOMAIN` and `/ready`
+  answers 503 saying it waits on the peering, so a client that sees a name only
+  through a peer is never told it does not exist. Off by default. (by
+  @sandroden)
+
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
   error `Not Ready`) until the first complete round of the fleet, like the names

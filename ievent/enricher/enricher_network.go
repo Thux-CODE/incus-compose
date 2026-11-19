@@ -2,21 +2,28 @@ package enricher
 
 import (
 	"context"
-	"strings"
+	"slices"
 
 	incusapi "github.com/lxc/incus/v7/shared/api"
 
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
-// networkPrefix is what an action names a network with.
-const networkPrefix = "network-"
+// networkActions are the actions whose subject is a network itself. A peer,
+// an ACL or a forward shares the "network-" prefix but names something on a
+// network, and reading it as a network would ask Incus for one called that.
+var networkActions = []string{
+	incusapi.EventLifecycleNetworkCreated,
+	incusapi.EventLifecycleNetworkUpdated,
+	incusapi.EventLifecycleNetworkDeleted,
+	incusapi.EventLifecycleNetworkRenamed,
+}
 
 // acceptNetwork handles one network action, and reports whether it was one.
 // The event itself carries no enrichment, since its subject is a network; what
 // it causes is the patch, and the re-read of everything on that network.
 func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
-	if !strings.HasPrefix(ev.Action(), networkPrefix) {
+	if !slices.Contains(networkActions, ev.Action()) {
 		return false
 	}
 

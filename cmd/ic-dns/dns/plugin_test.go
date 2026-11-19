@@ -279,7 +279,7 @@ func (r *running) stop(t *testing.T) {
 func TestReconnectClaimsNothingAboutAFleetThatDidNotMove(t *testing.T) {
 	const zone = "shop.example."
 
-	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}})
+	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}}, nil)
 	require.NoError(t, err)
 
 	r := start(t, Suffix("example"), ColdMemory(seed))
@@ -325,7 +325,7 @@ func TestColdBecomesWarm(t *testing.T) {
 	const zone = "shop.example."
 
 	// What a previous run published.
-	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}})
+	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}}, nil)
 	require.NoError(t, err)
 
 	r := start(t, Suffix("example"), ColdMemory(seed))
@@ -351,7 +351,7 @@ func TestColdBecomesWarm(t *testing.T) {
 		answered(t, r.p.state.snapshot(), "web."+zone, "10.0.0.9"))
 
 	// And what it published went back to the store it was seeded from.
-	back, err := decodeCold(r.p.cold.held)
+	back, _, err := decodeCold(r.p.cold.held)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(8), back[zone].Serial)
 }
@@ -370,10 +370,10 @@ func TestPluginStoresTheSerialsItPublished(t *testing.T) {
 	// The reverse zone its address made is published in its own right.
 	assert.Contains(t, held, "0.0.10.in-addr.arpa.")
 
-	encoded, err := encodeCold(held)
+	encoded, err := encodeCold(held, nil)
 	require.NoError(t, err)
 
-	back, err := decodeCold(encoded)
+	back, _, err := decodeCold(encoded)
 	require.NoError(t, err)
 
 	assert.Equal(t, uint32(1), back["shop.example."].Serial)
@@ -391,12 +391,13 @@ func TestAZoneTheReplayHasNotReachedKeepsItsSerial(t *testing.T) {
 		blog = "blog.example."
 	)
 
-	seed, err := encodeCold(map[string]zoneSerial{shop: {Serial: 7}, blog: {Serial: 4}, "gone.example.": {Serial: 2}})
+	seed, err := encodeCold(map[string]zoneSerial{shop: {Serial: 7}, blog: {Serial: 4}, "gone.example.": {Serial: 2}}, nil)
 	require.NoError(t, err)
 
 	p := New(slog.Default(), Suffix("example"), ColdMemory(seed))
 	p.next = func(_ *iutil.Event) {}
-	p.state = newState(p.cold.load())
+	serials, _ := p.cold.load()
+	p.state = newState(serials)
 
 	updated := incusapi.EventLifecycleInstanceUpdated
 
@@ -452,12 +453,13 @@ func TestALiveReadReplacesARestoredOne(t *testing.T) {
 func TestWhatTheFirstRoundCorrectsStepsOnceWarm(t *testing.T) {
 	const zone = "shop.example."
 
-	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}})
+	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}}, nil)
 	require.NoError(t, err)
 
 	p := New(slog.Default(), Suffix("example"), ColdMemory(seed))
 	p.next = func(_ *iutil.Event) {}
-	p.state = newState(p.cold.load())
+	serials, _ := p.cold.load()
+	p.state = newState(serials)
 
 	updated := func(addr string) *iutil.Event {
 		return eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", nil,
@@ -483,10 +485,10 @@ func TestWhatTheFirstRoundCorrectsStepsOnceWarm(t *testing.T) {
 // first warm publish must still owe the step, so the mark goes to the store
 // with the serial.
 func TestWhatIsOwedSurvivesARestart(t *testing.T) {
-	b, err := encodeCold(map[string]zoneSerial{"shop.example.": {Serial: 7, Owed: true}})
+	b, err := encodeCold(map[string]zoneSerial{"shop.example.": {Serial: 7, Owed: true}}, nil)
 	require.NoError(t, err)
 
-	back, err := decodeCold(b)
+	back, _, err := decodeCold(b)
 	require.NoError(t, err)
 
 	assert.Equal(t, zoneSerial{Serial: 7, Owed: true}, back["shop.example."])

@@ -183,6 +183,17 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 
 	byType, visible := answers[view]
 
+	// What the view's peers add, apart from its own so the answer can be told.
+	// Only looked up when asked for: off, the path below is untouched.
+	// Held at all is what counts, as for the view itself: a name whose only
+	// holder has no address yet is NODATA through a peer as on its own network.
+	if v.PeerViews {
+		peer, viaPeer := answers[PeerOf(view)]
+		if viaPeer {
+			return v.answerPeered(w, r, opt, m, z, byType, peer, qtype, clamp, cold)
+		}
+	}
+
 	// Two instances claiming one alias each wrote their own, and a name may hold
 	// only one CNAME. Refusing beats picking, and it reads as missing: whichever
 	// claimant leaves first frees the name for the other with nothing tracking
@@ -339,6 +350,88 @@ func (v *ECSView) notReady(w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool
 	}
 
 	return write(w, m)
+}
+
+// answerPeered answers one name from a view and its peer half together: the
+// networks the querier sits on, and the ones they are peered with. Everything
+// else is the single-view path as it stands - an alias claimed twice still reads
+// as missing, and before warm a miss like any other; a type nobody holds is
+// still NODATA.
+func (v *ECSView) answerPeered(
+	w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT, m *dns.Msg,
+	z *Zone, own, peer Records, qtype uint16, clamp, cold bool,
+) (bool, int, error) {
+	if len(unionRRs(own[dns.TypeCNAME], peer[dns.TypeCNAME])) > 1 {
+		if cold {
+			return v.notReady(w, r, opt)
+		}
+
+		deny(m, z, clamp)
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nxdomain").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	rrs := unionRRs(own[qtype], peer[qtype])
+	if len(rrs) == 0 {
+		m.Ns = []dns.RR{authority(z.SOA, clamp)}
+
+		if v.Metrics {
+			requestCount.WithLabelValues(v.Server, "nodata").Inc()
+		}
+
+		return write(w, m)
+	}
+
+	m.Answer = withTTL(rrs, clamp)
+
+	if v.Metrics {
+		// A peer answer is one the querier's own networks could not have given:
+		// the union holds a record its own half did not.
+		result := "success"
+		if len(rrs) > len(own[qtype]) {
+			result = "peer"
+		}
+
+		requestCount.WithLabelValues(v.Server, result).Inc()
+	}
+
+	return write(w, m)
+}
+
+// unionRRs is two record sets as one, deduplicated by text, own first. Either
+// one empty hands the other back as it stands, so only a real union allocates.
+func unionRRs(own, peer []dns.RR) []dns.RR {
+	if len(peer) == 0 {
+		return own
+	}
+
+	if len(own) == 0 {
+		return peer
+	}
+
+	out := make([]dns.RR, 0, len(own)+len(peer))
+	seen := make(map[string]struct{}, len(own)+len(peer))
+
+	for _, set := range [][]dns.RR{own, peer} {
+		for _, rr := range set {
+			text := rr.String()
+
+			_, dup := seen[text]
+			if dup {
+				continue
+			}
+
+			seen[text] = struct{}{}
+
+			out = append(out, rr)
+		}
+	}
+
+	return out
 }
 
 // replyOPT is the OPT record the echoed client subnet rides back on. A query

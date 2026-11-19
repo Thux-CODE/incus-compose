@@ -589,7 +589,7 @@ func startRestart(t *testing.T, opts ...Option) (*restartRig, *gatedIncus) {
 	store := filepath.Join(dir, "enricher-cold-store.json")
 	require.NoError(t, os.WriteFile(store, b, 0o600))
 
-	serials, err := encodeCold(map[string]zoneSerial{"shop.incus.": {Serial: 7}, "blog.incus.": {Serial: 4}})
+	serials, err := encodeCold(map[string]zoneSerial{"shop.incus.": {Serial: 7}, "blog.incus.": {Serial: 4}}, nil)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(dir, coldFile), serials, 0o600))
 

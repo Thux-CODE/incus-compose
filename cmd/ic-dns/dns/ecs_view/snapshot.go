@@ -24,6 +24,17 @@ type ViewID string
 // Refusing beats picking: the loser's records would answer the wrong querier.
 const AmbiguousView ViewID = "\x00ambiguous"
 
+// peerPrefix marks a view's peer half. It starts with a byte no network key
+// can hold, so it can never name a set of networks.
+const peerPrefix = "\x00peer\x00"
+
+// PeerOf is where a view's peers answer: the records a querier placed on id
+// sees only because one of its networks is peered with theirs. Kept apart from
+// id itself so an answer can say which of the two it came from.
+func PeerOf(id ViewID) ViewID {
+	return ViewID(peerPrefix + string(id))
+}
+
 // Records is one name's records for one view, by query type. The grouping is
 // what keeps NXDOMAIN and NODATA apart.
 type Records map[uint16][]dns.RR

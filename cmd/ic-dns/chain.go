@@ -79,25 +79,32 @@ func chain(logger *slog.Logger, cfg config) []position {
 
 	out = append(out, logAt(logger, cfg, "enriched")...)
 
+	dnsPlugin := dns.New(
+		logger,
+		dns.Listen(cfg.DNSAddr),
+		dns.Chain(dnsPlugins),
+		dns.Stop(stop),
+		dns.EchoSubnet(cfg.EchoSubnet),
+		dns.Metrics(cfg.Metrics),
+		dns.ColdAnswers(cfg.ColdAnswers),
+		dns.ColdDir(cfg.DataDir),
+		dns.TTL(uint32(cfg.TTL)),
+		dns.Suffix(cfg.Suffix),
+		dns.Project(serves(logger, cfg)),
+		dns.AllowTransfer(cfg.AllowTransfer),
+		dns.TrustedClients(cfg.TrustedClients),
+		dns.PeerViews(cfg.PeerViews),
+	)
+
 	out = append(out,
-		position{plugin: dns.New(
-			logger,
-			dns.Listen(cfg.DNSAddr),
-			dns.Chain(dnsPlugins),
-			dns.Stop(stop),
-			dns.EchoSubnet(cfg.EchoSubnet),
-			dns.Metrics(cfg.Metrics),
-			dns.ColdAnswers(cfg.ColdAnswers),
-			dns.ColdDir(cfg.DataDir),
-			dns.TTL(uint32(cfg.TTL)),
-			dns.Suffix(cfg.Suffix),
-			dns.Project(serves(logger, cfg)),
-			dns.AllowTransfer(cfg.AllowTransfer),
-			dns.TrustedClients(cfg.TrustedClients),
-		)},
+		position{plugin: dnsPlugin},
 		// After dns, so a readiness it raises is folded before this position
 		// sees the event that caused it. Any position works; this one reads best.
-		position{plugin: http.New(logger, http.Listen(cfg.HTTPAddr), http.Metrics(cfg.Metrics), http.Pprof(cfg.Pprof)), optional: true},
+		// /ready also waits on the peering, which no event carries.
+		position{plugin: http.New(logger,
+			http.Listen(cfg.HTTPAddr), http.Metrics(cfg.Metrics), http.Pprof(cfg.Pprof),
+			http.Gate(dnsPlugin.PeeringReady),
+		), optional: true},
 	)
 
 	out = append(out, logAt(logger, cfg, "served")...)

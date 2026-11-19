@@ -1,0 +1,367 @@
+package dns
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"slices"
+	"strings"
+	"time"
+
+	incusapi "github.com/lxc/incus/v7/shared/api"
+
+	"github.com/lxc/incus-compose/ievent/iutil"
+)
+
+// peerRetryFirst and peerRetryLongest bound the backoff after a failed read. A
+// read that fails is tried again by itself, so a peer event arriving while
+// incusd hiccups is not left waiting for the next round.
+const (
+	peerRetryFirst   = time.Second
+	peerRetryLongest = 30 * time.Second
+)
+
+// peerCallTimeout bounds each call of a read of the peering, not the read as a
+// whole: a slow daemon (a network list taking 30 s on a loaded member was seen)
+// makes the read long, never impossible, while a daemon not answering one call
+// still fails it and leaves the held peering in place.
+const peerCallTimeout = 30 * time.Second
+
+// peerReader is what reading the peering takes off the Incus connection: the
+// peers of one network, nothing else.
+type peerReader interface {
+	GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error)
+}
+
+// bounded is a peerReader whose every call has a deadline of its own.
+type bounded struct {
+	r       peerReader
+	timeout time.Duration
+}
+
+func (b bounded) GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	return b.r.GetNetworkPeers(ctx, project, network)
+}
+
+// peerActions are the lifecycle actions a peering moves on. None is enriched:
+// the event only says to read the peering again.
+var peerActions = []string{
+	incusapi.EventLifecycleNetworkPeerCreated,
+	incusapi.EventLifecycleNetworkPeerUpdated,
+	incusapi.EventLifecycleNetworkPeerDeleted,
+}
+
+// readPeers is which of these networks are peered with which, by NetworkKey,
+// sorted. The networks are the ones a name can be on - every network an
+// instance this daemon serves sits on - by the key of the project that owns
+// each; a peering between networks nothing sits on changes no answer, and the
+// first instance on one asks for a read that takes it in.
+//
+// Only each network's own peer list is read: no project list, and no list of
+// a project's networks, which in the default project brings the host's
+// interfaces along and has Incus count what uses each of them (30 s against a
+// loaded member). A pair counts only when both sides were read and both say
+// Created, so a side outside these networks - in a project not served, or one
+// nothing sits on - is never taken on trust.
+//
+// A side Incus refuses, no longer has, or that cannot peer at all (a bridge)
+// is skipped. Anything else fails the whole read, so a daemon not answering
+// cannot tear the peering down.
+func readPeers(ctx context.Context, r peerReader, keys []string) (map[string][]string, error) {
+	// Every peer each network names, by the key it names it with.
+	says := map[string]map[string]bool{}
+
+	for _, from := range keys {
+		project, network, ok := strings.Cut(from, "/")
+		if !ok {
+			continue
+		}
+
+		peers, err := r.GetNetworkPeers(ctx, project, network)
+		if err != nil {
+			if refused(err) {
+				continue
+			}
+
+			return nil, fmt.Errorf("listing peers of %s: %w", from, err)
+		}
+
+		for _, peer := range peers {
+			to, ok := peerKey(peer)
+			if !ok || to == from {
+				continue
+			}
+
+			if says[from] == nil {
+				says[from] = map[string]bool{}
+			}
+
+			says[from][to] = true
+		}
+	}
+
+	out := map[string][]string{}
+
+	for from, tos := range says {
+		for to := range tos {
+			// Both sides, or neither.
+			if !says[to][from] {
+				continue
+			}
+
+			out[from] = append(out[from], to)
+		}
+	}
+
+	for key := range out {
+		slices.Sort(out[key])
+	}
+
+	return out, nil
+}
+
+// peerKey is the network one peer points at, for a peer that is up and local.
+// A peer towards an integration points outside Incus, at nothing a name can be
+// on.
+func peerKey(peer incusapi.NetworkPeer) (string, bool) {
+	if peer.Status != incusapi.NetworkStatusCreated {
+		return "", false
+	}
+
+	if peer.Type != "" && peer.Type != "local" {
+		return "", false
+	}
+
+	if peer.TargetProject == "" || peer.TargetNetwork == "" {
+		return "", false
+	}
+
+	return iutil.NetworkKey(peer.TargetProject, peer.TargetNetwork), true
+}
+
+// refused is Incus saying a side is not ours to read, not there any more, or
+// of a type that cannot peer (400, "does not support peering").
+func refused(err error) bool {
+	return incusapi.StatusErrorCheck(err, http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound)
+}
+
+// peeringMoves says whether an event can have changed the peering: a peer
+// itself, a network appearing, going or being renamed, or the stream coming
+// back after events may have been missed.
+func peeringMoves(ev *iutil.Event) bool {
+	switch ev.Action() {
+	case iutil.ActionConnected,
+		incusapi.EventLifecycleNetworkCreated,
+		incusapi.EventLifecycleNetworkDeleted,
+		incusapi.EventLifecycleNetworkRenamed:
+		return true
+	}
+
+	return slices.Contains(peerActions, ev.Action())
+}
+
+// describePeers is a peering as one line, for the log.
+func describePeers(peers map[string][]string) string {
+	var pairs []string
+
+	for from, tos := range peers {
+		for _, to := range tos {
+			if from < to {
+				pairs = append(pairs, from+"<->"+to)
+			}
+		}
+	}
+
+	slices.Sort(pairs)
+
+	return strings.Join(pairs, " ")
+}
+
+// peerRead is one read of the peering, and the networks it read.
+type peerRead struct {
+	peers map[string][]string
+	keys  []string
+}
+
+// askPeers asks for the peering to be read again, of every network a name is
+// on now and every one the held peering names. One pending ask is enough, the
+// newest: it names every network the older one did that still matters.
+// Run's goroutine alone, since it reads the state.
+func (p *Plugin) askPeers() {
+	if !p.cfg.PeerViews {
+		return
+	}
+
+	keys := p.state.peerTargets()
+
+	select {
+	case <-p.peerAsk:
+	default:
+	}
+
+	p.peerAsk <- keys
+}
+
+// askIfGrew asks for a read where a write put a name on a network nothing was
+// on: its peering was not read, since it could change no answer until now.
+func (p *Plugin) askIfGrew() {
+	if !p.state.grew {
+		return
+	}
+
+	p.state.grew = false
+
+	p.askPeers()
+}
+
+// peeringKnown reports whether the peering held is one to turn warm on: one
+// restored from the cold store, which counts until a read corrects it, or a
+// read that landed and covered every network a name is on now. A slow or
+// failing read never keeps a replica that restored its peering cold.
+func (p *Plugin) peeringKnown() bool {
+	if p.peersRestored {
+		return true
+	}
+
+	if p.peerCovered == nil {
+		return false
+	}
+
+	for key := range p.state.nets {
+		if !p.peerCovered[key] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// settlePeering reports whether the peering lets the view turn warm, and
+// latches the first time it does: until then a round waits on it.
+func (p *Plugin) settlePeering() bool {
+	if p.peersRead.Load() {
+		return true
+	}
+
+	if !p.peeringKnown() {
+		return false
+	}
+
+	p.peersRead.Store(true)
+
+	if p.peerCovered == nil {
+		p.logger.Info("warm on the network peering restored from the cold store, until a read lands")
+	} else {
+		p.logger.Info("the network peering has been read", "networks", len(p.peerCovered))
+	}
+
+	return true
+}
+
+// readPeerLoop reads the peering whenever asked, off the fold goroutine, and
+// hands each read over to it. A failed read keeps what is held, says so, and
+// is tried again after a backoff that doubles up to peerRetryLongest; an ask
+// arriving meanwhile reads at once.
+func (p *Plugin) readPeerLoop(ctx context.Context) {
+	var (
+		retry <-chan time.Time
+		keys  []string
+	)
+
+	backoff := p.peerRetry[0]
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case keys = <-p.peerAsk:
+		case <-retry:
+		}
+
+		retry = nil
+
+		start := time.Now()
+
+		peers, err := readPeers(ctx, bounded{r: p.peerReader, timeout: p.peerCallTimeout}, keys)
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+
+			p.logger.Warn("reading network peers, keeping what is held", "err", err, "retry", backoff)
+
+			retry = time.After(backoff)
+			backoff = min(backoff*2, p.peerRetry[1])
+
+			continue
+		}
+
+		backoff = p.peerRetry[0]
+
+		p.logger.Debug("read the network peering", "networks", len(keys), "took", time.Since(start))
+
+		select {
+		case p.peerIn <- peerRead{peers: peers, keys: keys}:
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// peered takes one read of the peering on the fold goroutine, and publishes
+// at once where it rewrote a name: a peering is not a burst worth waiting on.
+//
+// Never before the first publish: a read landing ahead of the replay off disk,
+// or in the middle of it, would publish a fleet half replayed. The publish
+// that folds the replay carries what this wrote. After it - a replay under the
+// peering the cold store kept, corrected by the first read that lands - a
+// change goes out at once, warm or not: a stale peer half is no better than a
+// stale record, and the serials are safe either way, since a cold publish
+// steps none and forgets none.
+func (p *Plugin) peered(read peerRead) {
+	peers := read.peers
+
+	p.peerCovered = make(map[string]bool, len(read.keys))
+	for _, key := range read.keys {
+		p.peerCovered[key] = true
+	}
+
+	// A read covering every network is what a round that ended before it was
+	// waiting on, the same table as the one restored included.
+	defer p.warmOnPeering()
+
+	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
+	if !changed {
+		return
+	}
+
+	p.logger.Info("network peering changed", "peers", describePeers(peers))
+
+	if !touched || !p.published {
+		// Nothing goes out, but the next start replays under this peering:
+		// the serials stored with it are the ones last published, unchanged.
+		p.storeCold()
+
+		return
+	}
+
+	// Whatever was pending goes out with it, so the snapshot is one fold.
+	p.state.write(p.cfg.TTL)
+	p.askIfGrew()
+	p.publish()
+}
+
+// warmOnPeering turns the view warm where a round ended while the peering had
+// not been read yet, now that it has - after what the read moved was
+// published, so warm never answers from the table before it.
+func (p *Plugin) warmOnPeering() {
+	if p.peersRead.Load() || !p.state.fresh || !p.settlePeering() {
+		return
+	}
+
+	p.view.SetHealthy(true)
+	p.announce()
+}
