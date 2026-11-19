@@ -766,7 +766,8 @@ func recreateStaleInstances(ctx context.Context, p *project.Project, c *client.C
 
 		// Delete drops them from the client, so Start below runs on
 		// the resources this rebuild registers rather than the dead ones.
-		resources, err := p.Resources(c, project.ResourcesScale(args.Scale))
+		// They come back under the names they had.
+		resources, err := p.Resources(c, project.ResourcesScale(args.Scale), project.ResourcesRecreating(slices.Collect(maps.Keys(batchNames))...))
 		if err != nil {
 			c.LogError("Getting project resources after the teardown", "error", err)
 			return nil, nil, errLogged.Wrap(err)

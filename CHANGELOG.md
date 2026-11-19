@@ -61,6 +61,18 @@ form.
 
 ### Changed
 
+- `up` reconciles a service on the replicas it has, the instances carrying its
+  label and named `<service>-<index>`, instead of on the names `<service>-1` to
+  `<service>-N`. As many as declared are left alone whatever their indexes (one
+  replica at `web-2` stays `web-2`); fewer are joined by new ones on the lowest
+  free indexes; of more, the surplus goes in this order: not running, drained,
+  made from an older compose definition, highest index, never taking the last
+  healthy replica. A replica that exists keeps its cluster member, the
+  `depends_on` waits follow the replicas a dependency keeps, the service-wide
+  `pre_start` hooks and DNS aliases go to the replica with the lowest index
+  kept, and a replica recreated for an outdated definition keeps its name.
+  `logs` follows the replicas that exist. (by @sandroden)
+
 - `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an
   instance with a healthcheck starts, restarts or resumes, as docker does,
   instead of leaving the previous run's `healthy` or `stopped` until the first

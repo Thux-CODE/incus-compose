@@ -566,6 +566,21 @@ func (c *Client) healthdTarget() (*iclient.Connection, string, string, error) {
 	return nil, "", "", ErrNotFound.WithText(": within healthdTarget")
 }
 
+// Instances returns the instances of the project, with their config and
+// status; none for a client with no connection.
+func (c *Client) Instances() ([]incusApi.InstanceFull, error) {
+	if c.incus == nil {
+		return nil, nil
+	}
+
+	instances, err := c.incus.GetInstances(c.ctx, c.incusProject, nil)
+	if err != nil {
+		return nil, fmt.Errorf("listing instances: %w", err)
+	}
+
+	return instances, nil
+}
+
 // InstanceExists reports whether an instance with the given name exists in Incus.
 func (c *Client) InstanceExists(name string) (bool, error) {
 	if c.incus == nil {

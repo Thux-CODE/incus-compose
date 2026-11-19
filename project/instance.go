@@ -90,7 +90,7 @@ func serviceToInstance(c *client.Client, p *types.Project, serviceName string, o
 
 	if options != nil && options.noDNS {
 		delete(config, "user.label.dns.aliases")
-	} else if scale == 1 || index == 1 {
+	} else if options.first {
 		_, hasAliases := config["user.label.dns.aliases"]
 		if !hasAliases {
 			var dnsAliases []string
@@ -183,7 +183,7 @@ func serviceToInstance(c *client.Client, p *types.Project, serviceName string, o
 	hasPreStart := len(service.PreStart) > 0
 
 	for i, hook := range service.PreStart {
-		if !hook.PerReplica && index > 1 {
+		if !hook.PerReplica && !options.first {
 			continue
 		}
 
@@ -1358,6 +1358,18 @@ func instanceDependencyWaits(c *client.Client, p *types.Project, service types.S
 		if dep.Condition != types.ServiceConditionHealthy {
 			continue
 		}
+
+		// The replicas Resources keeps for the dependency, whatever their
+		// indexes; the declared names when it was not planned with this one.
+		names, planned := options.replicaNames[depName]
+		if planned {
+			for _, name := range names {
+				deps[client.SanitizeIncusName(name, client.MaxIncusNameLen)] = client.HealthStatusHealthy
+			}
+
+			continue
+		}
+
 		depSvc := p.Services[depName]
 		depScale := 1
 		if s, ok := options.Scale[depName]; ok {

@@ -2363,8 +2363,8 @@ func TestServiceToInstancePreStart(t *testing.T) {
 		}
 		p := &types.Project{Services: types.Services{"web": service}}
 
-		// Replica 1 has PreRun
-		inst1, res1, err := serviceToInstance(c, p, "web", &ResourcesOptions{}, 1, 2)
+		// The first replica has PreRun
+		inst1, res1, err := serviceToInstance(c, p, "web", &ResourcesOptions{first: true}, 1, 2)
 		require.NoError(t, err)
 		require.Len(t, inst1.Config.PreRun, 1)
 
@@ -2383,7 +2383,7 @@ func TestServiceToInstancePreStart(t *testing.T) {
 		// Runner is only in PreRun, not in returned resources
 		assert.NotContains(t, res1, runner)
 
-		// Replica 2 does not have PreRun when per_replica is false
+		// The others do not have PreRun when per_replica is false
 		c2 := client.NewOfflineClient(t.Context(), "test")
 		inst2, _, err := serviceToInstance(c2, p, "web", &ResourcesOptions{}, 2, 2)
 		require.NoError(t, err)
@@ -2453,7 +2453,7 @@ func TestServiceToInstancePreStart(t *testing.T) {
 		}
 		p := &types.Project{Services: types.Services{"web": service}}
 
-		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{}, 1, 1)
+		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{first: true}, 1, 1)
 		require.NoError(t, err)
 		require.Len(t, inst.Config.PreRun, 1)
 		runner := inst.Config.PreRun[0]
@@ -2503,7 +2503,7 @@ func TestServiceToInstancePreStart(t *testing.T) {
 		}
 		p := &types.Project{Services: types.Services{"web": service}}
 
-		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{}, 1, 1)
+		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{first: true}, 1, 1)
 		require.NoError(t, err)
 		require.Len(t, inst.Config.PreRun, 1)
 
@@ -2600,7 +2600,7 @@ func TestServiceToInstance_DNSAliases(t *testing.T) {
 		t.Parallel()
 
 		c, p := newProject()
-		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{noDNS: false}, 1, 1)
+		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{noDNS: false, first: true}, 1, 1)
 		require.NoError(t, err)
 
 		aliases := inst.Config.Extensions["user.label.dns.aliases"]
@@ -2611,29 +2611,29 @@ func TestServiceToInstance_DNSAliases(t *testing.T) {
 		t.Parallel()
 
 		c, p := newProject()
-		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{noDNS: true}, 1, 1)
+		inst, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{noDNS: true, first: true}, 1, 1)
 		require.NoError(t, err)
 
 		_, hasAliases := inst.Config.Extensions["user.label.dns.aliases"]
 		assert.False(t, hasAliases, "user.label.dns.aliases must not be set when noDNS is true")
 	})
 
-	t.Run("only assigns aliases to replica 1 when scaled", func(t *testing.T) {
+	t.Run("only assigns aliases to the first replica when scaled", func(t *testing.T) {
 		t.Parallel()
 
 		c, p := newProject()
-		inst1, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{}, 1, 2)
+		inst2, _, err := serviceToInstance(c, p, "web", &ResourcesOptions{first: true}, 2, 2)
 		require.NoError(t, err)
 
-		aliases1 := inst1.Config.Extensions["user.label.dns.aliases"]
-		assert.Equal(t, "frontend,web.mydomain.lan.", aliases1)
+		aliases2 := inst2.Config.Extensions["user.label.dns.aliases"]
+		assert.Equal(t, "frontend,web.mydomain.lan.", aliases2, "the first replica need not be replica 1")
 
-		c2 := client.NewOfflineClient(t.Context(), "test")
-		inst2, _, err := serviceToInstance(c2, p, "web", &ResourcesOptions{}, 2, 2)
+		c3 := client.NewOfflineClient(t.Context(), "test")
+		inst3, _, err := serviceToInstance(c3, p, "web", &ResourcesOptions{}, 3, 2)
 		require.NoError(t, err)
 
-		_, hasAliases2 := inst2.Config.Extensions["user.label.dns.aliases"]
-		assert.False(t, hasAliases2, "replica 2 must not have user.label.dns.aliases")
+		_, hasAliases3 := inst3.Config.Extensions["user.label.dns.aliases"]
+		assert.False(t, hasAliases3, "a replica after the first must not have user.label.dns.aliases")
 	})
 }
 

@@ -25,6 +25,7 @@ import (
 	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/compose-spec/compose-go/v2/utils"
 	"github.com/dominikbraun/graph"
+	incusApi "github.com/lxc/incus/v7/shared/api"
 
 	"github.com/lxc/incus-compose/client"
 	"github.com/lxc/incus-compose/shared"
@@ -490,7 +491,11 @@ func (p *Project) InstanceNames(c *client.Client, services ...string) []string {
 
 	seen := make(map[string]struct{}, len(services))
 
-	var names []string
+	var (
+		names     []string
+		instances []incusApi.InstanceFull
+		listed    bool
+	)
 	for _, svcName := range services {
 		_, ok := seen[svcName]
 		if ok {
@@ -516,15 +521,24 @@ func (p *Project) InstanceNames(c *client.Client, services ...string) []string {
 			}
 		}
 
-		if c != nil {
-			for {
-				exists, err := c.InstanceExists(instanceName(service, replicas+1, replicas+1))
-				if err != nil || !exists {
-					break
-				}
-
-				replicas++
+		// The replicas that exist, whatever their indexes; the declared names
+		// when there are none, or no Incus to ask.
+		var existing []replica
+		if c != nil && service.ContainerName == "" {
+			if !listed {
+				instances, _ = c.Instances()
+				listed = true
 			}
+
+			existing = serviceReplicas(instances, p.Name, service.Name, "")
+		}
+
+		if len(existing) > 0 {
+			for _, r := range existing {
+				names = append(names, instanceName(service, r.index, len(existing)))
+			}
+
+			continue
 		}
 
 		for i := 1; i <= replicas; i++ {
@@ -554,6 +568,47 @@ type ResourcesOptions struct {
 
 	// target sets the cluster member target for the current replica.
 	target string
+
+	// first marks the current replica as the one the service-wide pre_start
+	// hooks and the DNS aliases go to.
+	first bool
+
+	// replicaNames holds, per service, the instances a dependent waits for.
+	replicaNames map[string][]string
+
+	// addReplica builds one service with a new replica next to the ones it has.
+	addReplica *addReplica
+
+	// recreating holds instances deleted to be made again, which count as
+	// existing so they come back under the same names.
+	recreating []string
+}
+
+// addReplica is the new replica ResourcesAddReplica asks for.
+type addReplica struct {
+	service string
+	index   int
+	first   bool
+}
+
+// ResourcesAddReplica builds a service as the replicas it has plus a new one
+// at index, and takes none away: what a rollout starts next to the old ones.
+// The new replica takes a target of the placement of that many replicas that
+// none of the others runs on, and with first it is the one the service-wide
+// pre_start hooks run for; without it none is.
+func ResourcesAddReplica(service string, index int, first bool) ResourcesOption {
+	return func(o *ResourcesOptions) {
+		o.addReplica = &addReplica{service: service, index: index, first: first}
+	}
+}
+
+// ResourcesRecreating counts the named instances as existing, for the build
+// that makes them again after they were deleted: they keep their names, where
+// reconciling would otherwise pick the lowest free ones.
+func ResourcesRecreating(names ...string) ResourcesOption {
+	return func(o *ResourcesOptions) {
+		o.recreating = names
+	}
 }
 
 // OneOff is the instance `run` builds from a service, in place of the ones the
@@ -628,61 +683,34 @@ func (p *Project) Resources(c *client.Client, opts ...ResourcesOption) (map[stri
 
 	var errs error
 
-	// Configure instances
+	plans, err := p.replicaPlans(c, options)
+	if err != nil {
+		errs = errors.Join(errs, err)
+	}
+
+	// What a service waits for on depends_on is the replicas its dependency
+	// keeps, whatever their indexes.
+	options.replicaNames = map[string][]string{}
+	for name, plan := range plans {
+		for _, i := range plan.indexes {
+			if !plan.drop[i] {
+				options.replicaNames[name] = append(options.replicaNames[name], instanceName(p.Services[name], i, len(plan.indexes)))
+			}
+		}
+	}
+
 	for _, service := range p.Services {
-		// Determine the desired count and per-replica cluster targets:
-		// CLI --scale > deploy.replicas / deploy.mode: global > 1.
-		// A plain `up` reconciles to deploy.replicas in both directions, matching
-		// `docker compose up`: a manual --scale applies only to that invocation,
-		// and the next plain `up` restores replicas (scaling up or down).
-		var scaleOverride *int
-		s, ok := options.Scale[service.Name]
-		if ok {
-			scaleOverride = &s
+		plan, ok := plans[service.Name]
+		if !ok {
+			continue
 		}
 
-		var desired int
-		var targets []string
-		if options.oneOff != nil && options.oneOff.Service == service.Name {
-			desired = 1
-			if c != nil && c.Global().IsClustered() {
-				targets = []string{c.Global().ServerName()}
-			} else {
-				targets = []string{""}
-			}
-		} else {
-			var err error
-			desired, targets, err = p.resolveServicePlacement(c, service, scaleOverride)
-			if err != nil {
-				errs = errors.Join(errs, err)
-				continue
-			}
-		}
-
-		// Discover existing instances above the desired count so they can be
-		// reconciled away (highest index first) during Ensure. A one-off is not
-		// one of the service's instances, so it reconciles nothing.
-		scale := desired
-		for options.oneOff == nil || options.oneOff.Service != service.Name {
-			instanceName := fmt.Sprintf("%s-%d", service.Name, scale+1)
-			ok, err := c.InstanceExists(instanceName)
-			if !ok || err != nil {
-				break
-			}
-
-			scale++
-		}
-
-		instances := []*client.Instance{}
-		for i := 1; i <= scale; i++ {
+		for _, i := range plan.indexes {
 			replicaOpts := *options
-			if i <= len(targets) {
-				replicaOpts.target = targets[i-1]
-			} else if c != nil && c.Global().IsClustered() {
-				replicaOpts.target = c.Global().ServerName()
-			}
+			replicaOpts.target = plan.targets[i]
+			replicaOpts.first = i == plan.first
 
-			instance, instanceResources, err := serviceToInstance(c, p.Project, service.Name, &replicaOpts, i, scale)
+			instance, instanceResources, err := serviceToInstance(c, p.Project, service.Name, &replicaOpts, i, len(plan.indexes))
 			if err != nil {
 				errs = errors.Join(errs, err)
 				continue
@@ -691,16 +719,9 @@ func (p *Project) Resources(c *client.Client, opts ...ResourcesOption) (map[stri
 			result[service.Name] = append(result[service.Name], instance)
 			result[service.Name] = append(result[service.Name], instanceResources...)
 
-			instances = append(instances, instance)
-		}
-
-		// Reconcile down: instances beyond the desired count are marked for
-		// deletion (highest index first) and torn down during Ensure.
-		if len(instances) > desired {
-			slices.Reverse(instances)
-
-			for idx := range len(instances) - desired {
-				instances[idx].MarkDelete()
+			// Torn down by an Ensure that creates, which is `up`'s.
+			if plan.drop[i] {
+				instance.MarkDelete()
 			}
 		}
 	}

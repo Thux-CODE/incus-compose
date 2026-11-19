@@ -671,7 +671,8 @@ func (r *rolloutRunner) create(ctx context.Context, index int) error {
 	// compose file as it is now and not from one this run built earlier.
 	cc := r.c.Clone()
 
-	resources, err := r.p.Resources(cc, project.ResourcesScale(map[string]int{r.service: max(r.replicas, index)}))
+	// Built next to the replicas there are, which up no longer counts by name.
+	resources, err := r.p.Resources(cc, project.ResourcesAddReplica(r.service, index, index == 1))
 	if err != nil {
 		return err
 	}

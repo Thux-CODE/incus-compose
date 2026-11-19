@@ -85,7 +85,9 @@ flowchart LR
   is what a service becomes. With [`deploy.replicas`](/compose-compatibility) a
   single service produces several instances named `{service}-{index}` (e.g.
   `web-1`, `web-2`). A service with no replicas still becomes one instance,
-  `{service}-1`.
+  `{service}-1`. The indexes need not run from 1: a service is the instances
+  carrying its label, and [`rollout`](/cli-reference/extensions/rollout) moves a
+  replica to a free index.
 - **Container** - informal. An Incus instance is either a _container_ or a
   _virtual machine_. incus-compose creates containers from OCI images.
   "Container" and "instance" are often used interchangeably, but "instance" is
