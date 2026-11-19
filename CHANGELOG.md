@@ -109,6 +109,21 @@ form.
 
 ### Fixed
 
+- `rollout` picked up after a run cut short between the drain and the removal
+  of an old replica (a retire that failed on the API) no longer puts the
+  drained old replica back and retires the new one in its place. A replica
+  made from the service config and the image as they are now (config hash and
+  `volatile.base_image`, as `up` tells a stale one) is kept once healthy, next
+  to replicas that are not: it takes no create, and `--dry-run` reads it
+  `up to date` and counts fewer creates, none included. A drained replica
+  stays drained and goes first when the others serve the declared count
+  without it, and is put back otherwise. When every replica is current, as
+  after a rollout of an unchanged service, nothing tells new from old and all
+  are replaced, as before; a replica with no config hash counts as old. One
+  kept that does not turn healthy is not deleted: it is old again, given back
+  first as an unhealthy surplus, and the run stops before a create.
+  (by @sandroden)
+
 - Only `up` scales a service down. `ps`, `exec`, `cp`, `port` and
   `backup restore` read the instances the same way and deleted a replica above
   the declared count as they did. (by @sandroden)

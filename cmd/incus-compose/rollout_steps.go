@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strings"
 	"time"
@@ -47,8 +48,16 @@ type rolloutOps interface {
 
 // replica is one index of a service as the rollout sees it.
 type replica struct {
-	index   int
-	fresh   bool
+	index int
+
+	// current is made from the service config and the image as they are now:
+	// what a create of the rollout would make (rolloutCurrent).
+	current bool
+
+	// fresh is a replica the rollout does not replace: one it created, or one
+	// an earlier run left up to date (rolloutResumed).
+	fresh bool
+
 	running bool
 	drained bool
 }
@@ -73,7 +82,11 @@ type rolloutPlan struct {
 }
 
 // rolloutDescribe prints what a rollout of the plan would do, for --dry-run.
+// A replica an earlier run left up to date reads "up to date" and takes no
+// create, so a rollout picked up again may take fewer creates than replicas,
+// none included.
 func rolloutDescribe(plan rolloutPlan) {
+	resumed := rolloutResumed(plan.Present)
 	present := make([]string, 0, len(plan.Present))
 
 	for _, r := range plan.Present {
@@ -86,6 +99,10 @@ func rolloutDescribe(plan rolloutPlan) {
 			state += ", drained"
 		}
 
+		if resumed[r.index] {
+			state += ", up to date"
+		}
+
 		present = append(present, fmt.Sprintf("%s (%s)", plan.Name(r.index), state))
 	}
 
@@ -94,13 +111,36 @@ func rolloutDescribe(plan rolloutPlan) {
 		noun = "replica"
 	}
 
-	creates := "creates"
-	if plan.Replicas == 1 {
-		creates = "create"
+	creates := max(plan.Replicas-len(resumed), 0)
+
+	createNoun := "creates"
+	if creates == 1 {
+		createNoun = "create"
 	}
 
 	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; %d %s, each new replica healthy within %s, each old one kept %s after its drain\n",
-		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), plan.Replicas, creates, plan.HealthTimeout, plan.Grace)
+		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), creates, createNoun, plan.HealthTimeout, plan.Grace)
+}
+
+// rolloutResumed returns the replicas an earlier, interrupted rollout left up
+// to date, which this one keeps: current, running and not drained, next to at
+// least one that is not current. When all are current nothing tells the ones
+// an earlier run made from the ones it was to replace, and a rollout run on an
+// unchanged service is asked to replace them all, so none is kept.
+func rolloutResumed(present []replica) map[int]bool {
+	out := map[int]bool{}
+
+	if !slices.ContainsFunc(present, func(r replica) bool { return !r.current }) {
+		return out
+	}
+
+	for _, r := range present {
+		if r.current && r.running && !r.drained {
+			out[r.index] = true
+		}
+	}
+
+	return out
 }
 
 // rollout replaces every replica of a service with one created from the
@@ -115,7 +155,9 @@ func rolloutDescribe(plan rolloutPlan) {
 //
 // A new replica that fails, or a rollout interrupted before it is healthy,
 // is taken away again and leaves the old ones as they were. A rollout run
-// again picks up from whatever an earlier one left.
+// again picks up from whatever an earlier one left: the replicas that one made
+// are kept once healthy (rolloutResumed), and one it left drained is removed
+// first when the others serve without it (rolloutSettleDrained).
 func rollout(ctx context.Context, ops rolloutOps, plan rolloutPlan) error {
 	slots := map[int]*replica{}
 	for _, r := range plan.Present {
@@ -141,20 +183,32 @@ func rollout(ctx context.Context, ops rolloutOps, plan rolloutPlan) error {
 func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) error {
 	n := plan.Replicas
 
-	// Only a rollout drains, and only right before a stop, so a replica that
-	// runs drained was left so by one that was killed. Put back, it serves
-	// again until its turn comes.
-	for _, r := range slots {
-		if !r.running || !r.drained {
-			continue
-		}
+	// What an earlier run made is kept once it is healthy. One that is not
+	// is old again: it is not taken away here, as a new one would be, since
+	// the service may have nothing else running; the surplus below gives
+	// back the unhealthy one first, and the run stops before a create.
+	var failed error
 
-		err := rolloutUndrain(ctx, ops, plan, r)
+	for _, i := range slices.Sorted(maps.Keys(rolloutResumed(plan.Present))) {
+		r := slots[i]
+		r.fresh = true
+
+		_, _ = fmt.Fprintf(plan.Out, "%s: up to date, left by an earlier rollout; waiting up to %s for healthy\n", plan.Name(i), plan.HealthTimeout)
+
+		err := rolloutWaitHealthy(ctx, ops, plan, i)
 		if err != nil {
-			return err
-		}
+			if ctx.Err() != nil {
+				return fmt.Errorf("interrupted: %w", ctx.Err())
+			}
 
-		_, _ = fmt.Fprintf(plan.Out, "%s: drained by an earlier rollout, put back\n", plan.Name(r.index))
+			r.fresh = false
+			failed = errors.Join(failed, fmt.Errorf("%s: %w", plan.Name(i), err))
+		}
+	}
+
+	err := rolloutSettleDrained(ctx, ops, plan, slots)
+	if err != nil {
+		return errors.Join(failed, err)
 	}
 
 	first := true
@@ -162,12 +216,12 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	for {
 		old := rolloutOld(slots)
 		if len(old) == 0 && len(slots) >= n {
-			return nil
+			return failed
 		}
 
 		err := ctx.Err()
 		if err != nil {
-			return fmt.Errorf("interrupted: %w", err)
+			return errors.Join(failed, fmt.Errorf("interrupted: %w", err))
 		}
 
 		if len(slots) > n {
@@ -175,20 +229,26 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 			// one goes before another is created, so there are never two more.
 			err := rolloutGiveBack(ctx, ops, plan, slots)
 			if err != nil {
-				return err
+				return errors.Join(failed, err)
 			}
 
 			continue
+		}
+
+		if failed != nil {
+			return failed
 		}
 
 		index := rolloutFree(slots)
 
 		_, _ = fmt.Fprintf(plan.Out, "%s: creating\n", plan.Name(index))
 
-		slots[index] = &replica{index: index, fresh: true, running: true}
+		slots[index] = &replica{index: index, current: true, fresh: true, running: true}
 
 		err = ops.create(ctx, index, first)
 		if err == nil {
+			_, _ = fmt.Fprintf(plan.Out, "%s: started, waiting up to %s for healthy\n", plan.Name(index), plan.HealthTimeout)
+
 			err = rolloutWaitHealthy(ctx, ops, plan, index)
 		}
 
@@ -230,7 +290,73 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	}
 }
 
-// rolloutOld returns the replicas this run has not created.
+// rolloutSettleDrained decides what becomes of the replicas found running
+// drained. Only a rollout drains, and only right before a stop, so such a
+// replica was left so by one cut short between its drain and its removal,
+// once the one taking its place was healthy. With a replica more than
+// declared, and the declared count serving without it (healthy, not drained),
+// it stays drained and is the first to go; else it is put back and serves
+// again until its turn comes.
+func rolloutSettleDrained(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) error {
+	var drained []*replica
+
+	for _, i := range slices.Sorted(maps.Keys(slots)) {
+		r := slots[i]
+		if r.running && r.drained {
+			drained = append(drained, r)
+		}
+	}
+
+	if len(drained) == 0 {
+		return nil
+	}
+
+	surplus := len(slots) - plan.Replicas
+	serving := 0
+
+	for _, i := range slices.Sorted(maps.Keys(slots)) {
+		r := slots[i]
+
+		switch {
+		case !r.running || r.drained:
+		case r.fresh:
+			// Waited for healthy already.
+			serving++
+		case surplus > 0:
+			status, running, err := ops.health(ctx, i)
+			if err != nil {
+				return fmt.Errorf("%s: %w", plan.Name(i), err)
+			}
+
+			r.running = running
+			if running && status == shared.HealthStatusHealthy {
+				serving++
+			}
+		}
+	}
+
+	for _, r := range drained {
+		if surplus > 0 && serving >= plan.Replicas {
+			surplus--
+
+			_, _ = fmt.Fprintf(plan.Out, "%s: drained by an earlier rollout, left so to be removed\n", plan.Name(r.index))
+
+			continue
+		}
+
+		err := rolloutUndrain(ctx, ops, plan, r)
+		if err != nil {
+			return err
+		}
+
+		_, _ = fmt.Fprintf(plan.Out, "%s: drained by an earlier rollout, put back\n", plan.Name(r.index))
+	}
+
+	return nil
+}
+
+// rolloutOld returns the replicas this run replaces: neither created by it nor
+// kept up to date from an earlier one.
 func rolloutOld(slots map[int]*replica) []*replica {
 	var old []*replica
 	for _, r := range slots {
@@ -255,7 +381,10 @@ func rolloutFree(slots map[int]*replica) int {
 // rolloutVictim picks the old replica to retire, of which there is at least
 // one: one that does not run, is drained already or, where healthy says, is
 // not healthy goes first, then the lowest index, which keeps the indexes a
-// rollout cycles through low.
+// rollout cycles through low. It is the order in which `up` gives up a
+// surplus (project.reconcileReplicas), with the replicas made from an older
+// config, which `up` drops before the others, being here the only candidates,
+// and the lowest index going where `up` drops the highest.
 func rolloutVictim(slots map[int]*replica, healthy map[int]bool) int {
 	rank := func(r *replica) int {
 		switch {
@@ -367,9 +496,6 @@ func rolloutUndrain(ctx context.Context, ops rolloutOps, plan rolloutPlan, r *re
 func rolloutWaitHealthy(ctx context.Context, ops rolloutOps, plan rolloutPlan, index int) error {
 	start := plan.Now()
 	last := "-"
-
-	_, _ = fmt.Fprintf(plan.Out, "%s: started, waiting up to %s for healthy\n", plan.Name(index), plan.HealthTimeout)
-
 	failed := 0
 
 	for {

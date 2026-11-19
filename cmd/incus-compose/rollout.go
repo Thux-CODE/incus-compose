@@ -387,6 +387,27 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		return nil, rolloutPlan{}, err
 	}
 
+	// Which replicas are already what a create would make now, read once the
+	// image is pulled: a rollout picked up again keeps them.
+	hash, err := project.ServiceConfigHash(service)
+	if err != nil {
+		return nil, rolloutPlan{}, err
+	}
+
+	var alias *incusApi.ImageAliasesEntry
+
+	for _, r := range resources[svcName] {
+		img, ok := r.(*client.Image)
+		if ok {
+			alias = img.State().IncusAlias
+			break
+		}
+	}
+
+	for i := range present {
+		present[i].current = rolloutCurrent(instances[present[i].index].State().IncusInstance.Config, hash, alias)
+	}
+
 	var (
 		health   map[string]string
 		declared map[string]map[string]string
@@ -592,6 +613,20 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 	}
 
 	return out
+}
+
+// rolloutCurrent reports whether a replica with this config is what a create
+// of the rollout would make now: its config hash is the service's, and it runs
+// the image the service's alias points at, by the criteria `up` finds a
+// replica stale with (Instance.ConfigChanged, pulledImageChanged). The image
+// is compared whatever --pull says, since a create takes the alias as it is.
+// One with no hash, made before there was one, is not current: `up` leaves it
+// be so as not to recreate what an upgrade alone touched, but a rollout is
+// asked to replace, and cannot tell it from one made from another config.
+func rolloutCurrent(config map[string]string, hash string, alias *incusApi.ImageAliasesEntry) bool {
+	h, ok := config[client.ConfigHashKey]
+
+	return ok && h == hash && !pulledImageChanged(config["volatile.base_image"], alias)
 }
 
 // rolloutWatched reports whether ic-healthd runs a check on an instance with
