@@ -141,11 +141,16 @@ type Plugin struct {
 	// without PeerViews, or with no connection to read it from.
 	peerReader peerReader
 
-	// peerAsk asks readPeerLoop for a read; one slot, so asks coalesce.
-	peerAsk chan struct{}
+	// peerAsk asks readPeerLoop for a read of these networks; one slot, so asks
+	// coalesce into the newest.
+	peerAsk chan []string
 
 	// peerIn hands a finished read to Run's goroutine, which owns the state.
-	peerIn chan map[string][]string
+	peerIn chan peerRead
+
+	// peerCovered is the networks the last read that landed read; nil before
+	// one has. Run's goroutine alone.
+	peerCovered map[string]bool
 
 	// peerRetry is the backoff after a failed read, first and longest.
 	peerRetry [2]time.Duration
@@ -272,8 +277,8 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		cold:      newCold(logger, cfg),
 		state:     newState(map[string]zoneSerial{}),
 		inbox:     make(chan *iutil.Event, cfg.InboxSize),
-		peerAsk:   make(chan struct{}, 1),
-		peerIn:    make(chan map[string][]string),
+		peerAsk:   make(chan []string, 1),
+		peerIn:    make(chan peerRead),
 		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
 
 		peerCallTimeout: peerCallTimeout,
@@ -490,8 +495,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 			p.write()
 
-		case peers := <-p.peerIn:
-			p.peered(peers)
+		case read := <-p.peerIn:
+			p.peered(read)
 
 		case ev := <-p.inbox:
 			p.fold(ev)
@@ -611,12 +616,13 @@ func (p *Plugin) fold(ev *iutil.Event) {
 // publishes twice.
 func (p *Plugin) rounded() {
 	p.state.write(p.cfg.TTL)
+	p.askIfGrew()
 	p.publish()
 
 	p.state.fresh = true
 
-	if !p.peersRead.Load() {
-		p.logger.Info("a round ended, waiting on the first read of the network peering to turn warm")
+	if !p.settlePeering() {
+		p.logger.Info("a round ended, waiting on a read of the network peering to turn warm")
 
 		return
 	}
@@ -670,6 +676,7 @@ func (p *Plugin) write() {
 		return
 	}
 
+	p.askIfGrew()
 	p.publish()
 }
 

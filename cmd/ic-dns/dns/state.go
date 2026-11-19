@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"maps"
 	"slices"
 	"sort"
 	"time"
@@ -59,6 +60,31 @@ type state struct {
 	// the stream last went, so a warm stamp older than that is not taken for one.
 	fresh bool
 	lost  time.Time
+
+	// grew is a name having landed on a network nothing was on: its peering
+	// has not been read, since until now it could change no answer.
+	grew bool
+}
+
+// peerTargets is every network a read of the peering has to cover: each one a
+// name is on, and each one the held peering names, so a read made before the
+// replay has landed still re-reads what a restored peering holds. Sorted.
+func (s *state) peerTargets() []string {
+	seen := map[string]bool{}
+
+	for key := range s.nets {
+		seen[key] = true
+	}
+
+	for key, peers := range s.peers {
+		seen[key] = true
+
+		for _, peer := range peers {
+			seen[peer] = true
+		}
+	}
+
+	return slices.Sorted(maps.Keys(seen))
 }
 
 // newState builds the working copy a fold starts from, with the serials a
@@ -189,6 +215,7 @@ func (s *state) claim(keys []string, id ecs_view.ViewID) bool {
 		if over == nil {
 			over = map[ecs_view.ViewID]int{}
 			s.nets[key] = over
+			s.grew = true
 		}
 
 		if over[id] == 0 {

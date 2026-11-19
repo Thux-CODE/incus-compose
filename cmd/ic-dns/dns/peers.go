@@ -9,7 +9,6 @@ import (
 	"time"
 
 	incusapi "github.com/lxc/incus/v7/shared/api"
-	incusutil "github.com/lxc/incus/v7/shared/util"
 
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
@@ -28,13 +27,9 @@ const (
 // still fails it and leaves the held peering in place.
 const peerCallTimeout = 30 * time.Second
 
-// peerNetworkType is the only network type Incus peers.
-const peerNetworkType = "ovn"
-
-// peerReader is what reading the peering takes off the Incus connection.
+// peerReader is what reading the peering takes off the Incus connection: the
+// peers of one network, nothing else.
 type peerReader interface {
-	GetProjects(ctx context.Context) ([]incusapi.Project, error)
-	GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error)
 	GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error)
 }
 
@@ -42,20 +37,6 @@ type peerReader interface {
 type bounded struct {
 	r       peerReader
 	timeout time.Duration
-}
-
-func (b bounded) GetProjects(ctx context.Context) ([]incusapi.Project, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	return b.r.GetProjects(ctx)
-}
-
-func (b bounded) GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error) {
-	ctx, cancel := context.WithTimeout(ctx, b.timeout)
-	defer cancel()
-
-	return b.r.GetNetworks(ctx, project)
 }
 
 func (b bounded) GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error) {
@@ -73,72 +54,52 @@ var peerActions = []string{
 	incusapi.EventLifecycleNetworkPeerDeleted,
 }
 
-// readPeers is which served networks are peered with which, by NetworkKey,
-// sorted. A pair counts only when both sides were read and both say Created:
-// a side the certificate cannot read, or in a project this daemon does not
-// serve, is never read, so its pairs are dropped rather than taken on trust.
+// readPeers is which of these networks are peered with which, by NetworkKey,
+// sorted. The networks are the ones a name can be on - every network an
+// instance this daemon serves sits on - by the key of the project that owns
+// each; a peering between networks nothing sits on changes no answer, and the
+// first instance on one asks for a read that takes it in.
 //
-// A side Incus refuses or no longer has is skipped. Anything else fails the
-// whole read, so a daemon not answering cannot tear the peering down.
-func readPeers(ctx context.Context, r peerReader, serves func(*incusapi.Project) bool) (map[string][]string, error) {
-	projects, err := r.GetProjects(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("listing projects: %w", err)
-	}
-
-	// Every peer each served network names, by the key it names it with.
+// Only each network's own peer list is read: no project list, and no list of
+// a project's networks, which in the default project brings the host's
+// interfaces along and has Incus count what uses each of them (30 s against a
+// loaded member). A pair counts only when both sides were read and both say
+// Created, so a side outside these networks - in a project not served, or one
+// nothing sits on - is never taken on trust.
+//
+// A side Incus refuses, no longer has, or that cannot peer at all (a bridge)
+// is skipped. Anything else fails the whole read, so a daemon not answering
+// cannot tear the peering down.
+func readPeers(ctx context.Context, r peerReader, keys []string) (map[string][]string, error) {
+	// Every peer each network names, by the key it names it with.
 	says := map[string]map[string]bool{}
 
-	for i := range projects {
-		project := &projects[i]
-
-		if serves != nil && !serves(project) {
+	for _, from := range keys {
+		project, network, ok := strings.Cut(from, "/")
+		if !ok {
 			continue
 		}
 
-		// A project without networks of its own shares the default project's,
-		// which are read under the default project's own name.
-		if project.Name != iutil.DefaultProject && !incusutil.IsTrue(project.Config[iutil.FeaturesNetworks]) {
-			continue
-		}
-
-		networks, err := r.GetNetworks(ctx, project.Name)
+		peers, err := r.GetNetworkPeers(ctx, project, network)
 		if err != nil {
 			if refused(err) {
 				continue
 			}
 
-			return nil, fmt.Errorf("listing networks of %s: %w", project.Name, err)
+			return nil, fmt.Errorf("listing peers of %s: %w", from, err)
 		}
 
-		for _, network := range networks {
-			if !network.Managed || network.Type != peerNetworkType {
+		for _, peer := range peers {
+			to, ok := peerKey(peer)
+			if !ok || to == from {
 				continue
 			}
 
-			peers, err := r.GetNetworkPeers(ctx, project.Name, network.Name)
-			if err != nil {
-				if refused(err) {
-					continue
-				}
-
-				return nil, fmt.Errorf("listing peers of %s/%s: %w", project.Name, network.Name, err)
+			if says[from] == nil {
+				says[from] = map[string]bool{}
 			}
 
-			from := iutil.NetworkKey(project.Name, network.Name)
-
-			for _, peer := range peers {
-				to, ok := peerKey(peer)
-				if !ok || to == from {
-					continue
-				}
-
-				if says[from] == nil {
-					says[from] = map[string]bool{}
-				}
-
-				says[from][to] = true
-			}
+			says[from][to] = true
 		}
 	}
 
@@ -181,9 +142,10 @@ func peerKey(peer incusapi.NetworkPeer) (string, bool) {
 	return iutil.NetworkKey(peer.TargetProject, peer.TargetNetwork), true
 }
 
-// refused is Incus saying a side is not ours to read, or not there any more.
+// refused is Incus saying a side is not ours to read, not there any more, or
+// of a type that cannot peer (400, "does not support peering").
 func refused(err error) bool {
-	return incusapi.StatusErrorCheck(err, http.StatusForbidden, http.StatusNotFound)
+	return incusapi.StatusErrorCheck(err, http.StatusBadRequest, http.StatusForbidden, http.StatusNotFound)
 }
 
 // peeringMoves says whether an event can have changed the peering: a peer
@@ -218,17 +180,74 @@ func describePeers(peers map[string][]string) string {
 	return strings.Join(pairs, " ")
 }
 
-// askPeers asks for the peering to be read again. One pending ask is enough:
-// a read starting after it sees whatever caused the second.
+// peerRead is one read of the peering, and the networks it read.
+type peerRead struct {
+	peers map[string][]string
+	keys  []string
+}
+
+// askPeers asks for the peering to be read again, of every network a name is
+// on now and every one the held peering names. One pending ask is enough, the
+// newest: it names every network the older one did that still matters.
+// Run's goroutine alone, since it reads the state.
 func (p *Plugin) askPeers() {
 	if !p.cfg.PeerViews {
 		return
 	}
 
+	keys := p.state.peerTargets()
+
 	select {
-	case p.peerAsk <- struct{}{}:
+	case <-p.peerAsk:
 	default:
 	}
+
+	p.peerAsk <- keys
+}
+
+// askIfGrew asks for a read where a write put a name on a network nothing was
+// on: its peering was not read, since it could change no answer until now.
+func (p *Plugin) askIfGrew() {
+	if !p.state.grew {
+		return
+	}
+
+	p.state.grew = false
+
+	p.askPeers()
+}
+
+// peeringKnown reports whether the last read that landed covered every network
+// a name is on now.
+func (p *Plugin) peeringKnown() bool {
+	if p.peerCovered == nil {
+		return false
+	}
+
+	for key := range p.state.nets {
+		if !p.peerCovered[key] {
+			return false
+		}
+	}
+
+	return true
+}
+
+// settlePeering reports whether the peering lets the view turn warm, and
+// latches the first time it does: until then a round waits on it.
+func (p *Plugin) settlePeering() bool {
+	if p.peersRead.Load() {
+		return true
+	}
+
+	if !p.peeringKnown() {
+		return false
+	}
+
+	p.peersRead.Store(true)
+	p.logger.Info("the network peering has been read", "networks", len(p.peerCovered))
+
+	return true
 }
 
 // readPeerLoop reads the peering whenever asked, off the fold goroutine, and
@@ -236,7 +255,10 @@ func (p *Plugin) askPeers() {
 // is tried again after a backoff that doubles up to peerRetryLongest; an ask
 // arriving meanwhile reads at once.
 func (p *Plugin) readPeerLoop(ctx context.Context) {
-	var retry <-chan time.Time
+	var (
+		retry <-chan time.Time
+		keys  []string
+	)
 
 	backoff := p.peerRetry[0]
 
@@ -244,13 +266,15 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case <-p.peerAsk:
+		case keys = <-p.peerAsk:
 		case <-retry:
 		}
 
 		retry = nil
 
-		peers, err := readPeers(ctx, bounded{r: p.peerReader, timeout: p.peerCallTimeout}, p.cfg.Project)
+		start := time.Now()
+
+		peers, err := readPeers(ctx, bounded{r: p.peerReader, timeout: p.peerCallTimeout}, keys)
 		if err != nil {
 			if ctx.Err() != nil {
 				return
@@ -266,8 +290,10 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 
 		backoff = p.peerRetry[0]
 
+		p.logger.Debug("read the network peering", "networks", len(keys), "took", time.Since(start))
+
 		select {
-		case p.peerIn <- peers:
+		case p.peerIn <- peerRead{peers: peers, keys: keys}:
 		case <-ctx.Done():
 			return
 		}
@@ -284,10 +310,17 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 // change goes out at once, warm or not: a stale peer half is no better than a
 // stale record, and the serials are safe either way, since a cold publish
 // steps none and forgets none.
-func (p *Plugin) peered(peers map[string][]string) {
-	// The first read is what a round that ended before it was waiting on, the
-	// same table as the one restored included.
-	defer p.firstPeering(!p.peersRead.Swap(true))
+func (p *Plugin) peered(read peerRead) {
+	peers := read.peers
+
+	p.peerCovered = make(map[string]bool, len(read.keys))
+	for _, key := range read.keys {
+		p.peerCovered[key] = true
+	}
+
+	// A read covering every network is what a round that ended before it was
+	// waiting on, the same table as the one restored included.
+	defer p.warmOnPeering()
 
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if !changed {
@@ -306,20 +339,15 @@ func (p *Plugin) peered(peers map[string][]string) {
 
 	// Whatever was pending goes out with it, so the snapshot is one fold.
 	p.state.write(p.cfg.TTL)
+	p.askIfGrew()
 	p.publish()
 }
 
-// firstPeering turns the view warm where a round ended while the peering had
+// warmOnPeering turns the view warm where a round ended while the peering had
 // not been read yet, now that it has - after what the read moved was
 // published, so warm never answers from the table before it.
-func (p *Plugin) firstPeering(first bool) {
-	if !first {
-		return
-	}
-
-	p.logger.Info("the network peering has been read")
-
-	if !p.state.fresh {
+func (p *Plugin) warmOnPeering() {
+	if p.peersRead.Load() || !p.state.fresh || !p.settlePeering() {
 		return
 	}
 

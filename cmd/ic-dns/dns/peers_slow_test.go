@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
 // TestASlowReadIsNotCutShort pins the deadline per call: every call slower
@@ -20,10 +22,10 @@ func TestASlowReadIsNotCutShort(t *testing.T) {
 
 	start := time.Now()
 
-	got, err := readPeers(t.Context(), bounded{r: f, timeout: 100 * time.Millisecond}, nil)
+	got, err := readPeers(t.Context(), bounded{r: f, timeout: 50 * time.Millisecond}, hubKeys())
 	require.NoError(t, err)
 	assert.Equal(t, hubPeers(), got)
-	assert.Greater(t, time.Since(start), 100*time.Millisecond, "the read as a whole outlasted one call's deadline")
+	assert.Greater(t, time.Since(start), 50*time.Millisecond, "the read as a whole outlasted one call's deadline")
 }
 
 // TestACallPastItsDeadlineFailsTheRead pins the other half: one call that does
@@ -34,7 +36,7 @@ func TestACallPastItsDeadlineFailsTheRead(t *testing.T) {
 	f := hubIncus()
 	f.delay = 80 * time.Millisecond
 
-	_, err := readPeers(t.Context(), bounded{r: f, timeout: 40 * time.Millisecond}, nil)
+	_, err := readPeers(t.Context(), bounded{r: f, timeout: 40 * time.Millisecond}, hubKeys())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }
@@ -47,6 +49,7 @@ func TestPluginReadsThroughASlowIncus(t *testing.T) {
 	f.delay = 25 * time.Millisecond
 
 	r := runPeeredWith(t, f, func(p *Plugin) { p.peerCallTimeout = 60 * time.Millisecond })
+	r.feed(t, append(hubFleetEvents(false), event(iutil.ActionSweepEnd, "", ""))...)
 
 	require.Eventually(t, func() bool { return r.p.PeeringReady() == nil }, 3*time.Second, 10*time.Millisecond)
 

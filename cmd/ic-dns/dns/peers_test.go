@@ -413,18 +413,18 @@ func TestEverythingLeavingEmptiesThePeeredTrees(t *testing.T) {
 	}
 }
 
-// fakePeers is an Incus that answers the three reads the peering takes, and can
-// be changed under a running plugin.
+// fakePeers is an Incus that answers the one read the peering takes, a
+// network's peers, and can be changed under a running plugin.
 type fakePeers struct {
 	mu sync.Mutex
 
-	projects []incusapi.Project
-	networks map[string][]incusapi.Network
-	peers    map[string][]incusapi.NetworkPeer
+	peers map[string][]incusapi.NetworkPeer
 
-	// fail is what a read of one project's networks, or one network's peers,
-	// answers instead.
+	// fail is what a read of one network's peers answers instead.
 	fail map[string]error
+
+	// asked is every network whose peers were read, in order.
+	asked []string
 
 	// down is what every read answers instead, a daemon that stopped answering.
 	down error
@@ -454,42 +454,25 @@ func (f *fakePeers) slow(ctx context.Context) error {
 	}
 }
 
-func (f *fakePeers) GetProjects(ctx context.Context) ([]incusapi.Project, error) {
-	err := f.slow(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	f.reads++
-
-	if f.down != nil {
-		return nil, f.down
-	}
-
-	return slices.Clone(f.projects), nil
-}
-
-func (f *fakePeers) GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error) {
-	err := f.slow(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
-	err = f.fail[project]
-	if err != nil {
-		return nil, err
-	}
-
-	return slices.Clone(f.networks[project]), nil
-}
-
+// GetNetworkPeers counts a read of the whole peering where it reads the hub,
+// which every read of the hub fixture does first.
 func (f *fakePeers) GetNetworkPeers(ctx context.Context, project, network string) ([]incusapi.NetworkPeer, error) {
+	key := iutil.NetworkKey(project, network)
+
+	f.mu.Lock()
+	f.asked = append(f.asked, key)
+
+	if key == hubNet {
+		f.reads++
+	}
+
+	down := f.down
+	f.mu.Unlock()
+
+	if down != nil {
+		return nil, down
+	}
+
 	err := f.slow(ctx)
 	if err != nil {
 		return nil, err
@@ -497,8 +480,6 @@ func (f *fakePeers) GetNetworkPeers(ctx context.Context, project, network string
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-
-	key := iutil.NetworkKey(project, network)
 
 	err = f.fail[key]
 	if err != nil {
@@ -515,32 +496,10 @@ func peer(name, project, network, status string) incusapi.NetworkPeer {
 	}
 }
 
-// ovn is one managed OVN network.
-func ovn(name string) incusapi.Network {
-	return incusapi.Network{Name: name, Managed: true, Type: "ovn"}
-}
-
-// project is one project, with networks of its own or not.
-func project(name string, ownNetworks bool) incusapi.Project {
-	p := incusapi.Project{Name: name}
-	p.Config = map[string]string{}
-
-	if ownNetworks {
-		p.Config[iutil.FeaturesNetworks] = "true"
-	}
-
-	return p
-}
-
-// hubIncus is the hub topology as Incus would list it, both peerings up.
+// hubIncus is the hub topology as Incus would list it, both peerings up. The
+// uplink bridge cannot peer at all, and says so as Incus does.
 func hubIncus() *fakePeers {
 	return &fakePeers{
-		projects: []incusapi.Project{project("default", false), project("pvlab1", true), project("pvlab2", true)},
-		networks: map[string][]incusapi.Network{
-			"default": {ovn("incus-ovn"), {Name: "incus-uplink", Managed: true, Type: "bridge"}},
-			"pvlab1":  {ovn("app")},
-			"pvlab2":  {ovn("app")},
-		},
 		peers: map[string][]incusapi.NetworkPeer{
 			hubNet: {
 				peer("to-pvlab1", "pvlab1", "app", incusapi.NetworkStatusCreated),
@@ -549,9 +508,14 @@ func hubIncus() *fakePeers {
 			app1: {peer("to-ovn", "default", "incus-ovn", incusapi.NetworkStatusCreated)},
 			app2: {peer("to-ovn", "default", "incus-ovn", incusapi.NetworkStatusCreated)},
 		},
-		fail: map[string]error{},
+		fail: map[string]error{
+			"default/incus-uplink": incusapi.StatusErrorf(http.StatusBadRequest, `Network driver "bridge" does not support peering`),
+		},
 	}
 }
+
+// hubKeys is the networks of the hub fixture, as the fold would ask for them.
+func hubKeys() []string { return []string{hubNet, app1, app2} }
 
 func TestReadPeers(t *testing.T) {
 	t.Parallel()
@@ -561,7 +525,7 @@ func TestReadPeers(t *testing.T) {
 	cases := []struct {
 		name   string
 		change func(f *fakePeers)
-		serves func(*incusapi.Project) bool
+		keys   []string
 		want   map[string][]string
 		err    bool
 	}{
@@ -582,15 +546,18 @@ func TestReadPeers(t *testing.T) {
 			want:   onlyApp1(),
 		},
 		{
-			name: "a project not served is never read",
-			serves: func(p *incusapi.Project) bool {
-				return p.Name != "pvlab2"
-			},
+			name: "a network not asked for is never read, so its pairs are dropped",
+			keys: []string{hubNet, app1},
 			want: onlyApp1(),
 		},
 		{
+			name: "a network that cannot peer is skipped, not fatal",
+			keys: []string{hubNet, "default/incus-uplink", app1, app2},
+			want: hubPeers(),
+		},
+		{
 			name:   "a side the certificate may not read is dropped, not fatal",
-			change: func(f *fakePeers) { f.fail["pvlab2"] = refusedErr },
+			change: func(f *fakePeers) { f.fail[app2] = refusedErr },
 			want:   onlyApp1(),
 		},
 		{
@@ -604,14 +571,17 @@ func TestReadPeers(t *testing.T) {
 			err:    true,
 		},
 		{
-			name: "a project sharing the default networks is not read under its own name",
+			name: "a peer towards a network not asked for is dropped, one-sided",
 			change: func(f *fakePeers) {
-				f.projects = append(f.projects, project("shared", false))
-				f.networks["shared"] = []incusapi.Network{ovn("incus-ovn")}
-				f.peers["shared/incus-ovn"] = []incusapi.NetworkPeer{peer("x", "pvlab1", "app", incusapi.NetworkStatusCreated)}
-				f.peers[app1] = append(f.peers[app1], peer("y", "shared", "incus-ovn", incusapi.NetworkStatusCreated))
+				f.peers["other/app"] = []incusapi.NetworkPeer{peer("x", "pvlab1", "app", incusapi.NetworkStatusCreated)}
+				f.peers[app1] = append(f.peers[app1], peer("y", "other", "app", incusapi.NetworkStatusCreated))
 			},
 			want: hubPeers(),
+		},
+		{
+			name: "nothing asked for reads nothing",
+			keys: []string{},
+			want: map[string][]string{},
 		},
 		{
 			name: "a peer towards an integration points at no network",
@@ -634,7 +604,12 @@ func TestReadPeers(t *testing.T) {
 				c.change(f)
 			}
 
-			got, err := readPeers(t.Context(), f, c.serves)
+			keys := c.keys
+			if keys == nil {
+				keys = hubKeys()
+			}
+
+			got, err := readPeers(t.Context(), f, keys)
 			if c.err {
 				require.Error(t, err)
 
@@ -822,9 +797,8 @@ func TestColdPeeringKeepsTheSerials(t *testing.T) {
 	f := hubIncus()
 	r := runPeered(t, f, Suffix("example"), ColdMemory(seed))
 
-	// The first read lands on an empty fleet, ahead of everything.
-	require.Eventually(t, func() bool { return readsOf(f) >= 1 }, 2*time.Second, 5*time.Millisecond)
-
+	// The first read, of no network yet, lands on an empty fleet ahead of
+	// everything.
 	time.Sleep(50 * time.Millisecond)
 
 	r.feed(t,

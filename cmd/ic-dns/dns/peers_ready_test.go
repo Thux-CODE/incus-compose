@@ -80,13 +80,17 @@ func TestTheRoundTurnsWarmWhenThePeeringCameFirst(t *testing.T) {
 
 	r := runPeered(t, f, Suffix("incus"), TTL(30))
 
-	require.Eventually(t, func() bool { return r.p.PeeringReady() == nil }, 2*time.Second, 5*time.Millisecond)
+	// The fleet lands, and the networks it put names on are read.
+	r.feed(t, hubFleetEvents(false)...)
+	answersWithin(t, r, "django-1.pvlab2.incus.", "10.146.11.6", dns.RcodeSuccess, "peered before the round")
 	assert.False(t, r.p.view.Ready(), "a read is not a round")
+	assert.Error(t, r.p.PeeringReady(), "nor is /ready")
 
-	r.feed(t, append(hubFleetEvents(false), event(iutil.ActionSweepEnd, "", ""))...)
+	r.feed(t, event(iutil.ActionSweepEnd, "", ""))
 
 	answersWithin(t, r, "nobody.default.incus.", "10.146.11.6", dns.RcodeNameError, "warm at the round")
 	assert.True(t, r.p.view.Ready())
+	assert.NoError(t, r.p.PeeringReady())
 
 	r.stop(t)
 }

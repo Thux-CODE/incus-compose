@@ -25,16 +25,18 @@ form.
   answered from the networks its own network is peered with
   (`incus network peer`, `Created` on both sides, one hop, never transitive),
   names and PTRs alike. The peering is read at start and followed on
-  `network-peer-*` events without a restart; a side the certificate cannot read,
-  or in a project not served, is ignored. Peer answers count as `result="peer"`.
+  `network-peer-*` events without a restart, one peer list per network a served
+  instance sits on (no project or network listing), each call with its own
+  deadline; a side the certificate cannot read, in a project not served, or of a
+  network that cannot peer is ignored. Peer answers count as `result="peer"`.
   The peering is kept in the cold store with the zone serials, so after a
   restart the replayed names answer through their peers at once rather than
-  after a round of reads per served project; the first read that lands corrects
-  it, and goes out at once. Until that first read the server is not warm, even
-  after a complete round: misses stay `SERVFAIL` instead of `NXDOMAIN` and
-  `/ready` answers 503 saying it waits on the peering, so a client that sees a
-  name only through a peer is never told it does not exist. Off by default. (by
-  @sandroden)
+  after a round of reads; the first read that lands corrects it, and goes out at
+  once. Until a read has covered every network a name is on the server is not
+  warm, even after a complete round: misses stay `SERVFAIL` instead of
+  `NXDOMAIN` and `/ready` answers 503 saying it waits on the peering, so a
+  client that sees a name only through a peer is never told it does not exist.
+  Off by default. (by @sandroden)
 
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
