@@ -32,6 +32,11 @@ incus-compose exec [options] SERVICE COMMAND [ARGS...]
 | `-g`, `--group`   | Run the command as this group (default: the instance's GID)            |
 | `-w`, `--workdir` | Path to workdir directory for this command                             |
 
+As in `docker compose`, `--index N` is the replica's number: it picks
+`<service>-N`. The default, `0`, picks the replica with the lowest index that
+exists, which need not be `<service>-1`: `up` keeps a service's replicas on the
+indexes they have. `cp` and `port` read `--index` the same way.
+
 `exec` shells out to your local `incus` client and targets the instance via
 `INCUS_PROJECT`. It uses your local Incus remote configuration (`incus remote`),
 not incus-compose's own connection settings.

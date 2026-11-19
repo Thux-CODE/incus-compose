@@ -87,33 +87,42 @@ func serviceInstance(ctx context.Context, c *client.Client, p *project.Project, 
 		return nil, errLogged.Wrap(client.ErrNotFound.WithText("service not found"))
 	}
 
-	instances := []*client.Instance{}
+	if index < 0 {
+		c.LogError("The index cannot be negative", "index", index)
+		return nil, errLogged.Wrap(client.ErrInvalidFormat.WithText("negative index"))
+	}
+
+	// As in docker compose, an index is a replica's number, the N of
+	// `<service>-N`, and 0 the lowest that exists: replicas keep the numbers
+	// they were created with, which need not run from 1.
+	name := client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1)
+
+	var failed error
+
 	for _, r := range resources {
-		i, ok := r.(*client.Instance)
-		if ok && i.ServiceName() == service {
-			instances = append(instances, i)
+		inst, ok := r.(*client.Instance)
+		if !ok || inst.ServiceName() != service || index > 0 && inst.IncusName() != name {
+			continue
+		}
+
+		err = client.RunAction(ctx, inst, client.ActionEnsure)
+		if err == nil {
+			return inst, nil
+		}
+
+		if !errors.Is(err, client.ErrNotFound) {
+			failed = errors.Join(failed, err)
 		}
 	}
 
-	if len(instances) == 0 {
-		c.LogError("No instance for service", "service", service)
-		return nil, errLogged.Wrap(client.ErrNotFound.WithText("service instance not found"))
+	if failed != nil {
+		c.LogError("Failed to ensure the instance", "error", failed)
+		return nil, errLogged.Wrap(fmt.Errorf("failed to ensure the instance: %w", failed))
 	}
 
-	if index < 0 || index >= len(instances) {
-		c.LogError("Not enough instances", "have", len(instances), "expected", index)
-		return nil, errLogged.Wrap(client.ErrNotFound.WithText("not enough instances"))
-	}
+	c.LogError("No instance for service", "service", service, "index", index)
 
-	inst := instances[index]
-
-	err = client.RunAction(ctx, inst, client.ActionEnsure)
-	if err != nil {
-		c.LogError("Failed to ensure the instance", "error", err)
-		return nil, errLogged.Wrap(fmt.Errorf("failed to ensure the instance: %w", err))
-	}
-
-	return inst, nil
+	return nil, errLogged.Wrap(client.ErrNotFound.WithText("service instance not found"))
 }
 
 type filterResourcesArgs struct {

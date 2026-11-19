@@ -73,6 +73,11 @@ form.
   kept, and a replica recreated for an outdated definition keeps its name.
   `logs` follows the replicas that exist. (by @sandroden)
 
+- `exec`, `cp` and `port --index N` pick `<service>-N`, the replica's number, as
+  `docker compose` does, and `0` (the default) the replica with the lowest index
+  that exists. `--index` was a position from 0, so `--index 1` picked
+  `<service>-2`. (by @sandroden)
+
 - `ic-healthd` sets `user.healthcheck.status` to `starting` as soon as an
   instance with a healthcheck starts, restarts or resumes, as docker does,
   instead of leaving the previous run's `healthy` or `stopped` until the first
