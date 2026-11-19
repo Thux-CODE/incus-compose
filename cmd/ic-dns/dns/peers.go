@@ -217,9 +217,15 @@ func (p *Plugin) askIfGrew() {
 	p.askPeers()
 }
 
-// peeringKnown reports whether the last read that landed covered every network
-// a name is on now.
+// peeringKnown reports whether the peering held is one to turn warm on: one
+// restored from the cold store, which counts until a read corrects it, or a
+// read that landed and covered every network a name is on now. A slow or
+// failing read never keeps a replica that restored its peering cold.
 func (p *Plugin) peeringKnown() bool {
+	if p.peersRestored {
+		return true
+	}
+
 	if p.peerCovered == nil {
 		return false
 	}
@@ -245,7 +251,12 @@ func (p *Plugin) settlePeering() bool {
 	}
 
 	p.peersRead.Store(true)
-	p.logger.Info("the network peering has been read", "networks", len(p.peerCovered))
+
+	if p.peerCovered == nil {
+		p.logger.Info("warm on the network peering restored from the cold store, until a read lands")
+	} else {
+		p.logger.Info("the network peering has been read", "networks", len(p.peerCovered))
+	}
 
 	return true
 }

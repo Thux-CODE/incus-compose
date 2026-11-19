@@ -152,6 +152,10 @@ type Plugin struct {
 	// one has. Run's goroutine alone.
 	peerCovered map[string]bool
 
+	// peersRestored is a peering having come back from the cold store, which
+	// counts as known until a read lands. Run's goroutine alone.
+	peersRestored bool
+
 	// peerRetry is the backoff after a failed read, first and longest.
 	peerRetry [2]time.Duration
 
@@ -411,6 +415,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// replayed records themselves.
 	if p.cfg.PeerViews && len(peers) > 0 {
 		p.state.setPeers(peers, p.cfg.TTL)
+		p.peersRestored = true
 		p.logger.Info("restored the network peering from the cold store", "peers", describePeers(peers))
 	}
 
