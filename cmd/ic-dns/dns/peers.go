@@ -252,9 +252,13 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 // peered takes one read of the peering on the fold goroutine, and publishes
 // at once where it rewrote a name: a peering is not a burst worth waiting on.
 //
-// Never before the first round: until then the fleet is a replay off disk, and
-// publishing it would sweep every zone the replay has not reached yet - and the
-// serial it was published under with it. The round publishes what this wrote.
+// Never before the first publish: a read landing ahead of the replay off disk,
+// or in the middle of it, would publish a fleet half replayed. The publish
+// that folds the replay carries what this wrote. After it - a replay under the
+// peering the cold store kept, corrected by the first read that lands - a
+// change goes out at once, warm or not: a stale peer half is no better than a
+// stale record, and the serials are safe either way, since a cold publish
+// steps none and forgets none.
 func (p *Plugin) peered(peers map[string][]string) {
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if !changed {
@@ -263,7 +267,11 @@ func (p *Plugin) peered(peers map[string][]string) {
 
 	p.logger.Info("network peering changed", "peers", describePeers(peers))
 
-	if !touched || !p.swept {
+	if !touched || !p.published {
+		// Nothing goes out, but the next start replays under this peering:
+		// the serials stored with it are the ones last published, unchanged.
+		p.storeCold()
+
 		return
 	}
 

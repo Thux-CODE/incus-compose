@@ -767,7 +767,7 @@ func readsOf(f *fakePeers) int {
 func TestColdPeeringKeepsTheSerials(t *testing.T) {
 	const zone = "shop.example."
 
-	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}})
+	seed, err := encodeCold(map[string]zoneSerial{zone: {Serial: 7}}, nil)
 	require.NoError(t, err)
 
 	f := hubIncus()
@@ -793,7 +793,7 @@ func TestColdPeeringKeepsTheSerials(t *testing.T) {
 	assert.Equal(t, uint32(8), r.p.state.serials[zone].Serial,
 		"the replay claimed nothing and the warm change claimed once")
 
-	back, err := decodeCold(r.p.cold.held)
+	back, _, err := decodeCold(r.p.cold.held)
 	require.NoError(t, err)
 	assert.Equal(t, uint32(8), back[zone].Serial)
 }

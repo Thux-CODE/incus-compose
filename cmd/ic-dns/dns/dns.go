@@ -149,9 +149,10 @@ type Plugin struct {
 	// peerRetry is the backoff after a failed read, first and longest.
 	peerRetry [2]time.Duration
 
-	// swept is a first round having ended: what is held was read off Incus,
-	// not replayed off disk. Run's goroutine alone.
-	swept bool
+	// published is a snapshot having gone out in this run: the replay off disk,
+	// or the first round, has been folded and published whole at least once.
+	// Run's goroutine alone.
+	published bool
 
 	// state is everything folding owns - what is held, what has arrived, and the
 	// trees being patched. Run's goroutine alone, never Handle's caller.
@@ -380,7 +381,18 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 	// What each zone was published under, so a serial never goes backwards. The
 	// records themselves are replayed onto this plugin by the enricher.
-	p.state = newState(p.cold.load())
+	serials, peers := p.cold.load()
+	p.state = newState(serials)
+
+	// And the peering they were published under, so the replay writes every
+	// peer half as it lands instead of once the peering has been read again,
+	// a round of reads per served project later. The read corrects it, and
+	// until it has landed what this answers through a peer is as good as the
+	// replayed records themselves.
+	if p.cfg.PeerViews && len(peers) > 0 {
+		p.state.setPeers(peers, p.cfg.TTL)
+		p.logger.Info("restored the network peering from the cold store", "peers", describePeers(peers))
+	}
 
 	loopCtx, stopLoop := context.WithCancelCause(ctx)
 
@@ -594,8 +606,6 @@ func (p *Plugin) fold(ev *iutil.Event) {
 // The window is flushed rather than published beside, or the end of a round
 // publishes twice.
 func (p *Plugin) rounded() {
-	p.swept = true
-
 	p.state.write(p.cfg.TTL)
 	p.publish()
 
@@ -626,9 +636,23 @@ func (p *Plugin) publish() {
 	p.view.Replace(snap)
 	p.xfr.Replace(snap)
 
-	// Encoded on this goroutine, so what crosses to the writer is a finished
-	// []byte and it cannot reach into live state.
-	b, err := encodeCold(p.state.serials)
+	p.published = true
+
+	p.storeCold()
+}
+
+// storeCold hands what a restart needs to the store: the serials published
+// under and, where it is followed, the peering. Encoded on this goroutine, so
+// what crosses to the writer is a finished []byte and it cannot reach into
+// live state.
+func (p *Plugin) storeCold() {
+	// A run without the flag holds no peering worth restoring.
+	var peers map[string][]string
+	if p.cfg.PeerViews {
+		peers = p.state.peers
+	}
+
+	b, err := encodeCold(p.state.serials, peers)
 	if err != nil {
 		p.logger.Warn("encoding the cold store", "err", err)
 

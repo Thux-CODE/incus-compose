@@ -20,13 +20,24 @@ const coldFile = "cold.json"
 // coldState is the on-disk form. Explicit types with explicit tags, because the
 // file outlives the process that wrote it and a Go rename must not reach it.
 //
-// Serials are the whole of it. Records come back from the enricher's own store,
-// in one read; a serial comes back from nowhere, and a secondary reading one
-// going backwards re-transfers on every restart of this process.
+// Serials and, with --peer-views, the peering. Records come back from the
+// enricher's own store, in one read; a serial comes back from nowhere, and a
+// secondary reading one going backwards re-transfers on every restart of this
+// process. Nor does the peering come back with the records: read again it
+// takes a round of reads per served project, and until it lands the replayed
+// names have no peer half, so a querier that sees them only through a peer
+// would be answered nothing while every other is answered from the store.
+//
+// Peers is additive: a file without it loads with no peering, and a build that
+// does not know it ignores it, so the version does not move.
 type coldState struct {
 	Version int `json:"version"`
 
 	Serials map[string]zoneSerial `json:"serials"`
+
+	// Peers is which network each network is peered with, as setPeers takes
+	// it. Absent or empty is no peering.
+	Peers map[string][]string `json:"peers,omitempty"`
 }
 
 type coldStore struct {
@@ -166,9 +177,9 @@ func (c *coldStore) write(b []byte) {
 
 // load reads what was published last. No usable file is not an error: a first
 // start, a wiped directory and another version all mean start with none.
-func (c *coldStore) load() map[string]zoneSerial {
+func (c *coldStore) load() (map[string]zoneSerial, map[string][]string) {
 	if !c.enabled() {
-		return nil
+		return nil, nil
 	}
 
 	if c.mem {
@@ -176,12 +187,12 @@ func (c *coldStore) load() map[string]zoneSerial {
 		held := c.held
 		c.mu.Unlock()
 
-		serials, err := decodeCold(held)
+		serials, peers, err := decodeCold(held)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 
-		return serials
+		return serials, peers
 	}
 
 	b, err := os.ReadFile(c.path)
@@ -190,37 +201,38 @@ func (c *coldStore) load() map[string]zoneSerial {
 			c.logger.Warn("reading the cold store, starting cold", "path", c.path, "err", err)
 		}
 
-		return nil
+		return nil, nil
 	}
 
-	serials, err := decodeCold(b)
+	serials, peers, err := decodeCold(b)
 	if err != nil {
 		c.logger.Warn("reading the cold store, starting cold", "path", c.path, "err", err)
 
-		return nil
+		return nil, nil
 	}
 
-	return serials
+	return serials, peers
 }
 
-// encodeCold renders the serials each zone was last published under.
-func encodeCold(serials map[string]zoneSerial) ([]byte, error) {
-	return json.Marshal(coldState{Version: coldVersion, Serials: serials})
+// encodeCold renders the serials each zone was last published under, and the
+// peering it was published under; nil peers stores none.
+func encodeCold(serials map[string]zoneSerial, peers map[string][]string) ([]byte, error) {
+	return json.Marshal(coldState{Version: coldVersion, Serials: serials, Peers: peers})
 }
 
 // decodeCold reads a store back. A file of another version is not an error and
 // not a migration either: it is ignored, and the fleet is read again.
-func decodeCold(b []byte) (map[string]zoneSerial, error) {
+func decodeCold(b []byte) (map[string]zoneSerial, map[string][]string, error) {
 	var state coldState
 
 	err := json.Unmarshal(b, &state)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if state.Version != coldVersion {
-		return nil, nil
+		return nil, nil, nil
 	}
 
-	return state.Serials, nil
+	return state.Serials, state.Peers, nil
 }

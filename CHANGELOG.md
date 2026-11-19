@@ -27,7 +27,10 @@ form.
   names and PTRs alike. The peering is read at start and followed on
   `network-peer-*` events without a restart; a side the certificate cannot read,
   or in a project not served, is ignored. Peer answers count as `result="peer"`.
-  Off by default. (by @sandroden)
+  The peering is kept in the cold store with the zone serials, so after a
+  restart the replayed names answer through their peers at once rather than
+  after a round of reads per served project; the first read that lands corrects
+  it, and goes out at once. Off by default. (by @sandroden)
 
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
