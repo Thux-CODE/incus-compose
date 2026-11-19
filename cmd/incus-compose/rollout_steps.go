@@ -24,8 +24,9 @@ const rolloutHealthReads = 3
 // rolloutOps is what a rollout does to the replicas of one service, by index.
 type rolloutOps interface {
 	// create creates the replica from the compose file and starts it, without
-	// waiting for its healthcheck.
-	create(ctx context.Context, index int) error
+	// waiting for its healthcheck. The first one a rollout creates runs the
+	// service's pre_start hooks that are not per replica.
+	create(ctx context.Context, index int, first bool) error
 
 	// health returns the replica's user.healthcheck.status and whether it runs.
 	health(ctx context.Context, index int) (string, bool, error)
@@ -93,18 +94,24 @@ func rolloutDescribe(plan rolloutPlan) {
 		noun = "replica"
 	}
 
-	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; up to %d creates, each new replica healthy within %s, each old one kept %s after its drain\n",
-		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), plan.Replicas+1, plan.HealthTimeout, plan.Grace)
+	creates := "creates"
+	if plan.Replicas == 1 {
+		creates = "create"
+	}
+
+	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; %d %s, each new replica healthy within %s, each old one kept %s after its drain\n",
+		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), plan.Replicas, creates, plan.HealthTimeout, plan.Grace)
 }
 
 // rollout replaces every replica of a service with one created from the
 // compose file, one at a time and new before old: a replica is retired only
 // once the one that takes its place reports healthy.
 //
-// The names stay `<service>-1..N`, which is what `up` reconciles to. A rollout
-// has one name more to work with, N+1, so it takes N+1 creates: the first new
-// replica is the spare N+1, each one after it takes the name of the old one
-// retired before it, and the spare goes last.
+// A service is its replicas, whatever their indexes, which is also how `up`
+// reconciles it. So a new replica takes the lowest free index, and the old one
+// it replaces leaves its index free for the next: N creates for N replicas,
+// and with one replica `web-1` becomes `web-2`, and `web-1` again on the next
+// rollout.
 //
 // A new replica that fails, or a rollout interrupted before it is healthy,
 // is taken away again and leaves the old ones as they were. A rollout run
@@ -119,9 +126,8 @@ func rollout(ctx context.Context, ops rolloutOps, plan rolloutPlan) error {
 	if err != nil {
 		_, _ = fmt.Fprintf(plan.Out, "%s: stopped, left %s\n", plan.Service, rolloutState(plan, slots))
 
-		// `up` reconciles by index, and would recreate what has moved.
-		if !rolloutDeclared(slots, plan.Replicas) {
-			_, _ = fmt.Fprintf(plan.Out, "%s: run `rollout %s` again to finish, not `up`\n", plan.Service, plan.Service)
+		if len(rolloutOld(slots)) > 0 {
+			_, _ = fmt.Fprintf(plan.Out, "%s: run `rollout %s` again to replace the old replicas\n", plan.Service, plan.Service)
 		}
 
 		return err
@@ -151,8 +157,11 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 		_, _ = fmt.Fprintf(plan.Out, "%s: drained by an earlier rollout, put back\n", plan.Name(r.index))
 	}
 
+	first := true
+
 	for {
-		if rolloutDone(slots, n) {
+		old := rolloutOld(slots)
+		if len(old) == 0 && len(slots) >= n {
 			return nil
 		}
 
@@ -161,10 +170,9 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 			return fmt.Errorf("interrupted: %w", err)
 		}
 
-		index, ok := rolloutFree(slots, n)
-		if !ok {
-			// Every name up to the spare is taken, by an earlier run cut short:
-			// one has to go before there is a name to create.
+		if len(slots) > n {
+			// One replica more than declared, left by an earlier run cut short:
+			// one goes before another is created, so there are never two more.
 			err := rolloutGiveBack(ctx, ops, plan, slots)
 			if err != nil {
 				return err
@@ -173,14 +181,18 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 			continue
 		}
 
+		index := rolloutFree(slots)
+
 		_, _ = fmt.Fprintf(plan.Out, "%s: creating\n", plan.Name(index))
 
 		slots[index] = &replica{index: index, fresh: true, running: true}
 
-		err = ops.create(ctx, index)
+		err = ops.create(ctx, index, first)
 		if err == nil {
 			err = rolloutWaitHealthy(ctx, ops, plan, index)
 		}
+
+		first = false
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -202,10 +214,12 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 			return err
 		}
 
-		victim, ok := rolloutVictim(slots, n, index, nil)
-		if !ok {
+		// Fewer replicas than declared were there: this one adds to them.
+		if len(slots) <= n {
 			continue
 		}
+
+		victim := rolloutVictim(slots, nil)
 
 		err = rolloutRetire(ctx, ops, plan, slots[victim])
 		if err != nil {
@@ -216,67 +230,33 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	}
 }
 
-// rolloutDeclared reports whether the replicas are the names `up` expects,
-// 1 to n, whatever their age.
-func rolloutDeclared(slots map[int]*replica, n int) bool {
-	for i := 1; i <= n; i++ {
-		_, ok := slots[i]
-		if !ok {
-			return false
-		}
-	}
-
-	return len(slots) == n
-}
-
-// rolloutDone reports whether every name up to n holds a new replica and the
-// spare is gone.
-func rolloutDone(slots map[int]*replica, n int) bool {
-	for i := 1; i <= n; i++ {
-		r, ok := slots[i]
-		if !ok || !r.fresh {
-			return false
-		}
-	}
-
-	_, spare := slots[n+1]
-
-	return !spare
-}
-
-// rolloutFree returns the lowest free name up to n, else the spare n+1.
-func rolloutFree(slots map[int]*replica, n int) (int, bool) {
-	for i := 1; i <= n+1; i++ {
-		_, taken := slots[i]
-		if !taken {
-			return i, true
-		}
-	}
-
-	return 0, false
-}
-
-// rolloutVictim picks the replica to retire now that index is healthy: an old
-// one if there is any, else the new spare. Among the old, one that does not
-// run, is drained already or, where healthy says, is not healthy goes first,
-// then the lowest index, whose name the next new replica takes.
-func rolloutVictim(slots map[int]*replica, n, index int, healthy map[int]bool) (int, bool) {
+// rolloutOld returns the replicas this run has not created.
+func rolloutOld(slots map[int]*replica) []*replica {
 	var old []*replica
 	for _, r := range slots {
-		if r.index != index && !r.fresh {
+		if !r.fresh {
 			old = append(old, r)
 		}
 	}
 
-	if len(old) == 0 {
-		spare, ok := slots[n+1]
-		if ok && spare.index != index {
-			return spare.index, true
+	return old
+}
+
+// rolloutFree returns the lowest index no replica holds.
+func rolloutFree(slots map[int]*replica) int {
+	for i := 1; ; i++ {
+		_, taken := slots[i]
+		if !taken {
+			return i
 		}
-
-		return 0, false
 	}
+}
 
+// rolloutVictim picks the old replica to retire, of which there is at least
+// one: one that does not run, is drained already or, where healthy says, is
+// not healthy goes first, then the lowest index, which keeps the indexes a
+// rollout cycles through low.
+func rolloutVictim(slots map[int]*replica, healthy map[int]bool) int {
 	rank := func(r *replica) int {
 		switch {
 		case !r.running:
@@ -290,7 +270,7 @@ func rolloutVictim(slots map[int]*replica, n, index int, healthy map[int]bool) (
 		}
 	}
 
-	victim := slices.MinFunc(old, func(a, b *replica) int {
+	victim := slices.MinFunc(rolloutOld(slots), func(a, b *replica) int {
 		d := rank(a) - rank(b)
 		if d != 0 {
 			return d
@@ -299,12 +279,12 @@ func rolloutVictim(slots map[int]*replica, n, index int, healthy map[int]bool) (
 		return a.index - b.index
 	})
 
-	return victim.index, true
+	return victim.index
 }
 
-// rolloutGiveBack retires one of n+1 old replicas before anything new exists.
-// A healthy one goes only when all the others are healthy too, so the service
-// keeps n replicas serving.
+// rolloutGiveBack retires one old replica of more than declared before
+// anything new exists. A healthy one goes only when all the others are healthy
+// too, so the service keeps its replicas serving.
 func rolloutGiveBack(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) error {
 	healthy := map[int]bool{}
 
@@ -322,7 +302,7 @@ func rolloutGiveBack(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 		healthy[r.index] = running && status == shared.HealthStatusHealthy
 	}
 
-	victim, _ := rolloutVictim(slots, plan.Replicas, 0, healthy)
+	victim := rolloutVictim(slots, healthy)
 
 	err := rolloutRetire(ctx, ops, plan, slots[victim])
 	if err != nil {

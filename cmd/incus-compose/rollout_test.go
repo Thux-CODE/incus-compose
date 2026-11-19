@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -38,6 +39,9 @@ type fakeRollout struct {
 	scripts    [][]string
 	failCreate map[int]bool
 	creates    int
+
+	// firsts are the indexes created as the rollout's first.
+	firsts []int
 
 	// onSleep runs before each sleep, with how long it is for; afterSleep runs
 	// once it is over.
@@ -116,13 +120,17 @@ func (f *fakeRollout) op(ctx context.Context, event string) error {
 	return nil
 }
 
-func (f *fakeRollout) create(ctx context.Context, index int) error {
+func (f *fakeRollout) create(ctx context.Context, index int, first bool) error {
 	err := f.op(ctx, fmt.Sprintf("create web-%d", index))
 	if err != nil {
 		return err
 	}
 
 	f.creates++
+
+	if first {
+		f.firsts = append(f.firsts, index)
+	}
 
 	if f.failCreate[f.creates] {
 		f.record("create web-%d failed", index)
@@ -264,7 +272,7 @@ func old() *fakeReplica {
 // final lists the replicas left, as "web-N new|old".
 func (f *fakeRollout) final() []string {
 	out := []string{}
-	for i := 1; i <= 4; i++ {
+	for i := 1; i <= 6; i++ {
 		r, ok := f.replicas[i]
 		if !ok {
 			continue
@@ -298,60 +306,83 @@ func TestRolloutReplacesEveryReplica(t *testing.T) {
 		name     string
 		replicas int
 		present  map[int]*fakeReplica
-		creates  int
 		events   []string
+		final    []string
 	}{
 		{
-			name:     "one replica goes through the spare and comes back as web-1",
+			name:     "one replica takes one create and moves to web-2",
 			replicas: 1,
 			present:  map[int]*fakeReplica{1: old()},
-			creates:  2,
-			events: []string{
-				"create web-2", "drain web-1", "retire web-1",
-				"create web-1", "drain web-2", "retire web-2",
-			},
+			events:   []string{"create web-2", "drain web-1", "retire web-1"},
+			final:    []string{"web-2 new"},
 		},
 		{
-			name:     "two replicas take one create more than they have",
+			name:     "the next rollout of one replica moves it back to web-1",
+			replicas: 1,
+			present:  map[int]*fakeReplica{2: old()},
+			events:   []string{"create web-1", "drain web-2", "retire web-2"},
+			final:    []string{"web-1 new"},
+		},
+		{
+			name:     "two replicas take two creates",
 			replicas: 2,
 			present:  map[int]*fakeReplica{1: old(), 2: old()},
-			creates:  3,
 			events: []string{
 				"create web-3", "drain web-1", "retire web-1",
 				"create web-1", "drain web-2", "retire web-2",
-				"create web-2", "drain web-3", "retire web-3",
 			},
+			final: []string{"web-1 new", "web-3 new"},
 		},
 		{
-			name:     "a rollout cut short at the spare is picked up without a spare",
-			replicas: 1,
+			name:     "three replicas take three creates",
+			replicas: 3,
+			present:  map[int]*fakeReplica{1: old(), 2: old(), 3: old()},
+			events: []string{
+				"create web-4", "drain web-1", "retire web-1",
+				"create web-1", "drain web-2", "retire web-2",
+				"create web-2", "drain web-3", "retire web-3",
+			},
+			final: []string{"web-1 new", "web-2 new", "web-4 new"},
+		},
+		{
+			name:     "two replicas on web-1 and web-3 fill the gap first",
+			replicas: 2,
+			present:  map[int]*fakeReplica{1: old(), 3: old()},
+			events: []string{
+				"create web-2", "drain web-1", "retire web-1",
+				"create web-1", "drain web-3", "retire web-3",
+			},
+			final: []string{"web-1 new", "web-2 new"},
+		},
+		{
+			name:     "fewer replicas than declared are added to before one is replaced",
+			replicas: 2,
 			present:  map[int]*fakeReplica{2: old()},
-			creates:  1,
-			events:   []string{"create web-1", "drain web-2", "retire web-2"},
+			events:   []string{"create web-1", "create web-3", "drain web-2", "retire web-2"},
+			final:    []string{"web-1 new", "web-3 new"},
 		},
 		{
 			name:     "a replica a killed rollout left drained is put back first",
 			replicas: 1,
 			present:  map[int]*fakeReplica{1: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
-			creates:  1,
 			events:   []string{"undrain web-1", "drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"},
+			final:    []string{"web-1 new"},
 		},
 		{
 			name:     "a stopped old replica goes first and is not drained",
 			replicas: 2,
 			present:  map[int]*fakeReplica{1: old(), 2: {statuses: []string{shared.HealthStatusStopped}}},
-			creates:  3,
 			events: []string{
 				"create web-3", "retire web-2",
 				"create web-2", "drain web-1", "retire web-1",
-				"create web-1", "drain web-3", "retire web-3",
 			},
+			final: []string{"web-2 new", "web-3 new"},
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			scripts := make([][]string, tt.creates)
+			scripts := make([][]string, tt.replicas)
 			for i := range scripts {
 				scripts[i] = slowStart
 			}
@@ -363,14 +394,19 @@ func TestRolloutReplacesEveryReplica(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tt.events, f.events)
-			assert.Equal(t, tt.creates, f.creates)
+			assert.Equal(t, tt.replicas, f.creates, "one create per replica")
+			assert.Equal(t, tt.final, f.final())
 
-			want := []string{}
-			for i := 1; i <= tt.replicas; i++ {
-				want = append(want, fmt.Sprintf("web-%d new", i))
+			var firstCreate string
+			for _, e := range tt.events {
+				if strings.HasPrefix(e, "create ") {
+					firstCreate = e
+					break
+				}
 			}
 
-			assert.Equal(t, want, f.final())
+			require.Len(t, f.firsts, 1, "only the first create runs the service-wide pre_start hooks")
+			assert.Equal(t, firstCreate, fmt.Sprintf("create web-%d", f.firsts[0]))
 		})
 	}
 }
@@ -560,6 +596,28 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 	t.Run("at the end of the grace, as the stop begins", func(t *testing.T) {
 		t.Parallel()
 
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old(), 2: old()}, slowStart)
+		plan := f.plan(2)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		f.afterSleep = func(d time.Duration) {
+			if d == plan.Grace {
+				cancel()
+			}
+		}
+
+		err := rollout(ctx, f, plan)
+		require.ErrorIs(t, err, context.Canceled)
+
+		assert.Equal(t, []string{"create web-3", "drain web-1", "retire web-1"}, f.events)
+		assert.Equal(t, []string{"web-2 old", "web-3 new"}, f.final())
+	})
+
+	t.Run("as the stop of the last old replica begins, which finishes it", func(t *testing.T) {
+		t.Parallel()
+
 		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
 		plan := f.plan(1)
 
@@ -573,7 +631,7 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 		}
 
 		err := rollout(ctx, f, plan)
-		require.ErrorIs(t, err, context.Canceled)
+		require.NoError(t, err)
 
 		assert.Equal(t, []string{"create web-2", "drain web-1", "retire web-1"}, f.events)
 		assert.Equal(t, []string{"web-2 new"}, f.final())
@@ -677,9 +735,52 @@ func TestRolloutSurplusGivesBackTheUnhealthyOne(t *testing.T) {
 	assert.Equal(t, []string{
 		"drain web-2", "retire web-2",
 		"create web-2", "drain web-1", "retire web-1",
-		"create web-1", "drain web-2", "retire web-2",
 	}, f.events)
-	assert.Equal(t, []string{"web-1 new"}, f.final())
+	assert.Equal(t, []string{"web-2 new"}, f.final())
+}
+
+// A rollout interrupted with one replica in flight is picked up again: one
+// old replica goes before the next create, so there are never two more than
+// declared, and it ends with the count declared.
+func TestRolloutResumesAnInterruptedOne(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeRollout(t, map[int]*fakeReplica{1: old(), 2: old()}, slowStart, slowStart, slowStart)
+	plan := f.plan(2)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	f.onSleep = func(d time.Duration) {
+		if d == plan.Grace {
+			cancel()
+		}
+	}
+
+	err := rollout(ctx, f, plan)
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, []string{"web-1 old", "web-2 old", "web-3 new"}, f.final())
+	assert.Contains(t, plan.Out.(*bytes.Buffer).String(), "run `rollout web` again")
+
+	for _, r := range f.replicas {
+		r.fresh = false
+	}
+
+	f.events = nil
+	f.onSleep = nil
+
+	plan = f.plan(2)
+
+	err = rollout(t.Context(), f, plan)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"drain web-1", "retire web-1",
+		"create web-1", "drain web-2", "retire web-2",
+		"create web-2", "drain web-3", "retire web-3",
+	}, f.events)
+	assert.Equal(t, []string{"web-1 new", "web-2 new"}, f.final())
+	assert.NotContains(t, plan.Out.(*bytes.Buffer).String(), "again")
 }
 
 func TestRolloutHealthTimeout(t *testing.T) {
@@ -715,7 +816,7 @@ func TestRolloutDescribe(t *testing.T) {
 		Out:           &out,
 	})
 
-	assert.Equal(t, "web: can be rolled out, 2 replicas, now web-1 (running), web-2 (running, drained), web-3 (stopped); up to 3 creates, each new replica healthy within 54s, each old one kept 35s after its drain\n", out.String())
+	assert.Equal(t, "web: can be rolled out, 2 replicas, now web-1 (running), web-2 (running, drained), web-3 (stopped); 2 creates, each new replica healthy within 54s, each old one kept 35s after its drain\n", out.String())
 }
 
 func TestRolloutStop(t *testing.T) {
@@ -999,12 +1100,12 @@ func TestRolloutBlockers(t *testing.T) {
 		{
 			name:    "network aliases",
 			service: "image: docker.io/library/busybox\n    networks:\n      app:\n        aliases: [cache]",
-			want:    []string{"its DNS aliases are answered by replica 1 alone and would go unanswered while it is replaced"},
+			want:    []string{"its DNS aliases are answered by the first replica alone and would go unanswered while it is replaced"},
 		},
 		{
 			name:    "aliases given as a label",
 			service: "image: docker.io/library/busybox\n    labels:\n      dns.aliases: cache",
-			want:    []string{"its DNS aliases are answered by replica 1 alone and would go unanswered while it is replaced"},
+			want:    []string{"its DNS aliases are answered by the first replica alone and would go unanswered while it is replaced"},
 		},
 		{
 			name:    "a proxy device from a profile",

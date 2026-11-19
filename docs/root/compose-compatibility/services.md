@@ -462,7 +462,9 @@ services:
   `incus-compose config --images`.
 - **Scaling (`per_replica`):**
   - When `per_replica: false` (the default), the init container runs once before
-    replica 1 starts.
+    the first replica starts: the one with the lowest index the service keeps
+    (`{service}-1` unless an earlier `rollout` moved it), or, during a
+    `rollout`, the first new one.
   - When `per_replica: true`, each replica executes its own init container
     before that replica starts.
   - Runner instances are named `{service}-pre_start-{index}` (or

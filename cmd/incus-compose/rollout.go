@@ -304,20 +304,18 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	instances := map[int]*client.Instance{}
 
-	for i := 1; i <= n+2; i++ {
-		absent, err := instanceAbsent(ctx, c, name(i))
-		if err != nil {
-			return nil, rolloutPlan{}, err
-		}
+	// The replicas are the ones Incus has, whatever their indexes: an earlier
+	// rollout leaves them on others than 1 to N.
+	indexes, err := p.ReplicaIndexes(c, svcName)
+	if err != nil {
+		return nil, rolloutPlan{}, err
+	}
 
-		if absent {
-			continue
-		}
+	if len(indexes) > n+1 {
+		return nil, rolloutPlan{}, fmt.Errorf("%d replicas exist, more than %d and one in flight: run `up` to scale it back first", len(indexes), n)
+	}
 
-		if i == n+2 {
-			return nil, rolloutPlan{}, fmt.Errorf("%s exists, more than %d replicas and a spare: run `up` to scale it back first", name(i), n)
-		}
-
+	for _, i := range indexes {
 		res, err := oc.Resource(client.KindInstance, name(i), &client.InstanceConfig{})
 		if err != nil {
 			return nil, rolloutPlan{}, err
@@ -358,7 +356,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	// The sidecars are not ours to touch, nor are their images in the global
 	// project.
-	err := pull(ctx, p, pc, pullArgs{
+	err = pull(ctx, p, pc, pullArgs{
 		Services:        []string{svcName},
 		IgnoreBuildable: true,
 		NoTools:         true,
@@ -371,8 +369,8 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		return nil, rolloutPlan{}, err
 	}
 
-	// At n+1, so a cluster without shared storage refuses the spare here rather
-	// than halfway through.
+	// At n+1, so a cluster without shared storage refuses the replica that
+	// runs next to the old ones here rather than halfway through.
 	resources, err := p.Resources(pc, project.ResourcesScale(map[string]int{svcName: n + 1}))
 	if err != nil {
 		return nil, rolloutPlan{}, err
@@ -455,7 +453,6 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		p:           p,
 		c:           c,
 		service:     svcName,
-		replicas:    n,
 		name:        name,
 		instances:   instances,
 		order:       args.Order,
@@ -591,7 +588,7 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 	}
 
 	if aliases {
-		add("its DNS aliases are answered by replica 1 alone and would go unanswered while it is replaced")
+		add("its DNS aliases are answered by the first replica alone and would go unanswered while it is replaced")
 	}
 
 	return out
@@ -647,11 +644,10 @@ func rolloutHealthTimeout(health map[string]string) time.Duration {
 
 // rolloutRunner carries out a rollout's steps on the replicas of one service.
 type rolloutRunner struct {
-	p        *project.Project
-	c        *client.Client
-	service  string
-	replicas int
-	name     func(index int) string
+	p       *project.Project
+	c       *client.Client
+	service string
+	name    func(index int) string
 
 	// instances is what drain, retire and discard act on: the old replicas as
 	// read at the start, and the new ones as created.
@@ -666,13 +662,12 @@ type rolloutRunner struct {
 	writer      io.Writer
 }
 
-func (r *rolloutRunner) create(ctx context.Context, index int) error {
+func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error {
 	// A client of its own per replica, so the instance is built from the
 	// compose file as it is now and not from one this run built earlier.
 	cc := r.c.Clone()
 
-	// Built next to the replicas there are, which up no longer counts by name.
-	resources, err := r.p.Resources(cc, project.ResourcesAddReplica(r.service, index, index == 1))
+	resources, err := r.p.Resources(cc, project.ResourcesAddReplica(r.service, index, first))
 	if err != nil {
 		return err
 	}

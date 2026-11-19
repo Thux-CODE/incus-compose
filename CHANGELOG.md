@@ -20,12 +20,14 @@ form.
   drained from ic-dns (`user.label.dns.drain`), stopped and deleted only once
   ic-healthd reports the new one `healthy`. A new replica that is not healthy in
   time is deleted (`--keep-failed` leaves it stopped) and the old ones keep
-  serving; an interrupt leaves no replica drained. It works with a single
-  replica, through a spare `<service>-(N+1)`, keeps the names `up` expects, and
-  touches neither dependents nor sidecars. Services that cannot run twice
-  (no healthcheck, `container_name`, published ports, a fixed address, DNS
-  aliases, a cluster volume on a block pool, or `x-incus-compose.rollout: false`)
-  are refused. (by @sandroden)
+  serving; an interrupt leaves no replica drained. It takes one create per
+  replica, a single one included: a new replica takes the lowest free index and
+  the old one's is freed, so one replica moves from `web-1` to `web-2` and back
+  on the next rollout, which `up` leaves as it is. It touches neither dependents
+  nor sidecars. Services that cannot run twice (no healthcheck,
+  `container_name`, published ports, a fixed address, DNS aliases, a cluster
+  volume on a block pool, or `x-incus-compose.rollout: false`) are refused. (by
+  @sandroden)
 
 - `ic-dns --trusted-client` (`INCUS_COMPOSE_DNS_TRUSTED_CLIENTS`): CIDRs whose
   queries are answered from every view at once instead of from the networks
