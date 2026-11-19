@@ -564,7 +564,9 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 		err = r.ensured()
 		err = r.client.hookAfter(ctx, ActionEnsure, r, options, err)
 
-		return err == nil && r.deleteMarked, err
+		// Scaling down is `up`'s, whose ensure creates: the ones that only
+		// read the instance, as ps or exec do, must not delete it.
+		return err == nil && r.deleteMarked && options.Create, err
 	}
 
 	if !options.Create {
@@ -2263,8 +2265,8 @@ func (r *Instance) AddConfigs(ctx context.Context, config map[string]string) err
 	return r.patchConfig(ctx, toPatch)
 }
 
-// MarkDelete marks a instance to be deleted after Ensure(),
-// this is for down scaling instances.
+// MarkDelete marks a instance to be deleted after an Ensure with
+// OptionCreate, this is for down scaling instances.
 func (r *Instance) MarkDelete() {
 	r.mu.Lock()
 	defer r.mu.Unlock()

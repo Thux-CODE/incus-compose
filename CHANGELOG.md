@@ -71,6 +71,10 @@ form.
 
 ### Fixed
 
+- Only `up` scales a service down. `ps`, `exec`, `cp`, `port` and
+  `backup restore` read the instances the same way and deleted a replica above
+  the declared count as they did. (by @sandroden)
+
 - The `ievent` enricher retries a sweep that failed (projects not listed, or a
   project's instances not listed) after a backoff of 1 s doubling up to 30 s,
   instead of waiting the 6 h sweep interval, and no longer ends a sweep that
