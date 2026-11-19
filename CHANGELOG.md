@@ -30,7 +30,11 @@ form.
   The peering is kept in the cold store with the zone serials, so after a
   restart the replayed names answer through their peers at once rather than
   after a round of reads per served project; the first read that lands corrects
-  it, and goes out at once. Off by default. (by @sandroden)
+  it, and goes out at once. Until that first read the server is not warm, even
+  after a complete round: misses stay `SERVFAIL` instead of `NXDOMAIN` and
+  `/ready` answers 503 saying it waits on the peering, so a client that sees a
+  name only through a peer is never told it does not exist. Off by default. (by
+  @sandroden)
 
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended

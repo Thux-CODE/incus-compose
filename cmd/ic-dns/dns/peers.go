@@ -260,6 +260,10 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 // stale record, and the serials are safe either way, since a cold publish
 // steps none and forgets none.
 func (p *Plugin) peered(peers map[string][]string) {
+	// The first read is what a round that ended before it was waiting on, the
+	// same table as the one restored included.
+	defer p.firstPeering(!p.peersRead.Swap(true))
+
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if !changed {
 		return
@@ -278,4 +282,22 @@ func (p *Plugin) peered(peers map[string][]string) {
 	// Whatever was pending goes out with it, so the snapshot is one fold.
 	p.state.write(p.cfg.TTL)
 	p.publish()
+}
+
+// firstPeering turns the view warm where a round ended while the peering had
+// not been read yet, now that it has - after what the read moved was
+// published, so warm never answers from the table before it.
+func (p *Plugin) firstPeering(first bool) {
+	if !first {
+		return
+	}
+
+	p.logger.Info("the network peering has been read")
+
+	if !p.state.fresh {
+		return
+	}
+
+	p.view.SetHealthy(true)
+	p.announce()
 }

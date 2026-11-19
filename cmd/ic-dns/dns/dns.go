@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coredns/coredns/plugin"
@@ -154,6 +155,11 @@ type Plugin struct {
 	// Run's goroutine alone.
 	published bool
 
+	// peersRead is the peering having been read in this run, or not being
+	// followed at all. Until it is, no round turns the view warm. Written by
+	// Run's goroutine, read by whoever asks PeeringReady.
+	peersRead atomic.Bool
+
 	// state is everything folding owns - what is held, what has arrived, and the
 	// trees being patched. Run's goroutine alone, never Handle's caller.
 	state *state
@@ -275,6 +281,10 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	}
 
 	p.actions = knownActions
+
+	// Nothing to wait on where the peering is not followed.
+	p.peersRead.Store(!cfg.PeerViews)
+
 	return p
 }
 
@@ -417,6 +427,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 		wg.Go(func() { p.readPeerLoop(loopCtx) })
 
 		p.askPeers()
+	} else {
+		// No connection to read it over, so nothing a round could wait on.
+		p.peersRead.Store(true)
 	}
 
 	// An empty address answers no DNS at all, which is what a build that only
@@ -490,27 +503,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 func (p *Plugin) fold(ev *iutil.Event) {
 	// Unwinding the other way round: hand the event on, then say what it
 	// changed, so the cause reaches the chain ahead of its consequence.
-	defer func() {
-		now := p.view.Ready()
-		if now == p.ready {
-			return
-		}
-
-		p.ready = now
-
-		// Ours to name, since nothing else raises or reads it.
-		action := "dns/not-ready"
-		if now {
-			action = "dns/ready"
-		}
-
-		// Non-blocking: the source may already have stopped reading, and waiting
-		// would hold up the drain this runs inside.
-		select {
-		case p.commandOut <- iutil.Command{Action: action}:
-		default:
-		}
-	}()
+	defer p.announce()
 
 	defer p.next(ev)
 
@@ -599,9 +592,15 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	p.state.pending[key] = inst
 }
 
-// rounded takes the end of a round. Healthy is set here and nowhere else: a
-// replay off disk is structurally whole but not fresh, and has to serve clamped
-// until Incus itself has been read.
+// rounded takes the end of a round. Healthy is set here, and by the first read
+// of the peering where a round ended before it: a replay off disk is
+// structurally whole but not fresh, and has to serve clamped until Incus itself
+// has been read.
+//
+// With --peer-views the peering is part of what has to have been read: until
+// it has, a name seen only through a peer is missing or stale, and warm would
+// answer that querier NXDOMAIN for good instead of SERVFAIL. The round still
+// counts as ended, so it is not taken again on every warm event after it.
 //
 // The window is flushed rather than published beside, or the end of a round
 // publishes twice.
@@ -609,9 +608,54 @@ func (p *Plugin) rounded() {
 	p.state.write(p.cfg.TTL)
 	p.publish()
 
-	p.view.SetHealthy(true)
 	p.state.fresh = true
+
+	if !p.peersRead.Load() {
+		p.logger.Info("a round ended, waiting on the first read of the network peering to turn warm")
+
+		return
+	}
+
+	p.view.SetHealthy(true)
 }
+
+// announce raises dns/ready or dns/not-ready where the view's readiness moved
+// since it was last said.
+func (p *Plugin) announce() {
+	now := p.view.Ready()
+	if now == p.ready {
+		return
+	}
+
+	p.ready = now
+
+	// Ours to name, since nothing else raises or reads it.
+	action := "dns/not-ready"
+	if now {
+		action = "dns/ready"
+	}
+
+	// Non-blocking: the source may already have stopped reading, and waiting
+	// would hold up the drain this runs inside.
+	select {
+	case p.commandOut <- iutil.Command{Action: action}:
+	default:
+	}
+}
+
+// PeeringReady is nil once the peering has been read in this run, or where it
+// is not followed; otherwise why not. Safe from any goroutine: it is what the
+// /ready endpoint asks.
+func (p *Plugin) PeeringReady() error {
+	if p.peersRead.Load() {
+		return nil
+	}
+
+	return errPeeringNotRead
+}
+
+// errPeeringNotRead is what PeeringReady says until the first read lands.
+var errPeeringNotRead = errors.New("the network peering has not been read yet")
 
 // write applies what has arrived and publishes it. Nothing arrived is nothing
 // to publish: the window fires once per burst whether or not the burst changed
