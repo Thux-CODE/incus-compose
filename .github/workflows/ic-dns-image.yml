@@ -7,7 +7,8 @@
 #   ic-dns-53c7e15-trusted  -> 53c7e15-trusted   (what ran from 2026-09-14)
 #   ic-dns-coldwarm-test    -> 1.4.0-coldwarm.4  (trial: cold store + SERVFAIL until warm)
 #   ic-dns-thux             -> 1.4.0-thux.1      (coldwarm + pause, drain, readiness, reread)
-#   ic-dns-thux-peers       -> 1.4.0-peers.1     (trial: thux.1 + --peer-views, peering in the cold store)
+#   ic-dns-thux-peers       -> 1.4.0-peers.2     (trial: thux.1 + --peer-views, peering in the cold store,
+#                                                  read per network with a deadline per call)
 # plus the short commit sha, so a deployment can pin what it pulled.
 name: ic-dns image
 
@@ -43,7 +44,7 @@ jobs:
             ic-dns-53c7e15-trusted) tag=53c7e15-trusted ;;
             ic-dns-coldwarm-test)   tag=1.4.0-coldwarm.4 ;;
             ic-dns-thux)            tag=1.4.0-thux.1 ;;
-            ic-dns-thux-peers)      tag=1.4.0-peers.1 ;;
+            ic-dns-thux-peers)      tag=1.4.0-peers.2 ;;
             *) echo "no image tag for branch ${GITHUB_REF_NAME}" >&2; exit 1 ;;
           esac
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/incus-compose/ic-dns"
