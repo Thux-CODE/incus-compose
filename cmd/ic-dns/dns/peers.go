@@ -22,9 +22,11 @@ const (
 	peerRetryLongest = 30 * time.Second
 )
 
-// peerReadTimeout bounds one read of the whole peering. A round is a handful
-// of small reads per project, so this is only reached by a daemon not answering.
-const peerReadTimeout = 30 * time.Second
+// peerCallTimeout bounds each call of a read of the peering, not the read as a
+// whole: a slow daemon (a network list taking 30 s on a loaded member was seen)
+// makes the read long, never impossible, while a daemon not answering one call
+// still fails it and leaves the held peering in place.
+const peerCallTimeout = 30 * time.Second
 
 // peerNetworkType is the only network type Incus peers.
 const peerNetworkType = "ovn"
@@ -34,6 +36,33 @@ type peerReader interface {
 	GetProjects(ctx context.Context) ([]incusapi.Project, error)
 	GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error)
 	GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error)
+}
+
+// bounded is a peerReader whose every call has a deadline of its own.
+type bounded struct {
+	r       peerReader
+	timeout time.Duration
+}
+
+func (b bounded) GetProjects(ctx context.Context) ([]incusapi.Project, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	return b.r.GetProjects(ctx)
+}
+
+func (b bounded) GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	return b.r.GetNetworks(ctx, project)
+}
+
+func (b bounded) GetNetworkPeers(ctx context.Context, project string, network string) ([]incusapi.NetworkPeer, error) {
+	ctx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+
+	return b.r.GetNetworkPeers(ctx, project, network)
 }
 
 // peerActions are the lifecycle actions a peering moves on. None is enriched:
@@ -221,11 +250,7 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 
 		retry = nil
 
-		readCtx, cancel := context.WithTimeout(ctx, peerReadTimeout)
-		peers, err := readPeers(readCtx, p.peerReader, p.cfg.Project)
-
-		cancel()
-
+		peers, err := readPeers(ctx, bounded{r: p.peerReader, timeout: p.peerCallTimeout}, p.cfg.Project)
 		if err != nil {
 			if ctx.Err() != nil {
 				return

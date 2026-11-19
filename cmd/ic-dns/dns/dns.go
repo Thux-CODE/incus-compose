@@ -150,6 +150,9 @@ type Plugin struct {
 	// peerRetry is the backoff after a failed read, first and longest.
 	peerRetry [2]time.Duration
 
+	// peerCallTimeout bounds each call of a read of the peering.
+	peerCallTimeout time.Duration
+
 	// published is a snapshot having gone out in this run: the replay off disk,
 	// or the first round, has been folded and published whole at least once.
 	// Run's goroutine alone.
@@ -272,6 +275,8 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		peerAsk:   make(chan struct{}, 1),
 		peerIn:    make(chan map[string][]string),
 		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
+
+		peerCallTimeout: peerCallTimeout,
 	}
 
 	wants := p.Wants()

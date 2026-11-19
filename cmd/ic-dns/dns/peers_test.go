@@ -429,10 +429,37 @@ type fakePeers struct {
 	// down is what every read answers instead, a daemon that stopped answering.
 	down error
 
+	// delay is how long every call takes.
+	delay time.Duration
+
 	reads int
 }
 
-func (f *fakePeers) GetProjects(_ context.Context) ([]incusapi.Project, error) {
+// slow is the fake's latency: every call takes delay, and gives up as a real
+// client does when its context ends first.
+func (f *fakePeers) slow(ctx context.Context) error {
+	f.mu.Lock()
+	delay := f.delay
+	f.mu.Unlock()
+
+	if delay == 0 {
+		return nil
+	}
+
+	select {
+	case <-time.After(delay):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (f *fakePeers) GetProjects(ctx context.Context) ([]incusapi.Project, error) {
+	err := f.slow(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -445,11 +472,16 @@ func (f *fakePeers) GetProjects(_ context.Context) ([]incusapi.Project, error) {
 	return slices.Clone(f.projects), nil
 }
 
-func (f *fakePeers) GetNetworks(_ context.Context, project string) ([]incusapi.Network, error) {
+func (f *fakePeers) GetNetworks(ctx context.Context, project string) ([]incusapi.Network, error) {
+	err := f.slow(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	err := f.fail[project]
+	err = f.fail[project]
 	if err != nil {
 		return nil, err
 	}
@@ -457,13 +489,18 @@ func (f *fakePeers) GetNetworks(_ context.Context, project string) ([]incusapi.N
 	return slices.Clone(f.networks[project]), nil
 }
 
-func (f *fakePeers) GetNetworkPeers(_ context.Context, project, network string) ([]incusapi.NetworkPeer, error) {
+func (f *fakePeers) GetNetworkPeers(ctx context.Context, project, network string) ([]incusapi.NetworkPeer, error) {
+	err := f.slow(ctx)
+	if err != nil {
+		return nil, err
+	}
+
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	key := iutil.NetworkKey(project, network)
 
-	err := f.fail[key]
+	err = f.fail[key]
 	if err != nil {
 		return nil, err
 	}
@@ -728,6 +765,14 @@ func TestPluginFollowsThePeering(t *testing.T) {
 func runPeered(t *testing.T, f *fakePeers, opts ...Option) *running {
 	t.Helper()
 
+	return runPeeredWith(t, f, nil, opts...)
+}
+
+// runPeeredWith is runPeered with a hook that sets what no Option does on the
+// plugin before it runs.
+func runPeeredWith(t *testing.T, f *fakePeers, before func(*Plugin), opts ...Option) *running {
+	t.Helper()
+
 	r := &running{
 		p:      New(slog.Default(), append([]Option{PeerViews(true)}, opts...)...),
 		seen:   make(chan *iutil.Event, 64),
@@ -738,6 +783,10 @@ func runPeered(t *testing.T, f *fakePeers, opts ...Option) *running {
 
 	r.p.peerReader = f
 	r.p.peerRetry = [2]time.Duration{20 * time.Millisecond, 80 * time.Millisecond}
+
+	if before != nil {
+		before(r.p)
+	}
 
 	ctx, cancel := context.WithCancel(t.Context())
 	t.Cleanup(cancel)
