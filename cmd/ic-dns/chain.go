@@ -94,6 +94,7 @@ func chain(logger *slog.Logger, cfg config) []position {
 		dns.AllowTransfer(cfg.AllowTransfer),
 		dns.TrustedClients(cfg.TrustedClients),
 		dns.PeerViews(cfg.PeerViews),
+		dns.ClaimReverse(cfg.ClaimReverse),
 	)
 
 	out = append(out,

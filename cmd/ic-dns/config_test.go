@@ -301,6 +301,33 @@ func TestConfigTrustedClientsRefusesABadPrefix(t *testing.T) {
 	assert.ErrorContains(t, err, `allow-transfer "10.0.0.1"`)
 }
 
+// TestConfigClaimReverse pins the flag that claims the reverse zones of a list
+// of prefixes before warm: none by default, masked like every other CIDR flag,
+// settable from either environment name, and a malformed one stops the start.
+func TestConfigClaimReverse(t *testing.T) {
+	assert.Empty(t, parse(t).ClaimReverse, "none by default")
+
+	cfg := parse(t, "--claim-reverse", "10.146.11.7/24", "--claim-reverse", "fd42:3d63:aaa1:de63::/64")
+	require.Len(t, cfg.ClaimReverse, 2)
+	assert.Equal(t, "10.146.11.0/24", cfg.ClaimReverse[0].String())
+	assert.Equal(t, "fd42:3d63:aaa1:de63::/64", cfg.ClaimReverse[1].String())
+
+	t.Setenv("DNS_CLAIM_REVERSE", "10.146.11.0/24,10.147.1.0/24,10.147.2.0/24")
+	assert.Len(t, parse(t).ClaimReverse, 3)
+
+	// The prefixed name wins when both are there.
+	t.Setenv("INCUS_COMPOSE_DNS_CLAIM_REVERSE", "10.147.0.0/16")
+	assert.Len(t, parse(t).ClaimReverse, 1)
+
+	app := command()
+	app.Writer = io.Discard
+	app.ErrWriter = io.Discard
+
+	err := app.Run(t.Context(), []string{"ic-dns", "run", "--claim-reverse", "10.146.11.0"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `claim-reverse "10.146.11.0"`)
+}
+
 // TestConfigPeerViews pins the flag that lets a querier see past its own
 // networks: off unless asked for, and settable from either environment name.
 func TestConfigPeerViews(t *testing.T) {

@@ -54,6 +54,17 @@ form.
   through a peer is never told it does not exist. Off by default. (by
   @sandroden)
 
+- `ic-dns --claim-reverse` (`INCUS_COMPOSE_DNS_CLAIM_REVERSE`): CIDRs whose
+  reverse zones are claimed before the first round ends, the way the suffix is.
+  Until warm, a PTR there that no zone read so far holds is `SERVFAIL` (extended
+  error `Not Ready`) unless the forwarder answers `NOERROR`, instead of the
+  forwarder's `NXDOMAIN` reaching the client after every restart. A prefix of
+  /24 (IPv4) or /64 (IPv6) or narrower claims the zone holding it, the same zone
+  the PTRs are published in; a wider one claims the zones at its octet (nibble)
+  boundary inside it, so `10.147.0.0/16` is `147.10.in-addr.arpa.` and
+  `10.147.0.0/20` the sixteen /24 zones in it. Empty (the default) claims none;
+  once warm it changes nothing. (by @sandroden)
+
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
   error `Not Ready`) until the first complete round of the fleet, like the names

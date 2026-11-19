@@ -75,6 +75,10 @@ type config struct {
 	// PeerViews answers a querier from the networks its own are peered with,
 	// as well as from its own. Off by default.
 	PeerViews bool
+	// ClaimReverse is the prefixes whose PTRs are ours before the first round
+	// has read them, as CIDR prefixes: a cold miss there is SERVFAIL instead of
+	// the forwarder's NXDOMAIN. Empty claims no reverse zone.
+	ClaimReverse []netip.Prefix
 
 	// How the chain behaves.
 	TTL            uint

@@ -73,6 +73,12 @@ type Config struct {
 	// is the default, the peering is neither read nor looked at.
 	PeerViews bool
 
+	// ClaimReverse are the prefixes whose reverse zones are ours before any
+	// instance in them has been read, the way the suffix is: a cold PTR miss in
+	// one of them is SERVFAIL rather than a forwarder's NXDOMAIN. Empty claims
+	// no reverse zone, and once warm it changes nothing.
+	ClaimReverse []netip.Prefix
+
 	// ColdDir is where the cold store lives, the same directory the certificate
 	// is in. Empty disables it, and nothing writes to disk without it.
 	ColdDir string
@@ -214,6 +220,12 @@ func TrustedClients(prefixes []netip.Prefix) Option {
 // PeerViews answers a querier from the networks its own are peered with too.
 func PeerViews(v bool) Option { return func(cfg *Config) { cfg.PeerViews = v } }
 
+// ClaimReverse sets the prefixes whose reverse zones are claimed before warm.
+// Empty claims none.
+func ClaimReverse(prefixes []netip.Prefix) Option {
+	return func(cfg *Config) { cfg.ClaimReverse = prefixes }
+}
+
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
 
@@ -271,6 +283,14 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	if claim != "." {
 		view.Claims = []string{claim}
 	}
+
+	// A PTR has no suffix to claim it: the zones of the prefixes named stand in
+	// for one, so a restart does not hand a forwarder's NXDOMAIN to a client.
+	if reverse := reverseClaims(cfg.ClaimReverse); len(reverse) > 0 {
+		view.Claims = append(view.Claims, reverse...)
+		logger.Info("Claiming reverse zones", "plugin", name, "zones", reverse)
+	}
+
 	view.PeerViews = cfg.PeerViews
 
 	p := &Plugin{

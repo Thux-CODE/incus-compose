@@ -278,6 +278,23 @@ func runCommand(cfg *config) *cli.Command {
 				},
 			},
 			&cli.StringSliceFlag{
+				Name: "claim-reverse",
+				Usage: "CIDR(s) whose PTRs are answered SERVFAIL rather than forwarded until the first round ends: " +
+					"a /24 (IPv4) or /64 (IPv6) claims the zone holding it, a wider prefix the zones of its octet " +
+					"(nibble) boundary inside it; empty claims none",
+				Sources: cli.EnvVars("INCUS_COMPOSE_DNS_CLAIM_REVERSE", "DNS_CLAIM_REVERSE"),
+				Action: func(ctx context.Context, c *cli.Command, s []string) error {
+					claim, err := prefixes("claim-reverse", s)
+					if err != nil {
+						return err
+					}
+
+					cfg.ClaimReverse = claim
+
+					return nil
+				},
+			},
+			&cli.StringSliceFlag{
 				Name:        "exclude",
 				Usage:       "Chain position(s) to leave out; only the optional ones, and an unknown name is an error",
 				Destination: &cfg.Exclude,
@@ -373,6 +390,7 @@ func action(ctx context.Context, cmd *cli.Command, cfg *config) error {
 		"trusted_clients", cfg.TrustedClients,
 		"cold_answers", cfg.ColdAnswers,
 		"peer_views", cfg.PeerViews,
+		"claim_reverse", cfg.ClaimReverse,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)
