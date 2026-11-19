@@ -254,6 +254,13 @@ func runCommand(cfg *config) *cli.Command {
 					return nil
 				},
 			},
+			&cli.BoolFlag{
+				Name: "peer-views",
+				Usage: "Answer a querier from the networks its own are peered with (incus network peer, " +
+					"Created on both sides, one hop) as well as from its own",
+				Destination: &cfg.PeerViews,
+				Sources:     cli.EnvVars("INCUS_COMPOSE_DNS_PEER_VIEWS", "DNS_PEER_VIEWS"),
+			},
 			&cli.StringSliceFlag{
 				Name: "trusted-client",
 				Usage: "CIDR(s) answered from every view at once rather than from the networks they sit on, " +
@@ -365,6 +372,7 @@ func action(ctx context.Context, cmd *cli.Command, cfg *config) error {
 		"echo_subnet", cfg.EchoSubnet,
 		"trusted_clients", cfg.TrustedClients,
 		"cold_answers", cfg.ColdAnswers,
+		"peer_views", cfg.PeerViews,
 		"metrics", cfg.Metrics,
 		"pprof", cfg.Pprof,
 	)

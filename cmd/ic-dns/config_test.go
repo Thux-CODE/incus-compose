@@ -300,3 +300,17 @@ func TestConfigTrustedClientsRefusesABadPrefix(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorContains(t, err, `allow-transfer "10.0.0.1"`)
 }
+
+// TestConfigPeerViews pins the flag that lets a querier see past its own
+// networks: off unless asked for, and settable from either environment name.
+func TestConfigPeerViews(t *testing.T) {
+	assert.False(t, parse(t).PeerViews, "off by default")
+	assert.True(t, parse(t, "--peer-views").PeerViews)
+
+	t.Setenv("DNS_PEER_VIEWS", "true")
+	assert.True(t, parse(t).PeerViews)
+
+	// The prefixed name wins when both are there.
+	t.Setenv("INCUS_COMPOSE_DNS_PEER_VIEWS", "false")
+	assert.False(t, parse(t).PeerViews)
+}

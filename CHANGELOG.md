@@ -21,6 +21,14 @@ form.
   own network. Matched on the source address, never on an EDNS client subnet;
   empty (the default) trusts nobody. (by @sandroden)
 
+- `ic-dns --peer-views` (`INCUS_COMPOSE_DNS_PEER_VIEWS`): a querier is also
+  answered from the networks its own network is peered with
+  (`incus network peer`, `Created` on both sides, one hop, never transitive),
+  names and PTRs alike. The peering is read at start and followed on
+  `network-peer-*` events without a restart; a side the certificate cannot read,
+  or in a project not served, is ignored. Peer answers count as `result="peer"`.
+  Off by default. (by @sandroden)
+
 - `ic-dns` `--cold-answers` (`INCUS_COMPOSE_DNS_COLD_ANSWERS`, default `true`):
   set to `false`, names it already holds are also answered `SERVFAIL` (extended
   error `Not Ready`) until the first complete round of the fleet, like the names

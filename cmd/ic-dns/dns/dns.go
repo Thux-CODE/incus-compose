@@ -67,6 +67,10 @@ type Config struct {
 	// than from the one they sit on. Empty trusts nobody, which is the
 	// per-querier filter as it stands without this.
 	TrustedClients []netip.Prefix
+	// PeerViews answers a querier from the networks its own are peered with as
+	// well, read off Incus and followed on its network-peer events. Off, which
+	// is the default, the peering is neither read nor looked at.
+	PeerViews bool
 
 	// ColdDir is where the cold store lives, the same directory the certificate
 	// is in. Empty disables it, and nothing writes to disk without it.
@@ -132,6 +136,23 @@ type Plugin struct {
 	// store's own goroutine writes, so a slow disk cannot stall the chain.
 	cold *coldStore
 
+	// peerReader reads the peering, on readPeerLoop's goroutine alone. Nil
+	// without PeerViews, or with no connection to read it from.
+	peerReader peerReader
+
+	// peerAsk asks readPeerLoop for a read; one slot, so asks coalesce.
+	peerAsk chan struct{}
+
+	// peerIn hands a finished read to Run's goroutine, which owns the state.
+	peerIn chan map[string][]string
+
+	// peerRetry is the backoff after a failed read, first and longest.
+	peerRetry [2]time.Duration
+
+	// swept is a first round having ended: what is held was read off Incus,
+	// not replayed off disk. Run's goroutine alone.
+	swept bool
+
 	// state is everything folding owns - what is held, what has arrived, and the
 	// trees being patched. Run's goroutine alone, never Handle's caller.
 	state *state
@@ -170,6 +191,9 @@ func AllowTransfer(prefixes []netip.Prefix) Option {
 func TrustedClients(prefixes []netip.Prefix) Option {
 	return func(cfg *Config) { cfg.TrustedClients = prefixes }
 }
+
+// PeerViews answers a querier from the networks its own are peered with too.
+func PeerViews(v bool) Option { return func(cfg *Config) { cfg.PeerViews = v } }
 
 // Metrics turns the engine's counters and gauges on.
 func Metrics(v bool) Option { return func(cfg *Config) { cfg.Metrics = v } }
@@ -228,15 +252,19 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	if claim != "." {
 		view.Claims = []string{claim}
 	}
+	view.PeerViews = cfg.PeerViews
 
 	p := &Plugin{
-		cfg:    cfg,
-		logger: logger,
-		view:   view,
-		xfr:    newXFR(logger, cfg.AllowTransfer),
-		cold:   newCold(logger, cfg),
-		state:  newState(map[string]zoneSerial{}),
-		inbox:  make(chan *iutil.Event, cfg.InboxSize),
+		cfg:       cfg,
+		logger:    logger,
+		view:      view,
+		xfr:       newXFR(logger, cfg.AllowTransfer),
+		cold:      newCold(logger, cfg),
+		state:     newState(map[string]zoneSerial{}),
+		inbox:     make(chan *iutil.Event, cfg.InboxSize),
+		peerAsk:   make(chan struct{}, 1),
+		peerIn:    make(chan map[string][]string),
+		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
 	}
 
 	wants := p.Wants()
@@ -275,7 +303,7 @@ const wantsInstance = iutil.EnrichedInstance |
 func (p *Plugin) Wants() []iutil.Want {
 	// Debounce only where the action repeats. A start or a delete happens once,
 	// so collapsing it buys nothing and costs the whole window in latency.
-	return []iutil.Want{
+	wants := []iutil.Want{
 		{Action: incusapi.EventLifecycleInstanceStarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceRestarted, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleInstanceResumed, Enrich: wantsInstance},
@@ -287,6 +315,17 @@ func (p *Plugin) Wants() []iutil.Want {
 		{Action: incusapi.EventLifecycleInstanceRenamed, Enrich: wantsInstance},
 		{Action: incusapi.EventLifecycleNetworkUpdated, Enrich: iutil.EnrichedNetwork, Debounce: true},
 	}
+
+	// A peer event only says to read the peering again, so it needs no read.
+	// Never collapsed: debounce keys on project and name, and a peer may share
+	// its name with an instance whose event it would swallow.
+	if p.cfg.PeerViews {
+		for _, action := range peerActions {
+			wants = append(wants, iutil.Want{Action: action})
+		}
+	}
+
+	return wants
 }
 
 // Setup keeps the successor, the two command doors and the connection - what
@@ -294,6 +333,11 @@ func (p *Plugin) Wants() []iutil.Want {
 func (p *Plugin) Setup(args iutil.SetupArgs) error {
 	p.next = args.Next
 	p.commandIn, p.commandOut = args.CommandIn, args.CommandOut
+
+	// A nil *Connection in the interface would read as a reader.
+	if p.cfg.PeerViews && p.peerReader == nil && args.Conn != nil {
+		p.peerReader = args.Conn
+	}
 
 	return nil
 }
@@ -356,6 +400,13 @@ func (p *Plugin) Run(ctx context.Context) error {
 		wg.Go(p.cold.run)
 	}
 
+	// The peering is read off this goroutine, and once before any event asks.
+	if p.cfg.PeerViews && p.peerReader != nil {
+		wg.Go(func() { p.readPeerLoop(loopCtx) })
+
+		p.askPeers()
+	}
+
 	// An empty address answers no DNS at all, which is what a build that only
 	// folds asks for.
 	if p.cfg.Listen != "" {
@@ -409,6 +460,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 			p.write()
 
+		case peers := <-p.peerIn:
+			p.peered(peers)
+
 		case ev := <-p.inbox:
 			p.fold(ev)
 
@@ -450,6 +504,17 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 	if ev.ChainState() != p.state.chain {
 		p.state.chain = ev.ChainState()
+	}
+
+	// The peering is read again on anything that can have moved it, and once a
+	// round, so an event lost with the stream is caught up on.
+	if peeringMoves(ev) || ev.Action() == iutil.ActionSweepEnd {
+		p.askPeers()
+	}
+
+	// A peer is not an instance: what it moves arrives with the read.
+	if slices.Contains(peerActions, ev.Action()) {
+		return
 	}
 
 	// A lost stream drops no record, but nothing is confirming them any more,
@@ -529,6 +594,8 @@ func (p *Plugin) fold(ev *iutil.Event) {
 // The window is flushed rather than published beside, or the end of a round
 // publishes twice.
 func (p *Plugin) rounded() {
+	p.swept = true
+
 	p.state.write(p.cfg.TTL)
 	p.publish()
 
