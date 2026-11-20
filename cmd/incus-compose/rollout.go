@@ -338,7 +338,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 		present = append(present, replica{
 			index:   i,
-			running: inst.Running(),
+			running: rolloutRunning(info.StatusCode),
 			drained: util.IsTrue(info.Config[shared.DNSDrainKey]),
 		})
 		instances[i] = inst
@@ -770,7 +770,7 @@ func (r *rolloutRunner) health(ctx context.Context, index int) (replicaRead, err
 
 	return replicaRead{
 		Status:  inst.Config[shared.HealthStatusKey],
-		Running: inst.StatusCode == incusApi.Running,
+		Running: rolloutRunning(inst.StatusCode),
 		Drained: util.IsTrue(inst.Config[shared.DNSDrainKey]),
 	}, nil
 }
@@ -884,7 +884,10 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 	return rolloutTakeDown(ctx, keep, rolloutTakeDownAttempts, stop, remove, running, startsAgain)
 }
 
-// rolloutRunning reports whether a status is one of a running instance.
+// rolloutRunning reports whether a status is one of a running instance. Incus
+// reads an instance whose agent or init reported in as Ready, which runs and
+// serves as one Running does: everything in a rollout that asks whether a
+// replica runs goes by this.
 func rolloutRunning(s incusApi.StatusCode) bool {
 	return s == incusApi.Running || s == incusApi.Ready
 }
