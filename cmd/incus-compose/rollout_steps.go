@@ -113,7 +113,7 @@ type rolloutPlan struct {
 // create, so a rollout picked up again may take fewer creates than replicas,
 // none included.
 func rolloutDescribe(plan rolloutPlan) {
-	resumed := rolloutResumed(plan.Present)
+	resumed := rolloutResumed(plan.Present, plan.Replicas)
 	present := make([]string, 0, len(plan.Present))
 
 	for _, r := range plan.Present {
@@ -153,12 +153,18 @@ func rolloutDescribe(plan rolloutPlan) {
 // to date, which this one keeps: current, running and not drained, next to at
 // least one that is not current. When all are current nothing tells the ones
 // an earlier run made from the ones it was to replace, and a rollout run on an
-// unchanged service is asked to replace them all, so none is kept.
-func rolloutResumed(present []replica) map[int]bool {
+// unchanged service is asked to replace them all, so none is kept; but for one
+// replica declared and one left running drained: only a rollout drains, right
+// before the stop and once the replica taking its place is healthy, so the
+// other is that one, and what is left is to retire the drained one.
+func rolloutResumed(present []replica, replicas int) map[int]bool {
 	out := map[int]bool{}
 
 	if !slices.ContainsFunc(present, func(r replica) bool { return !r.current }) {
-		return out
+		drained := slices.ContainsFunc(present, func(r replica) bool { return r.running && r.drained })
+		if replicas != 1 || !drained {
+			return out
+		}
 	}
 
 	for _, r := range present {
@@ -218,7 +224,9 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	// retires nothing on it.
 	var failed error
 
-	for _, i := range slices.Sorted(maps.Keys(rolloutResumed(plan.Present))) {
+	resumed := rolloutResumed(plan.Present, n)
+
+	for _, i := range slices.Sorted(maps.Keys(resumed)) {
 		r := slots[i]
 		r.fresh = true
 
@@ -244,7 +252,9 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 		return errors.Join(failed, err)
 	}
 
-	first := true
+	// The service-wide pre_start hooks ran with the first replica an earlier
+	// run made, when this one keeps any: once per rollout, picked up or not.
+	first := len(resumed) == 0
 
 	for {
 		old := rolloutOld(slots)

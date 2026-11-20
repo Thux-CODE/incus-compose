@@ -116,6 +116,55 @@ func TestReviewSurplusAfterHealthChange(t *testing.T) {
 	assert.Equal(t, []string{"web-1 old"}, f.final())
 }
 
+// A rollout of an unchanged service with one replica, killed after the drain:
+// the drained one is the old one, and run again it is retired with no create.
+func TestReviewAllCurrent(t *testing.T) {
+	oldOne := reviewCurrent()
+	oldOne.fresh = false
+	oldOne.drained = true
+	f := newFakeRollout(t, map[int]*fakeReplica{1: oldOne, 2: reviewCurrent()}, slowStart)
+	plan := f.plan(1)
+
+	var dry bytes.Buffer
+
+	described := plan
+	described.Out = &dry
+	rolloutDescribe(described)
+	assert.Contains(t, dry.String(), "web-2 (running, up to date); 0 creates")
+
+	err := rollout(t.Context(), f, plan)
+	if err != nil || f.creates != 0 || f.replicas[2] == nil {
+		t.Fatalf("creates=%d, events=%v, err=%v", f.creates, f.events, err)
+	}
+
+	assert.Equal(t, []string{"drain web-1", "retire web-1"}, f.events)
+}
+
+// With none drained, all current tells nothing even with one replica: both
+// count as old, and the one the run creates replaces them.
+func TestReviewAllCurrentNoneDrained(t *testing.T) {
+	f := newFakeRollout(t, map[int]*fakeReplica{1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}}, 2: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}}}, slowStart)
+	f.minReady = 1
+
+	err := rollout(t.Context(), f, f.plan(1))
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"}, f.events)
+	assert.Equal(t, []string{"web-1 new"}, f.final())
+}
+
+// The service-wide pre_start hooks ran with the replica an earlier run made:
+// picked up again, the rollout does not run them a second time.
+func TestReviewOnceOnResume(t *testing.T) {
+	f := newFakeRollout(t, map[int]*fakeReplica{3: reviewCurrent(), 2: old()}, slowStart)
+	err := rollout(t.Context(), f, f.plan(2))
+	if err != nil || len(f.firsts) != 0 {
+		t.Fatalf("pre_start repeated on %v, err=%v", f.firsts, err)
+	}
+
+	assert.Equal(t, 1, f.creates)
+}
+
 // An interrupt during the grace of a replica an earlier run drained leaves
 // it drained: the drain is not this run's to take off.
 func TestReviewKeepsAnEarlierDrain(t *testing.T) {

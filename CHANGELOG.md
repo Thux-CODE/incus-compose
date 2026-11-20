@@ -155,7 +155,11 @@ form.
   stays drained and goes first when the others serve the declared count
   without it, and is put back otherwise. When every replica is current, as
   after a rollout of an unchanged service, nothing tells new from old and all
-  are replaced, as before; a replica with no config hash counts as old. One
+  are replaced, as before, but for one replica declared next to one left
+  drained: that one is the old one, and its retire is all that is left, with
+  no create (`0 creates` in `--dry-run`). A rollout picked up again that keeps
+  a replica an earlier run made does not run the service-wide `pre_start`
+  hooks again. A replica with no config hash counts as old. One
   kept that does not turn healthy is not deleted: it is old again, given back
   first as an unhealthy surplus, and the run stops before a create.
   (by @sandroden)

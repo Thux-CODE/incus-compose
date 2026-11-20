@@ -149,6 +149,14 @@ the only one that serves, it is put back and the new one taken away, a
 rollback, and `rollout` exits with an error. Health that cannot be read stops
 the run before anything is retired.
 
+When every replica is up to date, as after a rollout of a service that did not
+change, nothing tells the new ones from the old ones and all are replaced. The
+exception is one replica declared next to one left drained: only a rollout
+drains, once the replica taking its place is healthy, so the drained one is the
+old one and its retire is all that is left, with no create. A rollout that
+keeps a replica an earlier run made does not run the service-wide `pre_start`
+hooks again: they ran with that replica.
+
 When old replicas are left, the last line says to run `rollout` again. `up` is
 safe on what a rollout leaves: it creates and deletes nothing while the count is
 the declared one, and with one replica more it removes one, in the order

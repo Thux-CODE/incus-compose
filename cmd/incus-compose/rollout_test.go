@@ -939,16 +939,31 @@ func TestRolloutResumes(t *testing.T) {
 			creates: 1,
 		},
 		{
-			name:     "all current: nothing tells new from old, and every one is replaced",
+			name:     "all current, one replica and one drained: the drained one was being retired, and that is all left to do",
 			replicas: 1,
 			present: map[int]*fakeReplica{
 				1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
 				2: {current: true, running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
 			},
-			scripts: [][]string{slowStart},
-			events:  []string{"drain web-2", "retire web-2", "create web-2", "drain web-1", "retire web-1"},
-			final:   []string{"web-2 new"},
-			creates: 1,
+			events: []string{"drain web-2", "retire web-2"},
+			final:  []string{"web-1 old"},
+		},
+		{
+			name:     "all current with more replicas: nothing tells new from old, and every one is replaced",
+			replicas: 2,
+			present: map[int]*fakeReplica{
+				1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
+				2: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
+				3: {current: true, running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
+			},
+			scripts: [][]string{slowStart, slowStart},
+			events: []string{
+				"drain web-3", "retire web-3",
+				"create web-3", "drain web-1", "retire web-1",
+				"create web-1", "drain web-2", "retire web-2",
+			},
+			final:   []string{"web-1 new", "web-3 new"},
+			creates: 2,
 		},
 		{
 			name:     "no config hash, made by an older binary: old",
