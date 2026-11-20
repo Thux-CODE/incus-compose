@@ -1,6 +1,7 @@
 package project
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 
@@ -100,6 +101,57 @@ func TestReviewImageOnlySurplus(t *testing.T) {
 
 	_, drop = reconcileReplicas(rs, 1)
 	assert.True(t, drop[2])
+}
+
+// `up` plans twice on one client, to pull and to ensure: a replica the first
+// plan marked as surplus and the second keeps is not deleted.
+func TestReviewStickyScaleDown(t *testing.T) {
+	c := client.NewOfflineClient(t.Context(), "test")
+	p := New()
+	p.Project = &types.Project{Name: "test", Services: types.Services{"web": {Name: "web", Image: "alpine"}}}
+	_, err := p.Resources(c, ResourcesRecreating("web-1", "web-2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resources, err := p.Resources(c, ResourcesRecreating("web-2"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, res := range resources["web"] {
+		i, ok := res.(*client.Instance)
+		if ok && reflect.ValueOf(i).Elem().FieldByName("deleteMarked").Bool() {
+			t.Fatal("the only remaining instance is marked for deletion:", i.IncusName())
+		}
+	}
+}
+
+// A dependent planned again waits for the replicas of its dependency this
+// plan keeps, not for the ones an earlier plan on the same client saw.
+func TestReviewDependencyAfterRecreate(t *testing.T) {
+	c := client.NewOfflineClient(t.Context(), "shop")
+	p := New()
+	p.Project = &types.Project{Name: "shop", Services: types.Services{
+		"db":  {Name: "db", Image: "alpine"},
+		"api": {Name: "api", Image: "alpine", DependsOn: types.DependsOnConfig{"db": {Condition: types.ServiceConditionHealthy}}},
+	}}
+	_, err := p.Resources(c, ResourcesRecreating("db-2", "api-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := p.Resources(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range res["api"] {
+		i, ok := r.(*client.Instance)
+		if ok && i.Config.Dependencies["db-1"] != shared.HealthStatusHealthy {
+			t.Fatalf("db is now %s, api still waits on %v", res["db"][0].IncusName(), i.Config.Dependencies)
+		}
+
+		if ok {
+			assert.Equal(t, map[string]string{"db-1": shared.HealthStatusHealthy}, i.Config.Dependencies)
+		}
+	}
 }
 
 // An instance deleted to be recreated keeps its name: the stand-in listed for

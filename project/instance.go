@@ -399,6 +399,11 @@ func serviceToInstance(c *client.Client, p *types.Project, serviceName string, o
 		return nil, nil, client.ErrUnknown.WithKindName(client.KindInstance, instanceName)
 	}
 
+	// One an earlier plan on this client built is handed back as it was: the
+	// replicas it waits for are this plan's, which a recreate in between may
+	// have moved to other indexes.
+	instance.SetDependencies(instCfg.Dependencies)
+
 	return instance, resources, nil
 }
 

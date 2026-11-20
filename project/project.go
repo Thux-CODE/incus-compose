@@ -719,9 +719,14 @@ func (p *Project) Resources(c *client.Client, opts ...ResourcesOption) (map[stri
 			result[service.Name] = append(result[service.Name], instance)
 			result[service.Name] = append(result[service.Name], instanceResources...)
 
-			// Torn down by an Ensure that creates, which is `up`'s.
+			// Torn down by an Ensure that creates, which is `up`'s. The client
+			// hands back the instance an earlier plan built, `up` plans once to
+			// pull and again to ensure, so this plan's decision replaces that
+			// one's either way.
 			if plan.drop[i] {
 				instance.MarkDelete()
+			} else {
+				instance.UnmarkDelete()
 			}
 		}
 	}

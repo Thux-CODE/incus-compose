@@ -2274,6 +2274,24 @@ func (r *Instance) MarkDelete() {
 	r.deleteMarked = true
 }
 
+// UnmarkDelete takes back a MarkDelete: a later plan keeps the instance.
+func (r *Instance) UnmarkDelete() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.deleteMarked = false
+}
+
+// SetDependencies replaces the instances this one waits for before it starts,
+// for a plan made again on the client that built it: the dependency's
+// replicas may have changed names in between.
+func (r *Instance) SetDependencies(deps map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	r.Config.Dependencies = deps
+}
+
 // Delete removes the instance from Incus.
 func (r *Instance) Delete(ctx context.Context, opts ...Option) error {
 	r.mu.Lock()
