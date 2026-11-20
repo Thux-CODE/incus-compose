@@ -408,6 +408,12 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		present[i].current = rolloutCurrent(instances[present[i].index].State().IncusInstance.Config, hash, alias)
 	}
 
+	// The image every new replica is made from, as checked here.
+	var target string
+	if alias != nil {
+		target = alias.Target
+	}
+
 	var (
 		health   map[string]string
 		declared map[string]map[string]string
@@ -476,6 +482,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		service:     svcName,
 		name:        name,
 		instances:   instances,
+		target:      target,
 		order:       args.Order,
 		startOpts:   args.StartOptions,
 		stopTimeout: stopTimeout,
@@ -623,10 +630,25 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 // One with no hash, made before there was one, is not current: `up` leaves it
 // be so as not to recreate what an upgrade alone touched, but a rollout is
 // asked to replace, and cannot tell it from one made from another config.
+// Nor is one when the alias points at nothing known: the image is the one a
+// create makes only when it is the alias's target.
 func rolloutCurrent(config map[string]string, hash string, alias *incusApi.ImageAliasesEntry) bool {
 	h, ok := config[client.ConfigHashKey]
 
-	return ok && h == hash && !pulledImageChanged(config["volatile.base_image"], alias)
+	return ok && h == hash && alias != nil && alias.Target != "" && config["volatile.base_image"] == alias.Target
+}
+
+// shortFingerprint shortens an image fingerprint for a message, as Incus does.
+func shortFingerprint(fp string) string {
+	if len(fp) > 12 {
+		return fp[:12]
+	}
+
+	if fp == "" {
+		return "(unknown)"
+	}
+
+	return fp
 }
 
 // rolloutWatched reports whether ic-healthd runs a check on an instance with
@@ -687,6 +709,11 @@ type rolloutRunner struct {
 	// instances is what drain, retire and discard act on: the old replicas as
 	// read at the start, and the new ones as created.
 	instances map[int]*client.Instance
+
+	// target is the fingerprint the service's image pointed at when the plan
+	// was made, or the one the first new replica was made from when that was
+	// not known: every new replica of the run is made from it.
+	target string
 
 	order       []string
 	startOpts   []client.Option
@@ -750,6 +777,21 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 	err = stack.ForActionF(client.ActionEnsure, only).Run(context.WithoutCancel(ctx), client.ActionEnsure, append(slices.Clone(r.startOpts), client.OptionCreate())...)
 	if err != nil {
 		return err
+	}
+
+	// Each create ensures the image again, on a client of its own: a pull in
+	// between moves the alias, and the replicas of one rollout would run two
+	// images. One made from another than the plan's is not started.
+	var made string
+	if info := inst.State().IncusInstance; info != nil {
+		made = info.Config["volatile.base_image"]
+	}
+
+	switch {
+	case r.target == "":
+		r.target = made
+	case made != r.target:
+		return fmt.Errorf("%s was made from image %s, not %s as planned: the image's alias moved during the rollout", r.name(index), shortFingerprint(made), shortFingerprint(r.target))
 	}
 
 	// The healthcheck is waited for by the rollout, which also gives up on an

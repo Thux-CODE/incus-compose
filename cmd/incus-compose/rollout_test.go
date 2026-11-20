@@ -1100,7 +1100,8 @@ func TestRolloutCurrent(t *testing.T) {
 	}
 
 	assert.True(t, rolloutCurrent(hashed("v1:a", "new"), "v1:a", alias))
-	assert.True(t, rolloutCurrent(hashed("v1:a", "old"), "v1:a", nil), "no alias read: the hash alone decides")
+	assert.False(t, rolloutCurrent(hashed("v1:a", "old"), "v1:a", nil), "no alias read: the image is not known to be the target")
+	assert.False(t, rolloutCurrent(hashed("v1:a", "old"), "v1:a", &incusApi.ImageAliasesEntry{}), "an alias with no target")
 	assert.False(t, rolloutCurrent(hashed("v1:a", "old"), "v1:a", alias), "another image")
 	assert.False(t, rolloutCurrent(hashed("v1:b", "new"), "v1:a", alias), "another config")
 	assert.False(t, rolloutCurrent(map[string]string{"volatile.base_image": "new"}, "v1:a", alias), "no hash: made by an older binary")

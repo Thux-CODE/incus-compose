@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/lxc/incus-compose/client"
 	"github.com/lxc/incus-compose/shared"
 )
 
@@ -163,6 +164,15 @@ func TestReviewOnceOnResume(t *testing.T) {
 	}
 
 	assert.Equal(t, 1, f.creates)
+}
+
+// A replica is current only next to a target fingerprint it matches: with no
+// alias read, its image is not known to be the one a create makes.
+func TestReviewMissingTarget(t *testing.T) {
+	cfg := map[string]string{client.ConfigHashKey: "h", "volatile.base_image": "old"}
+	if rolloutCurrent(cfg, "h", nil) {
+		t.Fatal("current with no target fingerprint")
+	}
 }
 
 // An interrupt during the grace of a replica an earlier run drained leaves
