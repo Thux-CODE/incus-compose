@@ -796,20 +796,17 @@ func (r *Instance) create(ctx context.Context, opts ...Option) error {
 		return err
 	}
 
+	// Made by this call from here on, whatever fails after: what a caller
+	// that cleans up after itself may delete.
+	r.created = true
+
 	// Get instance to extract UID/GID
 	err = r.fetch(ctx, nil)
 	if err != nil {
 		return ErrCreate.WithText("fetching created instance").Wrap(err)
 	}
 
-	err = r.ensured()
-	if err != nil {
-		return err
-	}
-
-	r.created = true
-
-	return nil
+	return r.ensured()
 }
 
 func (r *Instance) buildDevices() (map[string]map[string]string, error) {

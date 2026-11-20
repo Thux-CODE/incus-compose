@@ -779,6 +779,12 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 		return err
 	}
 
+	// Created by something else between the check and the create, it was
+	// adopted: not this run's to start, wait for or take away.
+	if !inst.Created() {
+		return fmt.Errorf("%s exists already, made by something else than this rollout", r.name(index))
+	}
+
 	// Each create ensures the image again, on a client of its own: a pull in
 	// between moves the alias, and the replicas of one rollout would run two
 	// images. One made from another than the plan's is not started.
@@ -831,13 +837,20 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		return nil
 	}
 
-	if !inst.IsEnsured() {
+	// Only what this run's own create made is deleted. The name was free when
+	// it was checked, but another process may have created an instance by it
+	// in between, which the create then adopted or conflicted with.
+	if !inst.Created() {
 		absent, err := instanceAbsent(ctx, r.c, r.name(index))
 		if err != nil || absent {
 			return err
 		}
 
-		err = inst.Ensure(ctx)
+		return fmt.Errorf("%s exists but was not created by this run: left as it is", r.name(index))
+	}
+
+	if !inst.IsEnsured() {
+		err := inst.Ensure(ctx)
 		if err != nil {
 			return err
 		}
