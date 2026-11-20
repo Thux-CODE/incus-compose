@@ -1379,8 +1379,8 @@ func instanceDependencyWaits(c *client.Client, p *types.Project, service types.S
 		depScale := 1
 		if s, ok := options.Scale[depName]; ok {
 			depScale = s
-		} else if depSvc.Deploy != nil && depSvc.Deploy.Replicas != nil {
-			depScale = *depSvc.Deploy.Replicas
+		} else if depSvc.Scale != nil || depSvc.Deploy != nil && depSvc.Deploy.Replicas != nil {
+			depScale = depSvc.GetScale()
 		} else if depSvc.Deploy != nil && depSvc.Deploy.Mode == "global" && c != nil && c.Global().IsClustered() {
 			members, err := c.Global().ClusterMembers()
 			if err == nil {

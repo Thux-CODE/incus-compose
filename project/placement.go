@@ -115,8 +115,9 @@ func resolveServicePlacementEnv(env clusterPlacementEnv, service types.ServiceCo
 	desired := 1
 	if scaleOverride != nil {
 		desired = *scaleOverride
-	} else if service.Deploy != nil && service.Deploy.Replicas != nil {
-		desired = *service.Deploy.Replicas
+	} else {
+		// scale: or deploy.replicas, whichever the file sets.
+		desired = service.GetScale()
 	}
 
 	if !env.clustered {

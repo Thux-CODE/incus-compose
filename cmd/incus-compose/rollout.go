@@ -280,13 +280,11 @@ type rolloutArgs struct {
 func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, svcName string, args rolloutArgs) (*rolloutRunner, rolloutPlan, error) {
 	service := p.Services[svcName]
 
-	n := 1
-	if service.Deploy != nil && service.Deploy.Replicas != nil {
-		n = *service.Deploy.Replicas
-	}
+	// scale: or deploy.replicas, as up counts them.
+	n := service.GetScale()
 
 	if n < 1 {
-		return nil, rolloutPlan{}, errors.New("deploy.replicas is 0, there is nothing to roll out")
+		return nil, rolloutPlan{}, errors.New("the service declares 0 replicas, there is nothing to roll out")
 	}
 
 	name := func(index int) string {

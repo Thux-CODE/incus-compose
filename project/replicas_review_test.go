@@ -1,6 +1,8 @@
 package project
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -151,6 +153,30 @@ func TestReviewDependencyAfterRecreate(t *testing.T) {
 		if ok {
 			assert.Equal(t, map[string]string{"db-1": shared.HealthStatusHealthy}, i.Config.Dependencies)
 		}
+	}
+}
+
+// `scale:` with no deploy block declares the replicas as deploy.replicas does.
+func TestReviewComposeScale(t *testing.T) {
+	dir := t.TempDir()
+	err := os.WriteFile(filepath.Join(dir, "compose.yaml"), []byte("name: shop\nservices:\n  web:\n    image: alpine\n    scale: 2\n"), 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := New().Load(t.Context(), LoadWorkingDir(dir))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := p.Services["web"]
+	if s.GetScale() != 2 {
+		t.Fatal("fixture has no scale")
+	}
+	plans, err := p.replicaPlans(client.NewOfflineClient(t.Context(), "shop"), &ResourcesOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plans["web"].indexes) != s.GetScale() {
+		t.Fatalf("planned indexes=%v, compose declares %d, deploy=%v", plans["web"].indexes, s.GetScale(), s.Deploy)
 	}
 }
 

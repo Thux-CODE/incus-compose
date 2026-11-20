@@ -509,8 +509,8 @@ func (p *Project) InstanceNames(c *client.Client, services ...string) []string {
 		}
 
 		replicas := 1
-		if service.Deploy != nil && service.Deploy.Replicas != nil {
-			replicas = *service.Deploy.Replicas
+		if service.Scale != nil || service.Deploy != nil && service.Deploy.Replicas != nil {
+			replicas = service.GetScale()
 		} else if service.Deploy != nil && service.Deploy.Mode == "global" && c != nil && c.Global().IsClustered() {
 			members, err := c.Global().ClusterMembers()
 			if err == nil {
