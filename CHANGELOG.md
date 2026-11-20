@@ -103,7 +103,10 @@ form.
   `depends_on` waits follow the replicas a dependency keeps, the service-wide
   `pre_start` hooks and DNS aliases go to the replica with the lowest index
   kept, and a replica recreated for an outdated definition keeps its name.
-  `logs` follows the replicas that exist. (by @sandroden)
+  `logs` follows the replicas that exist. An instance named like a replica
+  but without the service's and the compose project's labels, one made by
+  hand, is never one of them, and so never deleted as a surplus. (by
+  @sandroden)
 
 - `exec`, `cp` and `port --index N` pick `<service>-N`, the replica's number, as
   `docker compose` does, and `0` (the default) the replica with the lowest index

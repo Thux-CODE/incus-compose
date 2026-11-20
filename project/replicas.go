@@ -39,7 +39,11 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 	for _, name := range options.recreating {
 		listed := slices.ContainsFunc(instances, func(i incusApi.InstanceFull) bool { return i.Name == name })
 		if !listed {
-			instances = append(instances, incusApi.InstanceFull{Instance: incusApi.Instance{Name: name, StatusCode: incusApi.Running}})
+			instances = append(instances, incusApi.InstanceFull{Instance: incusApi.Instance{
+				Name:        name,
+				StatusCode:  incusApi.Running,
+				InstancePut: incusApi.InstancePut{Config: map[string]string{recreatingKey: "true"}},
+			}})
 		}
 	}
 
@@ -179,9 +183,17 @@ type replica struct {
 	healthy bool
 }
 
+// recreatingKey marks the stand-in replicaPlans lists for an instance being
+// recreated, deleted already: it was one of the service's, labels and all. It
+// is never written to Incus.
+const recreatingKey = "incus-compose.recreating"
+
 // serviceReplicas picks the replicas of a service out of the instances of a
 // project: named `<service>-<index>`, and labeled with the service and the
-// compose project or, made before the labels, with neither. One-offs and
+// compose project. What reconciling finds is what it may delete, so an
+// instance without the labels is never one: made by hand next to the replicas,
+// or by an incus-compose older than the labels. Such an old one keeps its name
+// through the declared names, which an `up` gives the labels to. One-offs and
 // pre_start runners are not replicas.
 func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash string) []replica {
 	var out []replica
@@ -192,13 +204,8 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 			continue
 		}
 
-		label, ok := cfg[ServiceLabelKey]
-		if ok && label != service {
-			continue
-		}
-
-		owner, ok := cfg[labelIncusComposePrefix+"project"]
-		if ok && owner != project {
+		owned := cfg[ServiceLabelKey] == service && cfg[labelIncusComposePrefix+"project"] == project
+		if !owned && !util.IsTrue(cfg[recreatingKey]) {
 			continue
 		}
 

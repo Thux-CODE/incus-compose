@@ -184,8 +184,7 @@ func TestServiceReplicas(t *testing.T) {
 		{index: 2, location: "i1", running: false, current: true, healthy: false},
 		{index: 3, location: "i1", running: true, current: true, healthy: true},
 		{index: 4, location: "i1", running: true, current: true, healthy: false},
-		{index: 10, location: "i1", running: true, current: true, healthy: true},
-	}, got, "by label and name, one-offs, other services and other projects left out; web-10 has no labels at all")
+	}, got, "by label and name, one-offs, other services and other projects left out, and web-10 with no labels at all")
 }
 
 func TestReplicaTargets(t *testing.T) {
