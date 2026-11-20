@@ -938,6 +938,11 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 	startsAgain := func(ctx context.Context) (bool, error) {
 		deadline := time.Now().Add(rolloutRestartWindow)
 
+		// Stopped is what a read says, not the absence of one.
+		var readErr error
+
+		read := false
+
 		for time.Now().Before(deadline) {
 			err := r.sleep(ctx, time.Second)
 			if err != nil {
@@ -945,9 +950,24 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 			}
 
 			again, err := running(ctx)
-			if err == nil && again {
+			if err != nil {
+				readErr = err
+				continue
+			}
+
+			read = true
+
+			if again {
 				return true, nil
 			}
+		}
+
+		if !read {
+			if readErr == nil {
+				readErr = errors.New("no read in time")
+			}
+
+			return false, fmt.Errorf("%s not read stopped: %w", r.name(index), readErr)
 		}
 
 		return false, nil
@@ -1006,7 +1026,17 @@ func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) e
 				errs = append(errs, killErr)
 			}
 
-			continue
+			// A kill that took its time is read back at once, but it does
+			// not put off the deadline: a status read after the last one
+			// decides.
+			if time.Now().Before(deadline) {
+				continue
+			}
+
+			s, err = status(ctx)
+			if err == nil && s == incusApi.Stopped {
+				return nil
+			}
 		}
 
 		if !time.Now().Before(deadline) {

@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	api "github.com/lxc/incus/v7/shared/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -184,6 +186,29 @@ func TestReviewDrainedReplacement(t *testing.T) {
 	if len(rolloutBlockers(service, health, nil, nil, nil, false)) == 0 {
 		t.Fatal("accepts a replacement excluded from service DNS")
 	}
+}
+
+// A kill call that takes longer than the time left does not buy another
+// round: the deadline is checked after it, on a status read then.
+func TestReviewStopDeadline(t *testing.T) {
+	kills := 0
+	kill := func(context.Context) error {
+		kills++
+		time.Sleep(5 * time.Millisecond)
+		return errors.New("timeout")
+	}
+	status := func(context.Context) (api.StatusCode, error) {
+		if kills == 3 {
+			return api.Stopped, nil
+		}
+		return api.Running, nil
+	}
+	err := rolloutStop(t.Context(), nil, kill, status, false, 2*time.Millisecond, time.Millisecond, time.Millisecond)
+	if kills > 1 || err == nil {
+		t.Fatalf("%d stop calls, err=%v despite expired deadline", kills, err)
+	}
+
+	assert.Contains(t, err.Error(), "still Running")
 }
 
 // An interrupt during the grace of a replica an earlier run drained leaves
