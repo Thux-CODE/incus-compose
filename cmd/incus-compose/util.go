@@ -110,8 +110,12 @@ func serviceInstance(ctx context.Context, c *client.Client, p *project.Project, 
 			return inst, nil
 		}
 
+		// A replica that could not be read may be the one asked for: the
+		// search stops there, rather than going on to the next index.
 		if !errors.Is(err, client.ErrNotFound) {
-			failed = errors.Join(failed, err)
+			failed = err
+
+			break
 		}
 	}
 

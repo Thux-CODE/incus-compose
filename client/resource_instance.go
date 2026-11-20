@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/http"
 	"os"
 	"path"
 	"slices"
@@ -570,10 +571,16 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 	}
 
 	if !options.Create {
-		err = ErrNotFound.Wrap(err)
+		// Only Incus saying so makes it absent: a read that failed otherwise
+		// (EOF, a timeout) says nothing about it, and is returned as it is.
+		missing := incusApi.StatusErrorCheck(err, http.StatusNotFound)
+		if missing {
+			err = ErrNotFound.Wrap(err)
+		}
+
 		err = r.client.hookAfter(ctx, ActionEnsure, r, options, err)
 
-		if r.deleteMarked {
+		if missing && r.deleteMarked {
 			// Just remove the resource
 			r.client.resources.Remove(r)
 		}
