@@ -120,6 +120,25 @@ form.
 
 ### Fixed
 
+- `rollout` reads every replica of the service again right before it drains an
+  old one and again right before it stops it, and goes ahead only while the
+  declared count serves without it (running, not drained, `healthy` as read
+  then). Otherwise it exits with an error, and an old replica it drained is put
+  back. The one to retire is picked on what the replicas read then, so an old
+  replica that turned unhealthy goes before a healthy one. A health read that
+  fails is no verdict: the run stops and retires nothing, where three failed
+  reads of a replica an earlier run made took it for old and could retire it. A
+  new replica that no longer serves when the old ones are read is old again: it
+  is given back, the old ones serve on, and the run exits with an error. Picked
+  up again with the new replica unhealthy and the old one drained as the only
+  one that serves, the old one is put back and the new one given back, a
+  rollback, and the run exits with an error. A replica an earlier run drained
+  stays drained when the run is interrupted during its grace. Before, the
+  replica to retire was picked without a read, and a replica that restarted or
+  turned unhealthy after its first `healthy` could leave the service with fewer
+  healthy replicas than declared, none at all with one, on a run that ended
+  successfully. (by @sandroden)
+
 - `rollout` picked up after a run cut short between the drain and the removal
   of an old replica (a retire that failed on the API) no longer puts the
   drained old replica back and retires the new one in its place. A replica

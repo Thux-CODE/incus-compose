@@ -148,16 +148,16 @@ func (f *fakeRollout) create(ctx context.Context, index int, first bool) error {
 	return nil
 }
 
-func (f *fakeRollout) health(ctx context.Context, index int) (string, bool, error) {
+func (f *fakeRollout) health(ctx context.Context, index int) (replicaRead, error) {
 	err := ctx.Err()
 	if err != nil {
-		return "", false, err
+		return replicaRead{}, err
 	}
 
 	r := f.replicas[index]
 	if r.fresh && f.healthErrs > 0 {
 		f.healthErrs--
-		return "", false, errors.New("connection reset")
+		return replicaRead{}, errors.New("connection reset")
 	}
 
 	if len(r.statuses) > 0 {
@@ -175,7 +175,7 @@ func (f *fakeRollout) health(ctx context.Context, index int) (string, bool, erro
 		f.onHealth(r.seen)
 	}
 
-	return r.seen, r.running, nil
+	return replicaRead{Status: r.seen, Running: r.running, Drained: r.drained}, nil
 }
 
 func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error {

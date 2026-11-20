@@ -757,18 +757,22 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 	return inst.Start(ctx, append(slices.Clone(r.startOpts), client.OptionNoHealthd())...)
 }
 
-func (r *rolloutRunner) health(ctx context.Context, index int) (string, bool, error) {
+func (r *rolloutRunner) health(ctx context.Context, index int) (replicaRead, error) {
 	conn, err := r.c.Connection()
 	if err != nil {
-		return "", false, err
+		return replicaRead{}, err
 	}
 
 	inst, _, err := conn.GetInstance(ctx, r.c.IncusProject(), r.name(index), nil)
 	if err != nil {
-		return "", false, err
+		return replicaRead{}, err
 	}
 
-	return inst.Config[shared.HealthStatusKey], inst.StatusCode == incusApi.Running, nil
+	return replicaRead{
+		Status:  inst.Config[shared.HealthStatusKey],
+		Running: inst.StatusCode == incusApi.Running,
+		Drained: util.IsTrue(inst.Config[shared.DNSDrainKey]),
+	}, nil
 }
 
 func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) error {

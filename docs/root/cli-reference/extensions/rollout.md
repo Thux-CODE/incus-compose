@@ -54,11 +54,22 @@ For each replica, in turn:
    the image the registry holds now) and start it;
 2. wait for ic-healthd to report it `healthy`, printing what the healthcheck
    says as it changes (`starting`, then `healthy`);
-3. set `user.label.dns.drain=true` on an old replica, which takes it out of the
-   service name in ic-dns, and wait `--dns-ttl` plus `--drain-delay` for clients
-   to move off it;
-4. stop it within the service's `stop_grace_period` (or `--stop-timeout`), and
+3. read every replica again and pick an old one to retire: one that is stopped,
+   drained or not `healthy` before a healthy one;
+4. set `user.label.dns.drain=true` on it, which takes it out of the service
+   name in ic-dns, and wait `--dns-ttl` plus `--drain-delay` for clients to move
+   off it;
+5. stop it within the service's `stop_grace_period` (or `--stop-timeout`), and
    delete it.
+
+Right before the drain, and again right before the stop, the other replicas
+are read once more: the old one goes only while the declared count serves
+without it (running, not drained, `healthy` as read then). If not, `rollout`
+puts it back into the service name and exits with an error saying how many
+serve. A read that fails is no verdict either way: the run stops with an error
+and retires nothing. A new replica that no longer serves when the replicas are
+read (ic-healthd restarted it, or it turned `unhealthy`) is old again: it is
+the one taken away, the old ones serve on, and `rollout` exits with an error.
 
 A new replica that reports `unhealthy`, stops, fails to be created or started,
 or is not `healthy` within the health timeout is deleted (or, with
@@ -115,7 +126,7 @@ second one kills it outright.
 - While it starts or is checked, it is deleted. The old replicas were not
   touched.
 - While an old replica is drained, it is put back into the service name and both
-  replicas are left running.
+  replicas are left running. One that an earlier rollout drained stays drained.
 - Once an old replica is being stopped, the stop and the delete are seen
   through.
 
@@ -127,9 +138,16 @@ replica more than declared (an interrupt while draining), one is given back
 first: a stopped one or one that is not healthy before a healthy one, so the
 service keeps N replicas serving. A rollout refuses to start with more than N+1.
 
-A running replica left drained by a rollout that was killed is put back into the
-service name first: only a rollout drains, right before a stop. `up` does not
-clear the drain label.
+A running replica left drained by a rollout that was killed stays drained and
+goes first when the others serve the declared count without it; otherwise it is
+put back into the service name first: only a rollout drains, right before a
+stop. `up` does not clear the drain label.
+
+A replica an earlier run made that is up to date is kept once it is `healthy`.
+One that does not get there is old again: when the drained old replica is then
+the only one that serves, it is put back and the new one taken away, a
+rollback, and `rollout` exits with an error. Health that cannot be read stops
+the run before anything is retired.
 
 When old replicas are left, the last line says to run `rollout` again. `up` is
 safe on what a rollout leaves: it creates and deletes nothing while the count is
