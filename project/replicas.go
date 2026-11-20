@@ -209,13 +209,8 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 			continue
 		}
 
-		dash := strings.LastIndexByte(inst.Name, '-')
-		if dash < 0 {
-			continue
-		}
-
-		index, err := strconv.Atoi(inst.Name[dash+1:])
-		if err != nil || index < 1 || client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1) != inst.Name {
+		index := replicaIndex(inst.Name, service)
+		if index < 1 {
 			continue
 		}
 
@@ -237,6 +232,40 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 	slices.SortFunc(out, func(a, b replica) int { return a.index - b.index })
 
 	return out
+}
+
+// replicaHashedIndexes is how far replicaIndex looks for the index of a
+// replica whose name is a hash.
+const replicaHashedIndexes = 1024
+
+// replicaIndex returns the index of the replica of service named name, 0 when
+// it is not named as one. A name too long for Incus is a hash of it
+// (client.SanitizeIncusName), with no index to read, so the index is the one
+// whose name hashes to it.
+func replicaIndex(name, service string) int {
+	nameOf := func(index int) string {
+		return client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1)
+	}
+
+	dash := strings.LastIndexByte(name, '-')
+	if dash >= 0 {
+		index, err := strconv.Atoi(name[dash+1:])
+		if err == nil && index >= 1 && nameOf(index) == name {
+			return index
+		}
+	}
+
+	if len(name) != 32 {
+		return 0
+	}
+
+	for index := 1; index <= replicaHashedIndexes; index++ {
+		if nameOf(index) == name {
+			return index
+		}
+	}
+
+	return 0
 }
 
 // reconcileReplicas decides the indexes a service is built with to have

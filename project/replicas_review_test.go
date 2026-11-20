@@ -1,6 +1,7 @@
 package project
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
@@ -28,6 +29,22 @@ func TestReviewForeignInstance(t *testing.T) {
 
 	require.Len(t, rs, 1)
 	assert.Equal(t, 1, rs[0].index)
+}
+
+// A service name long enough for its replicas' names to be a hash still has
+// replicas. (The review's instance carried the service label alone; a replica
+// carries the project's too.)
+func TestReviewLongService(t *testing.T) {
+	service := strings.Repeat("a", 62)
+	inst := api.Instance{Name: client.SanitizeIncusName(service+"-1", -1), Config: api.ConfigMap{ServiceLabelKey: service, labelIncusComposePrefix + "project": "p"}}
+	rs := serviceReplicas([]api.InstanceFull{{Instance: inst}}, "p", service, "")
+	if len(rs) == 0 {
+		t.Fatal("could not discover replica 1:", inst.Name)
+	}
+
+	assert.Equal(t, 1, rs[0].index)
+	assert.Equal(t, 7, replicaIndex(client.SanitizeIncusName(service+"-7", -1), service))
+	assert.Zero(t, replicaIndex(client.SanitizeIncusName("other-1", -1), service))
 }
 
 // An instance deleted to be recreated keeps its name: the stand-in listed for
