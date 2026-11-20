@@ -41,7 +41,10 @@ healthcheck an image declares is part of the check.
 
 `rollout` acts on exactly the named services. It never follows `depends_on` and
 never recreates or restarts a dependent: a service that depends on the one being
-rolled out keeps the instance it has. It does not touch the ic-healthd or ic-dns
+rolled out keeps the instance it has. A dependency the service declares with
+`condition: service_healthy` is read before each create, neither started nor
+waited for: when it is not running and `healthy`, `rollout` creates nothing and
+exits with an error naming it. It does not touch the ic-healthd or ic-dns
 sidecars either, where `up` would update them. A network or volume the compose
 file has gained since the last `up` is created for the new replica, as `up`
 would; existing ones are only read.

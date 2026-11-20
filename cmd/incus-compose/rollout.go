@@ -761,6 +761,15 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 		return client.ErrNotFound.WithKindName(client.KindInstance, r.name(index))
 	}
 
+	// The new replica is started with OptionNoHealthd, which also skips the
+	// depends_on waits; a service_healthy dependency is read here instead, as
+	// it stands, and not started or waited for: one that is not healthy now
+	// stops the rollout before anything is created.
+	err = r.dependenciesHealthy(ctx, inst)
+	if err != nil {
+		return err
+	}
+
 	// What discard may delete is only what this run creates, so the name is
 	// checked free first: an Ensure would adopt an instance found there.
 	absent, err := instanceAbsent(ctx, r.c, r.name(index))
@@ -818,6 +827,41 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 	// The healthcheck is waited for by the rollout, which also gives up on an
 	// unhealthy verdict, and the dependencies are up already.
 	return inst.Start(ctx, append(slices.Clone(r.startOpts), client.OptionNoHealthd())...)
+}
+
+// dependenciesHealthy reads the instances a new replica waits for on
+// depends_on with service_healthy, and returns an error naming those that are
+// not running and healthy.
+func (r *rolloutRunner) dependenciesHealthy(ctx context.Context, inst *client.Instance) error {
+	conn, err := r.c.Connection()
+	if err != nil {
+		return err
+	}
+
+	var errs error
+
+	for _, name := range slices.Sorted(maps.Keys(inst.Config.Dependencies)) {
+		if inst.Config.Dependencies[name] != client.HealthStatusHealthy {
+			continue
+		}
+
+		dep, _, err := conn.GetInstance(ctx, r.c.IncusProject(), name, nil)
+		if err != nil {
+			errs = errors.Join(errs, fmt.Errorf("dependency %s: %w", name, err))
+			continue
+		}
+
+		status := dep.Config[shared.HealthStatusKey]
+		if !rolloutRunning(dep.StatusCode) || status != shared.HealthStatusHealthy {
+			if status == "" {
+				status = "no healthcheck status"
+			}
+
+			errs = errors.Join(errs, fmt.Errorf("dependency %s is %s, %s: depends_on asks for it healthy", name, strings.ToLower(dep.StatusCode.String()), status))
+		}
+	}
+
+	return errs
 }
 
 func (r *rolloutRunner) health(ctx context.Context, index int) (replicaRead, error) {
