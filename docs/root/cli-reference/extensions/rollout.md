@@ -225,6 +225,9 @@ update those:
   profile);
 - DNS aliases (`networks.<net>.aliases` or `dns.aliases`): only the first
   replica carries them, so they would go unanswered while it is replaced;
+- a `dns.drain` label (or `user.label.dns.drain` through `x-incus`) set to
+  true: every new replica would be born out of the service name, and could
+  pass its check while nothing serves under the name;
 - on a cluster, a custom volume on any pool but `cephfs`: a block-backed volume
   (`ceph`, `linstor`, `lvmcluster`, ...) is mounted on one member at a time, and
   the new replica may land on another. On a standalone server both replicas

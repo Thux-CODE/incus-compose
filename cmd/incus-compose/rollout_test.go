@@ -1410,6 +1410,11 @@ func TestRolloutBlockers(t *testing.T) {
 			want:     []string{`its proxy device "admin" binds a host address the new and the old replica cannot both hold`},
 		},
 		{
+			name:    "a dns.drain label: no new replica would serve",
+			service: "image: docker.io/library/busybox\n    labels:\n      dns.drain: \"true\"",
+			want:    []string{rolloutDrainedBlocker},
+		},
+		{
 			name:    "a rollout key that is not a boolean refuses",
 			service: "image: docker.io/library/busybox\n    x-incus-compose:\n      rollout: [no]",
 			want:    []string{"x-incus-compose.rollout must be true or false"},

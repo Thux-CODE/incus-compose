@@ -417,6 +417,9 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	var (
 		health   map[string]string
 		declared map[string]map[string]string
+
+		// drainDeclared is a new replica made drained, by a label or x-incus.
+		drainDeclared bool
 	)
 
 	for _, r := range resources[svcName] {
@@ -431,6 +434,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		}
 
 		declared = declaredDevices(inst, c.Config().DefaultStoragePool)
+		drainDeclared = util.IsTrue(inst.Config.Extensions[shared.DNSDrainKey])
 
 		break
 	}
@@ -462,6 +466,10 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	}
 
 	blockers := rolloutBlockers(service, health, first.Config, []map[string]map[string]string{first.ExpandedDevices, declared}, pools, clustered)
+	if drainDeclared && !slices.Contains(blockers, rolloutDrainedBlocker) {
+		blockers = append(blockers, rolloutDrainedBlocker)
+	}
+
 	if len(blockers) > 0 {
 		return nil, rolloutPlan{}, fmt.Errorf("%s; `restart` it instead", strings.Join(blockers, "; "))
 	}
@@ -539,6 +547,11 @@ func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[s
 	return out
 }
 
+// rolloutDrainedBlocker refuses a service whose new replicas would be made
+// drained, which ic-dns keeps out of the service name: one would pass its
+// check and an old one go, with nothing left serving under the name.
+const rolloutDrainedBlocker = "its dns.drain label keeps every new replica out of the service name, so none would serve in place of an old one"
+
 // rolloutBlockers says why the new replicas of a service cannot run next to
 // the old ones, nothing when they can. oldConfig and the first device set are
 // a replica as Incus has it, so what profiles and the image added is seen;
@@ -566,6 +579,10 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 
 	if !rolloutWatched(health) {
 		add("it has no healthcheck, so no new replica can be waited for and ic-dns serves it before it is ready")
+	}
+
+	if util.IsTrue(service.Labels[strings.TrimPrefix(shared.DNSDrainKey, "user.label.")]) {
+		add(rolloutDrainedBlocker)
 	}
 
 	if service.ContainerName != "" {

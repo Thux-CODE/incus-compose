@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -172,6 +173,16 @@ func TestReviewMissingTarget(t *testing.T) {
 	cfg := map[string]string{client.ConfigHashKey: "h", "volatile.base_image": "old"}
 	if rolloutCurrent(cfg, "h", nil) {
 		t.Fatal("current with no target fingerprint")
+	}
+}
+
+// A service whose new replicas would be born drained is refused: one would
+// pass its check while ic-dns keeps it out of the service name.
+func TestReviewDrainedReplacement(t *testing.T) {
+	service := types.ServiceConfig{Name: "web", Labels: types.Labels{"dns.drain": "true"}}
+	health := map[string]string{shared.HealthEnabledKey: "true", shared.HealthKeyPrefix + "test": `["CMD","true"]`}
+	if len(rolloutBlockers(service, health, nil, nil, nil, false)) == 0 {
+		t.Fatal("accepts a replacement excluded from service DNS")
 	}
 }
 
