@@ -106,6 +106,9 @@ type rolloutPlan struct {
 	Poll          time.Duration
 	Now           func() time.Time
 	Out           io.Writer
+
+	// Notes are what a dry run could not check, which its plan says.
+	Notes []string
 }
 
 // rolloutDescribe prints what a rollout of the plan would do, for --dry-run.
@@ -147,6 +150,10 @@ func rolloutDescribe(plan rolloutPlan) {
 
 	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; %d %s, each new replica healthy within %s, each old one kept %s after its drain\n",
 		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), creates, createNoun, plan.HealthTimeout, plan.Grace)
+
+	for _, note := range plan.Notes {
+		_, _ = fmt.Fprintf(plan.Out, "%s: not checked: %s\n", plan.Service, note)
+	}
 }
 
 // rolloutResumed returns the replicas an earlier, interrupted rollout left up

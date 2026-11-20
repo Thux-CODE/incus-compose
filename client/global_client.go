@@ -609,6 +609,21 @@ type ensureProjectOptions struct {
 	config        map[string]string
 	skipHealthd   bool
 	networkDriver string
+
+	// readOnly leaves an existing project's config alone, and fills missing
+	// with the keys of config it would have added.
+	readOnly bool
+	missing  *[]string
+}
+
+// EnsureProjectReadOnly writes nothing to an existing project: the config keys
+// it lacks, which EnsureProject adds otherwise, are stored in missing instead,
+// sorted. It is for a command that only says what it would do.
+func EnsureProjectReadOnly(missing *[]string) EnsureProjectOption {
+	return func(opts *ensureProjectOptions) {
+		opts.readOnly = true
+		opts.missing = missing
+	}
 }
 
 // EnsureProjectWithCreate enables project creation if the project doesn't exist.
@@ -767,6 +782,32 @@ func (c *GlobalClient) ProjectsWithConfig(key, value string) ([]string, error) {
 	return names, nil
 }
 
+// MissingProjectConfig returns the keys of config the project does not have,
+// sorted, which AddMissingProjectConfig would add, and writes nothing.
+func (c *GlobalClient) MissingProjectConfig(name string, config map[string]string) ([]string, error) {
+	if len(config) == 0 {
+		return nil, nil
+	}
+
+	project, _, err := c.incus.GetProject(c.ctx, SanitizeProjectName(name))
+	if err != nil {
+		return nil, fmt.Errorf("reading project %s: %w", SanitizeProjectName(name), err)
+	}
+
+	var missing []string
+
+	for key := range config {
+		_, ok := project.Config[key]
+		if !ok {
+			missing = append(missing, key)
+		}
+	}
+
+	slices.Sort(missing)
+
+	return missing, nil
+}
+
 // AddMissingProjectConfig adds declared config keys the project does not have yet.
 func (c *GlobalClient) AddMissingProjectConfig(name string, config map[string]string) error {
 	if len(config) == 0 {
@@ -903,6 +944,19 @@ func (c *GlobalClient) EnsureProject(name string, opts ...EnsureProjectOption) (
 
 	p, err := c.getProject(name)
 	if err == nil {
+		if options.readOnly {
+			missing, err := c.MissingProjectConfig(name, options.config)
+			if err != nil {
+				return nil, err
+			}
+
+			if options.missing != nil {
+				*options.missing = missing
+			}
+
+			return p, nil
+		}
+
 		// Same reason as Instance.addMissingConfig.
 		err = c.AddMissingProjectConfig(name, options.config)
 		if err != nil {

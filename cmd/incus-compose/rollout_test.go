@@ -1089,6 +1089,22 @@ func TestRolloutDescribe(t *testing.T) {
 	})
 
 	assert.Equal(t, "web: can be rolled out, 2 replicas, now web-1 (running, drained), web-2 (running), web-3 (running, up to date); 1 create, each new replica healthy within 54s, each old one kept 35s after its drain\n", out.String())
+
+	out.Reset()
+
+	// What a dry run left unchecked follows the plan.
+	rolloutDescribe(rolloutPlan{
+		Service:       "web",
+		Replicas:      1,
+		Present:       []replica{{index: 1, running: true}},
+		Name:          func(index int) string { return fmt.Sprintf("web-%d", index) },
+		HealthTimeout: 54 * time.Second,
+		Grace:         35 * time.Second,
+		Out:           &out,
+		Notes:         []string{"its image is not in the project"},
+	})
+
+	assert.Equal(t, "web: can be rolled out, 1 replica, now web-1 (running); 1 create, each new replica healthy within 54s, each old one kept 35s after its drain\nweb: not checked: its image is not in the project\n", out.String())
 }
 
 func TestRolloutCurrent(t *testing.T) {

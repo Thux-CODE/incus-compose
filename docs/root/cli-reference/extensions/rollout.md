@@ -37,7 +37,11 @@ read the same variables as `up`.
 (the refusals below, ic-healthd running, the replicas present) and prints one
 line per service with the replicas found, the creates and the timeouts it would
 use. It still pulls an image that is missing from the project, since the
-healthcheck an image declares is part of the check.
+healthcheck an image declares is part of the check. It writes nothing else: it
+neither builds an image nor copies one from the cache, and does not add the
+project config keys a compose file has gained (`x-incus` at the top level). What
+it could not check for that reason follows the plan, on lines that read `not
+checked:`, and the keys a rollout would add on a line of their own.
 
 `rollout` acts on exactly the named services. It never follows `depends_on` and
 never recreates or restarts a dependent: a service that depends on the one being

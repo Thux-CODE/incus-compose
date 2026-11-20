@@ -101,7 +101,7 @@ func newRolloutCommand() *cli.Command {
 			},
 			&cli.BoolFlag{
 				Name:    "dry-run",
-				Usage:   "Check the services and print what a rollout would do, creating and stopping nothing (a missing image is still pulled)",
+				Usage:   "Check the services and print what a rollout would do, creating, building, writing and stopping nothing (a missing image is still pulled)",
 				Sources: cli.EnvVars("INCUS_COMPOSE_ROLLOUT_DRY_RUN"),
 			},
 			&cli.BoolFlag{
@@ -117,7 +117,18 @@ func newRolloutCommand() *cli.Command {
 			// The first signal winds the rollout down; a second one kills it.
 			context.AfterFunc(ctx, stop)
 
-			p, c, err := loadProject(ctx, cmd)
+			// A dry run writes nothing, the project's config included.
+			var (
+				projectOpts []client.EnsureProjectOption
+				missingKeys []string
+			)
+
+			dryRun := cmd.Bool("dry-run")
+			if dryRun {
+				projectOpts = append(projectOpts, client.EnsureProjectReadOnly(&missingKeys))
+			}
+
+			p, c, err := loadProject(ctx, cmd, projectOpts...)
 			if err != nil {
 				return err
 			}
@@ -203,6 +214,7 @@ func newRolloutCommand() *cli.Command {
 				StopTimeout:   cmd.Duration("stop-timeout"),
 				Grace:         cmd.Duration("dns-ttl") + cmd.Duration("drain-delay"),
 				KeepFailed:    cmd.Bool("keep-failed"),
+				DryRun:        dryRun,
 				Order:         order,
 				StartOptions:  startOpts,
 				Workers:       cmd.Root().Int("workers"),
@@ -239,9 +251,13 @@ func newRolloutCommand() *cli.Command {
 				return errLogged.Wrap(errs)
 			}
 
-			if cmd.Bool("dry-run") {
+			if dryRun {
 				for _, j := range jobs {
 					rolloutDescribe(j.plan)
+				}
+
+				if len(missingKeys) > 0 {
+					_, _ = fmt.Fprintf(args.Writer, "project %s: a rollout would first add the config keys %s, which --dry-run does not write\n", p.Name, strings.Join(missingKeys, ", "))
 				}
 
 				return nil
@@ -267,6 +283,7 @@ type rolloutArgs struct {
 	StopTimeout   time.Duration
 	Grace         time.Duration
 	KeepFailed    bool
+	DryRun        bool
 	Order         []string
 	StartOptions  []client.Option
 	Workers       int
@@ -374,15 +391,30 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		return nil, rolloutPlan{}, err
 	}
 
-	// Built images are not pulled; this builds one that is missing, as `up` does.
+	// Built images are not pulled; this builds one that is missing, as `up` does,
+	// or copies it from the cache. A dry run does neither, and says so.
 	images := client.NewStack(pc, client.StackWorkers(args.Workers), client.StackFailFast())
 	images.AddOrdered(args.Order, map[string][]client.Resource{svcName: resources[svcName]})
 
 	isImage := func(r client.Resource) bool { return r.Kind() == client.KindImage }
 
-	err = images.ForActionF(client.ActionEnsure, isImage).Run(ctx, client.ActionEnsure, client.OptionCreate())
-	if err != nil {
-		return nil, rolloutPlan{}, err
+	var (
+		notes   []string
+		unbuilt bool
+	)
+
+	if args.DryRun {
+		err = images.ForActionF(client.ActionEnsure, isImage).Run(ctx, client.ActionEnsure)
+		if err != nil {
+			unbuilt = true
+
+			notes = append(notes, fmt.Sprintf("its image is not in the project: a rollout would build it, copy it from the cache or pull it first, which --dry-run does not (%v); the healthcheck an image declares is not known until then", err))
+		}
+	} else {
+		err = images.ForActionF(client.ActionEnsure, isImage).Run(ctx, client.ActionEnsure, client.OptionCreate())
+		if err != nil {
+			return nil, rolloutPlan{}, err
+		}
 	}
 
 	// Which replicas are already what a create would make now, read once the
@@ -426,9 +458,20 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 			continue
 		}
 
-		health, err = inst.HealthConfig()
-		if err != nil {
-			return nil, rolloutPlan{}, err
+		if unbuilt {
+			// The compose file's own healthcheck, the image's being unknown.
+			health = map[string]string{}
+
+			for key, value := range inst.Config.Extensions {
+				if strings.HasPrefix(key, shared.HealthKeyPrefix) {
+					health[key] = value
+				}
+			}
+		} else {
+			health, err = inst.HealthConfig()
+			if err != nil {
+				return nil, rolloutPlan{}, err
+			}
 		}
 
 		declared = declaredDevices(inst, c.Config().DefaultStoragePool)
@@ -466,6 +509,12 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	blockers := rolloutBlockers(service, health, first.Config, []map[string]map[string]string{first.ExpandedDevices, declared}, pools, clustered)
 	if drainDeclared && !slices.Contains(blockers, rolloutDrainedBlocker) {
 		blockers = append(blockers, rolloutDrainedBlocker)
+	}
+
+	// The image a dry run did not get may declare the healthcheck.
+	if unbuilt && slices.Contains(blockers, rolloutUnwatchedBlocker) {
+		blockers = slices.DeleteFunc(blockers, func(b string) bool { return b == rolloutUnwatchedBlocker })
+		notes = append(notes, "the compose file declares no healthcheck, and a rollout refuses the service unless its image does")
 	}
 
 	if len(blockers) > 0 {
@@ -509,6 +558,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		Poll:          rolloutPoll,
 		Now:           time.Now,
 		Out:           args.Writer,
+		Notes:         notes,
 	}
 
 	return runner, plan, nil
@@ -545,6 +595,9 @@ func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[s
 	return out
 }
 
+// rolloutUnwatchedBlocker refuses a service nothing checks.
+const rolloutUnwatchedBlocker = "it has no healthcheck, so no new replica can be waited for and ic-dns serves it before it is ready"
+
 // rolloutDrainedBlocker refuses a service whose new replicas would be made
 // drained, which ic-dns keeps out of the service name: one would pass its
 // check and an old one go, with nothing left serving under the name.
@@ -576,7 +629,7 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 	}
 
 	if !rolloutWatched(health) {
-		add("it has no healthcheck, so no new replica can be waited for and ic-dns serves it before it is ready")
+		add(rolloutUnwatchedBlocker)
 	}
 
 	if util.IsTrue(service.Labels[strings.TrimPrefix(shared.DNSDrainKey, "user.label.")]) {
