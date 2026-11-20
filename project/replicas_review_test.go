@@ -180,6 +180,22 @@ func TestReviewComposeScale(t *testing.T) {
 	}
 }
 
+// One replica with no placement co-locates on the connected member only when
+// a restricted project may use it; else it goes to a member it may use.
+func TestReviewSingleRestrictedPlacement(t *testing.T) {
+	env := clusterPlacementEnv{clustered: true, remotePool: true, networkType: "bridge", serverName: "node1",
+		members: membersInGroups(testClusterMembers(), []string{"compute"})}
+	_, targets, _, err := resolveServicePlacementEnv(env, types.ServiceConfig{Name: "web"}, nil, false)
+	if err != nil || len(targets) != 1 || targets[0] != "node3" {
+		t.Fatalf("allowed=node3, targets=%v, err=%v", targets, err)
+	}
+
+	env.members = testClusterMembers()
+	_, targets, _, err = resolveServicePlacementEnv(env, types.ServiceConfig{Name: "web"}, nil, false)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"node1"}, targets, "unrestricted, it stays on the connected member")
+}
+
 // An instance deleted to be recreated keeps its name: the stand-in listed for
 // it counts as one of the service's replicas although it carries no labels.
 func TestReviewRecreatingKeepsItsName(t *testing.T) {

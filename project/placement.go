@@ -179,10 +179,17 @@ func resolveServicePlacementEnv(env clusterPlacementEnv, service types.ServiceCo
 	hasPlacement := mode == "global" || len(constraints) > 0 || len(preferences) > 0 || maxReplicas > 0
 
 	// Single replica with no explicit placement co-locates on the connected
-	// cluster member when using a bridge network or a local storage pool (#213).
+	// cluster member when using a bridge network or a local storage pool
+	// (#213), when that member is one of the candidates; one a restricted
+	// project may not use is refused by Incus, so a candidate goes instead.
 	if desired == 1 && !hasPlacement {
 		if env.networkType == "bridge" || !env.remotePool {
-			return 1, []string{env.serverName}, warnLocal, nil
+			local := slices.ContainsFunc(candidates, func(m incusApi.ClusterMember) bool { return m.ServerName == env.serverName })
+			if local {
+				return 1, []string{env.serverName}, warnLocal, nil
+			}
+
+			return 1, []string{orderClusterMembers(candidates, preferences, env.serverName)[0].ServerName}, warnLocal, nil
 		}
 
 		return 1, []string{""}, warnLocal, nil
