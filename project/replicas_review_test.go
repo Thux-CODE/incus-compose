@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lxc/incus-compose/client"
+	"github.com/lxc/incus-compose/shared"
 )
 
 // Regression tests from an adversarial review of how `up` reconciles a
@@ -45,6 +46,60 @@ func TestReviewLongService(t *testing.T) {
 	assert.Equal(t, 1, rs[0].index)
 	assert.Equal(t, 7, replicaIndex(client.SanitizeIncusName(service+"-7", -1), service))
 	assert.Zero(t, replicaIndex(client.SanitizeIncusName("other-1", -1), service))
+}
+
+func reviewLabeled(cfg api.ConfigMap) api.ConfigMap {
+	cfg[ServiceLabelKey] = "web"
+	cfg[labelIncusComposePrefix+"project"] = "p"
+
+	return cfg
+}
+
+// A replica with a healthcheck and no verdict yet does not serve: `up` keeps
+// the old one that was called healthy rather than it. (The review's instances
+// carried no labels, which no longer makes them replicas at all.)
+func TestReviewMissingVerdict(t *testing.T) {
+	a := api.Instance{Name: "web-1", StatusCode: api.Running, Config: reviewLabeled(api.ConfigMap{
+		client.ConfigHashKey: "old", shared.HealthStatusKey: shared.HealthStatusHealthy,
+	})}
+	b := api.Instance{Name: "web-2", StatusCode: api.Running, Config: reviewLabeled(api.ConfigMap{
+		client.ConfigHashKey: "new", shared.HealthEnabledKey: "true", shared.HealthKeyPrefix + "test": `["CMD","true"]`,
+	})}
+	rs := serviceReplicas([]api.InstanceFull{{Instance: a}, {Instance: b}}, "p", "web", "new")
+	require.Len(t, rs, 2)
+
+	_, drop := reconcileReplicas(rs, 1)
+	if drop[1] {
+		t.Fatal("drops the only replica with a healthy verdict", drop)
+	}
+
+	assert.True(t, drop[2])
+}
+
+// Of two replicas alike but for the image, the one made from the image the
+// service points at now stays: `up` does not undo an image update a rollout
+// cut short got halfway through.
+func TestReviewImageOnlySurplus(t *testing.T) {
+	instance := func(name, fp string) api.InstanceFull {
+		return api.InstanceFull{Instance: api.Instance{Name: name, StatusCode: api.Running, Config: reviewLabeled(api.ConfigMap{
+			client.ConfigHashKey: "h", shared.HealthStatusKey: shared.HealthStatusHealthy, "volatile.base_image": fp,
+		})}}
+	}
+	rs := serviceReplicas([]api.InstanceFull{instance("web-1", "previous"), instance("web-2", "target")}, "p", "web", "h")
+	markImage(rs, "target")
+
+	_, drop := reconcileReplicas(rs, 1)
+	if drop[2] {
+		t.Fatal("up discards the healthy target image", drop)
+	}
+
+	assert.True(t, drop[1])
+
+	// With no target known, the highest index goes, as before.
+	markImage(rs, "")
+
+	_, drop = reconcileReplicas(rs, 1)
+	assert.True(t, drop[2])
 }
 
 // An instance deleted to be recreated keeps its name: the stand-in listed for

@@ -98,8 +98,11 @@ form.
   `<service>-N`. As many as declared are left alone whatever their indexes (one
   replica at `web-2` stays `web-2`); fewer are joined by new ones on the lowest
   free indexes; of more, the surplus goes in this order: not running, drained,
-  made from an older compose definition, highest index, never taking the last
-  healthy replica. A replica that exists keeps its cluster member, the
+  made from an older compose definition, with no config hash, made from
+  another image than the one the service's image points at once pulled,
+  highest index, keeping as many healthy replicas as there are up to the
+  declared count. A replica with a healthcheck counts as healthy only once
+  ic-healthd has called it so. A replica that exists keeps its cluster member, the
   `depends_on` waits follow the replicas a dependency keeps, the service-wide
   `pre_start` hooks and DNS aliases go to the replica with the lowest index
   kept, and a replica recreated for an outdated definition keeps its name.

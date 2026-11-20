@@ -2,12 +2,14 @@ package project
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/compose-spec/compose-go/v2/types"
 	incusApi "github.com/lxc/incus/v7/shared/api"
 	"github.com/lxc/incus/v7/shared/util"
 
@@ -73,6 +75,7 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 		}
 
 		existing := serviceReplicas(instances, p.Name, service.Name, hash)
+		markImage(existing, serviceImageTarget(c, service))
 
 		add := options.addReplica
 		if add != nil && add.service != service.Name {
@@ -152,6 +155,32 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 	return plans, errs
 }
 
+// serviceImageTarget returns the fingerprint the service's image points at,
+// as this client ensured it already (on the build that follows the pull of
+// `up`), and "" when it has not.
+func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
+	name := service.Image
+	if service.Build != nil && name == "" {
+		name = "localhost/" + service.Name
+	}
+
+	if name == "" {
+		return ""
+	}
+
+	res, err := c.Resource(client.KindImage, name, nil)
+	if err != nil {
+		return ""
+	}
+
+	img, ok := res.(*client.Image)
+	if !ok || !img.IsEnsured() {
+		return ""
+	}
+
+	return img.State().IncusAlias.Target
+}
+
 // ReplicaIndexes returns the indexes of the replicas of a service that exist,
 // ascending, whatever they are.
 func (p *Project) ReplicaIndexes(c *client.Client, service string) ([]int, error) {
@@ -176,11 +205,50 @@ type replica struct {
 	drained  bool
 
 	// current is made from the service config as it is now, or carries no
-	// hash to tell.
-	current bool
+	// hash to tell; unhashed is the one with no hash.
+	current  bool
+	unhashed bool
 
-	// healthy runs, is not drained and has no verdict against it.
+	// baseImage is the image it was made from, and otherImage tells it is
+	// not the one the service's image points at now, when that is known
+	// (markImage).
+	baseImage  string
+	otherImage bool
+
+	// healthy runs, is not drained and was called healthy, or has no
+	// healthcheck to call it anything.
 	healthy bool
+}
+
+// markImage tells the replicas made from another image than target, the
+// fingerprint the service's image points at now; with none known, none is.
+func markImage(existing []replica, target string) {
+	for i := range existing {
+		existing[i].otherImage = target != "" && existing[i].baseImage != target
+	}
+}
+
+// healthWatched reports whether ic-healthd runs a check on an instance with
+// this config: enabled, with a test that is not compose's NONE. Such a replica
+// serves only once a check called it healthy.
+func healthWatched(cfg map[string]string) bool {
+	if !util.IsTrue(cfg[shared.HealthEnabledKey]) {
+		return false
+	}
+
+	raw := strings.TrimSpace(cfg[shared.HealthKeyPrefix+"test"])
+	if raw == "" {
+		return false
+	}
+
+	var test []string
+
+	err := json.Unmarshal([]byte(raw), &test)
+	if err != nil {
+		return true
+	}
+
+	return len(test) > 0 && test[0] != "NONE"
 }
 
 // recreatingKey marks the stand-in replicaPlans lists for an instance being
@@ -219,13 +287,20 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 		status := cfg[shared.HealthStatusKey]
 		instHash, hashed := cfg[client.ConfigHashKey]
 
+		// One with a check that has not reached a verdict yet, just started
+		// or made by a client killed before ic-healthd wrote one, does not
+		// serve: it covers the removal of no other.
+		verdict := status == shared.HealthStatusHealthy || status == "" && !healthWatched(cfg)
+
 		out = append(out, replica{
-			index:    index,
-			location: inst.Location,
-			running:  running,
-			drained:  drained,
-			current:  !hashed || instHash == hash,
-			healthy:  running && !drained && (status == shared.HealthStatusHealthy || status == ""),
+			index:     index,
+			location:  inst.Location,
+			running:   running,
+			drained:   drained,
+			current:   !hashed || instHash == hash,
+			unhashed:  !hashed,
+			baseImage: cfg["volatile.base_image"],
+			healthy:   running && !drained && verdict,
 		})
 	}
 
@@ -272,8 +347,11 @@ func replicaIndex(name, service string) int {
 // desired replicas, out of the ones that exist, whatever their indexes. Fewer
 // than desired are joined by new ones on the lowest free indexes. More give
 // up the surplus, which drop holds: first the ones not running, then the
-// drained ones, then the ones made from an older service config, then the
-// highest index; but never the last healthy one, while desired is not 0.
+// drained ones, then the ones made from an older service config, then the ones
+// with no config hash, then the ones made from another image than the
+// service's, then the highest index. The ones kept hold as many healthy
+// replicas as there are, up to desired: a healthy one goes only for another
+// healthy one.
 //
 // The indexes are ascending, and include the ones dropped, which have to be
 // built to be deleted.
@@ -303,8 +381,12 @@ func reconcileReplicas(existing []replica, desired int) ([]int, map[int]bool) {
 			return 1
 		case !r.current:
 			return 2
-		default:
+		case r.unhashed:
 			return 3
+		case r.otherImage:
+			return 4
+		default:
+			return 5
 		}
 	}
 
@@ -316,12 +398,27 @@ func reconcileReplicas(existing []replica, desired int) ([]int, map[int]bool) {
 
 	surplus := len(existing) - desired
 
-	keepsHealthy := slices.ContainsFunc(order[surplus:], func(r replica) bool { return r.healthy })
-	if desired > 0 && !keepsHealthy {
-		// The healthy one that would go last swaps with the first one kept.
-		for j := surplus - 1; j >= 0; j-- {
-			if order[j].healthy {
-				order[j], order[surplus] = order[surplus], order[j]
+	healthy := func(rs []replica) int {
+		n := 0
+		for _, r := range rs {
+			if r.healthy {
+				n++
+			}
+		}
+
+		return n
+	}
+
+	// The healthy one that would go last swaps with the first one kept that
+	// is not, until the ones kept hold as many as there are, up to desired.
+	need := min(desired, healthy(existing))
+
+	for healthy(order[surplus:]) < need {
+		j := slices.IndexFunc(order[surplus:], func(r replica) bool { return !r.healthy }) + surplus
+
+		for k := surplus - 1; k >= 0; k-- {
+			if order[k].healthy {
+				order[k], order[j] = order[j], order[k]
 
 				break
 			}

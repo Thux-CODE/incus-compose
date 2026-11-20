@@ -164,8 +164,12 @@ since they were made, as it always does.
   `web-3`): nothing is created or deleted;
 - fewer: new ones take the lowest free indexes;
 - more: the surplus goes, first the ones not running, then the drained ones,
-  then the ones made from an older compose definition, then the highest index;
-  but a healthy replica stays when there is one.
+  then the ones made from an older compose definition, then the ones with no
+  config hash, then the ones made from another image than the one the service's
+  image points at (when `up` has pulled it), then the highest index; but the
+  ones kept hold as many healthy replicas as there are, up to the declared
+  count. A replica with a healthcheck that has not reported `healthy` yet does
+  not count as healthy.
 
 A replica is one of the service's when it carries its
 `user.label.incus-compose.service` label (and the compose project's) and is

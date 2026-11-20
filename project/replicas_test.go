@@ -22,6 +22,8 @@ func TestReconcileReplicas(t *testing.T) {
 	stopped := func(r replica) replica { r.running = false; r.healthy = false; return r }
 	drained := func(r replica) replica { r.drained = true; r.healthy = false; return r }
 	starting := func(r replica) replica { r.healthy = false; return r }
+	unhashed := func(r replica) replica { r.unhashed = true; return r }
+	otherImage := func(r replica) replica { r.otherImage = true; return r }
 
 	for _, tt := range []struct {
 		name     string
@@ -116,6 +118,34 @@ func TestReconcileReplicas(t *testing.T) {
 			drop:     []int{2},
 		},
 		{
+			name:     "as many healthy ones as declared stay, not one alone",
+			existing: []replica{stale(up(1)), stale(up(2)), starting(up(3)), starting(up(4))},
+			desired:  2,
+			indexes:  []int{1, 2, 3, 4},
+			drop:     []int{3, 4},
+		},
+		{
+			name:     "fewer healthy ones than declared all stay",
+			existing: []replica{stale(up(1)), starting(up(2)), starting(up(3))},
+			desired:  2,
+			indexes:  []int{1, 2, 3},
+			drop:     []int{3},
+		},
+		{
+			name:     "one with no config hash before one with the current hash",
+			existing: []replica{up(1), unhashed(up(2))},
+			desired:  1,
+			indexes:  []int{1, 2},
+			drop:     []int{2},
+		},
+		{
+			name:     "one made from another image before one made from the service's",
+			existing: []replica{up(1), otherImage(up(2))},
+			desired:  1,
+			indexes:  []int{1, 2},
+			drop:     []int{2},
+		},
+		{
 			name:     "scaled to 0, all go",
 			existing: []replica{up(2), up(5)},
 			desired:  0,
@@ -181,9 +211,9 @@ func TestServiceReplicas(t *testing.T) {
 
 	assert.Equal(t, []replica{
 		{index: 1, location: "i1", running: true, drained: true, current: false, healthy: false},
-		{index: 2, location: "i1", running: false, current: true, healthy: false},
+		{index: 2, location: "i1", running: false, current: true, unhashed: true, healthy: false},
 		{index: 3, location: "i1", running: true, current: true, healthy: true},
-		{index: 4, location: "i1", running: true, current: true, healthy: false},
+		{index: 4, location: "i1", running: true, current: true, unhashed: true, healthy: false},
 	}, got, "by label and name, one-offs, other services and other projects left out, and web-10 with no labels at all")
 }
 
