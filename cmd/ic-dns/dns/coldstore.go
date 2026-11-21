@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 )
 
@@ -231,7 +232,9 @@ func encodeCold(serials map[string]zoneSerial, peers map[string][]string) ([]byt
 // not a migration either: it is ignored, and the fleet is read again.
 //
 // The peering comes back nil where none was known, and empty where one was
-// read with nothing in it.
+// read with nothing in it. A pair stored one way round only is dropped: a read
+// keeps a pair only when both sides say Created, so a file saying otherwise
+// was not written from one, and that pair is not taken on trust.
 func decodeCold(b []byte) (map[string]zoneSerial, map[string][]string, error) {
 	var state coldState
 
@@ -248,9 +251,21 @@ func decodeCold(b []byte) (map[string]zoneSerial, map[string][]string, error) {
 		return state.Serials, nil, nil
 	}
 
-	if state.Peers == nil {
-		state.Peers = map[string][]string{}
+	peers := map[string][]string{}
+
+	for from, tos := range state.Peers {
+		for _, to := range tos {
+			if to == from || !slices.Contains(state.Peers[to], from) || slices.Contains(peers[from], to) {
+				continue
+			}
+
+			peers[from] = append(peers[from], to)
+		}
 	}
 
-	return state.Serials, state.Peers, nil
+	for from := range peers {
+		slices.Sort(peers[from])
+	}
+
+	return state.Serials, peers, nil
 }

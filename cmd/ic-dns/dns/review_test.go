@@ -180,6 +180,24 @@ func TestReviewUnknownPeeringStaysUnknown(t *testing.T) {
 	require.NotNil(t, peers, "a read finding nothing peered is a peering known")
 }
 
+// TestReviewOneSidedColdPeering: a cold store of the current version holding
+// a pair one way round only. A read never keeps such a pair, so neither does
+// the load: the pair stored both ways survives, the one-sided one does not,
+// and neither does a network peered with itself.
+func TestReviewOneSidedColdPeering(t *testing.T) {
+	raw := `{"version":1,"serials":{},"peers_known":true,"peers":{` +
+		`"default/a":["default/b","default/c","default/a"],` +
+		`"default/b":["default/a"],` +
+		`"default/d":["default/c"]}}`
+
+	_, peers, err := decodeCold([]byte(raw))
+	require.NoError(t, err)
+	require.Equal(t, map[string][]string{
+		"default/a": {"default/b"},
+		"default/b": {"default/a"},
+	}, peers)
+}
+
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
 // ended and folded after it is stamped cold, and still changes a zone already
 // served whole. Its serial steps, or a secondary keeps the old address.
