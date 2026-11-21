@@ -135,6 +135,13 @@ type Plugin struct {
 	// absence final. Keyed like a call.
 	unread map[string]subject
 
+	// owedDelete is every instance a read found gone while a later read of it
+	// was owed, keyed like a call: nothing holds it any more, so the delete is
+	// the key's to announce - by the next read that lands and finds it gone,
+	// or the next listing that leaves it out - and not lost with a read that
+	// fails meanwhile.
+	owedDelete map[string]subject
+
 	// endGrace is when a run held on unread ends anyway, and graceOver says it
 	// has come: an instance whose read fails for good holds a run up to this
 	// and no further.
@@ -288,12 +295,13 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		inbox:  make(chan *iutil.Event, o.InboxSize),
 		sweeps: sweeps,
 
-		q:       &queue{},
-		unread:  map[string]subject{},
-		state:   loadState(logger, o.StoreFile, o.Project),
-		reads:   newDeferred(o.Workers, o.ReadTimeout),
-		retries: newRetries(),
-		archive: archive{},
+		q:          &queue{},
+		unread:     map[string]subject{},
+		owedDelete: map[string]subject{},
+		state:      loadState(logger, o.StoreFile, o.Project),
+		reads:      newDeferred(o.Workers, o.ReadTimeout),
+		retries:    newRetries(),
+		archive:    archive{},
 	}
 
 	// Nil where nothing is written, which is what the fold and the shutdown
@@ -661,7 +669,8 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 		return
 	}
 
-	had := p.state.instance(c.project, c.name) != nil || c.gone
+	_, owed := p.owedDelete[c.key]
+	had := p.state.instance(c.project, c.name) != nil || owed
 	unserved := p.opts.Instance != nil && res.instance != nil && !p.opts.Instance(res.instance)
 
 	inst, landed := p.patchState(ctx, c.project, c.name, res.instance, res.state, res.err)
@@ -732,20 +741,30 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	// Unless a read of the same key is already owed: it was asked for after
 	// this one went out, so its events are in the line ahead of where this
 	// delete would go, and an instance made again under the name in between
-	// would reach the chain and then be taken away by the older news. That
-	// read announces the delete instead, if it finds the instance gone too.
-	if had && landed && p.state.instance(c.project, c.name) == nil {
-		next := p.reads.calls[c.key]
-		if next != nil {
-			next.gone = true
-
-			return
-		}
-
-		p.q.push(iutil.NewEvent(time.Now(),
-			incusapi.EventLifecycleInstanceDeleted, c.project, c.name, "").
-			WithChainState(p.chain), true)
+	// would reach the chain and then be taken away by the older news. The
+	// delete is owed by the key instead, not by that read: the next read of
+	// it that lands and finds it gone announces it, however many fail first,
+	// and so does a listing that no longer has it. One that finds it there
+	// owes nothing any more.
+	switch {
+	case !landed:
+	case p.state.instance(c.project, c.name) != nil:
+		delete(p.owedDelete, c.key)
+	case had && p.reads.calls[c.key] != nil:
+		p.owedDelete[c.key] = subject{project: c.project, instance: c.name}
+	case had:
+		p.announceDelete(c.project, c.name)
 	}
+}
+
+// announceDelete puts in the line the delete of one instance nothing announced
+// and nothing holds any more, and settles what was owed for it.
+func (p *Plugin) announceDelete(project, name string) {
+	delete(p.owedDelete, resourceKey(kindInstance, project, name))
+
+	p.q.push(iutil.NewEvent(time.Now(),
+		incusapi.EventLifecycleInstanceDeleted, project, name, "").
+		WithChainState(p.chain), true)
 }
 
 // accept puts one event in the line, issuing whatever read it needs first.
@@ -810,6 +829,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.updateMetrics()
 		p.q.push(ev, true)
 		p.forgetUnread(ctx, resourceKey(kindInstance, ev.ProjectName(), ev.Name()))
+		delete(p.owedDelete, resourceKey(kindInstance, ev.ProjectName(), ev.Name()))
 
 		return
 	}

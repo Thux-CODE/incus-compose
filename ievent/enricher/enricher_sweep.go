@@ -66,6 +66,13 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
 
+		for _, s := range p.owedDelete {
+			if !slices.Contains(msg.names, s.project) {
+				p.accept(ctx, iutil.NewEvent(time.Now(),
+					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+			}
+		}
+
 		p.state.pruneProjects(msg.names)
 
 		p.forgetUnread(ctx, p.unreadOutside(func(s subject) bool { return slices.Contains(msg.names, s.project) })...)
@@ -95,6 +102,14 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		for _, s := range p.state.missingInstances(msg.project, msg.names) {
 			p.accept(ctx, iutil.NewEvent(time.Now(),
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+		}
+
+		// And what is owed a delete nothing holds any more.
+		for _, s := range p.owedDelete {
+			if s.project == msg.project && !slices.Contains(msg.names, s.instance) {
+				p.accept(ctx, iutil.NewEvent(time.Now(),
+					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+			}
 		}
 
 		// What the listing has and nothing holds is a name nobody downstream
