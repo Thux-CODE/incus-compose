@@ -3,6 +3,7 @@ package enricher
 import (
 	"context"
 	"slices"
+	"time"
 
 	incusapi "github.com/lxc/incus/v7/shared/api"
 
@@ -30,6 +31,13 @@ func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
 	// The event that happened goes in first, ahead of anything it causes.
 	p.q.push(ev, true)
 
+	// What was read of it before now is older than this, wherever it lands.
+	p.netMoved[netName{project: ev.ProjectName(), name: ev.Name()}] = time.Now()
+
+	if ev.OldName() != "" {
+		p.netMoved[netName{project: ev.ProjectName(), name: ev.OldName()}] = time.Now()
+	}
+
 	// A rename leaves the old key behind; everything that was on it is re-read,
 	// because the key its addresses were filed under has gone.
 	if ev.OldName() != "" {
@@ -52,6 +60,20 @@ func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
 	})
 
 	return true
+}
+
+// netName names one network, by the project an event or a read named it in.
+type netName struct {
+	project string
+	name    string
+}
+
+// networkMoved reports whether an event about one network arrived after since:
+// a read or a listing of it from before then says what the event changed.
+func (p *Plugin) networkMoved(project, name string, since time.Time) bool {
+	at, moved := p.netMoved[netName{project: project, name: name}]
+
+	return moved && at.After(since)
 }
 
 // forgetNetwork drops one network and re-reads what was on it. Both halves matter:

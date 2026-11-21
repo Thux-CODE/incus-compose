@@ -53,6 +53,10 @@ type sweepMsg struct {
 	// run is which run said it. A run abandoned for a newer one may still get
 	// a message through: its send races the cancel.
 	run uint64
+
+	// at is when the listing or the read this says was asked for, so an event
+	// that arrived after it is not undone by what it found.
+	at time.Time
 }
 
 // sweeperConn is what the sweeper lists. An interface rather than the connection, so
@@ -157,6 +161,8 @@ func runSweep(ctx context.Context, logger *slog.Logger, a sweepArgs) error {
 // A project that could not be read still counts as served, or it would be
 // pruned on the strength of a failed request.
 func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (served, projects []string, err error) {
+	listed := time.Now()
+
 	readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 	names, err := a.conn.GetProjectNames(readCtx)
 
@@ -202,7 +208,7 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 		}
 	}
 
-	err = sweepSend(ctx, a, sweepMsg{action: sweepActionProjects, names: served})
+	err = sweepSend(ctx, a, sweepMsg{action: sweepActionProjects, names: served, at: listed})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -216,6 +222,8 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 // networks of its own, and asking one project answers with that project's alone.
 func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projects []string) error {
 	for _, project := range projects {
+		listed := time.Now()
+
 		readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		names, err := a.conn.GetNetworkNames(readCtx, project)
 
@@ -233,18 +241,21 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 			action:  sweepActionNetworks,
 			project: project,
 			names:   names,
+			at:      listed,
 		})
 		if err != nil {
 			return err
 		}
 
 		for _, netName := range names {
+			read := time.Now()
+
 			readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 			net, _, err := a.readNet(readCtx, project, netName)
 
 			cancel()
 
-			msg := sweepMsg{action: sweepActionNetwork, network: net}
+			msg := sweepMsg{action: sweepActionNetwork, network: net, at: read}
 			if err != nil {
 				msg = sweepMsg{action: sweepActionFailed, err: err}
 			}
@@ -276,6 +287,8 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 	var failed []error
 
 	for _, project := range served {
+		listed := time.Now()
+
 		readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		names, err := a.conn.GetInstanceNames(readCtx, project, nil)
 
@@ -294,6 +307,7 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 			action:  sweepActionInstances,
 			project: project,
 			names:   names,
+			at:      listed,
 		})
 		if err != nil {
 			return err

@@ -135,6 +135,11 @@ type Plugin struct {
 	// absence final. Keyed like a call.
 	unread map[string]subject
 
+	// netMoved is when an event last arrived about each network: a read or a
+	// listing of it asked for before then is older news than the event, and
+	// is not taken.
+	netMoved map[netName]time.Time
+
 	// owedDelete is every instance a read found gone while a later read of it
 	// was owed, keyed like a call: nothing holds it any more, so the delete is
 	// the key's to announce - by the next read that lands and finds it gone,
@@ -298,6 +303,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		q:          &queue{},
 		unread:     map[string]subject{},
 		owedDelete: map[string]subject{},
+		netMoved:   map[netName]time.Time{},
 		state:      loadState(logger, o.StoreFile, o.Project),
 		reads:      newDeferred(o.Workers, o.ReadTimeout),
 		retries:    newRetries(),
@@ -644,6 +650,14 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 		if res.err != nil {
 			// Left to the run: a re-read here would ask the daemon for an
 			// instance by this name, since the fan-out only makes those.
+			return
+		}
+
+		// Older than an event about the network, under the key it was asked
+		// for or the one Incus answered with - a tenant's NIC naming the
+		// default project's network reads it under the tenant - it would undo
+		// that event: the event's own read says what the network is now.
+		if p.networkMoved(c.project, c.name, c.sent) || p.networkMoved(res.network.Project, res.network.Name, c.sent) {
 			return
 		}
 

@@ -49,6 +49,10 @@ type call struct {
 	// The read may have been taken before what they announce, so they get one
 	// of their own once this one lands.
 	again *call
+
+	// sent is when the read went to the pool, so what it brings back can be
+	// told older than an event that arrived meanwhile.
+	sent time.Time
 }
 
 // join folds a second call for the same key into this one; the first ev is
@@ -588,6 +592,7 @@ func (d *deferred) submit(ctx context.Context, c *call) error {
 
 	readCtx, cancel := context.WithTimeout(ctx, d.timeout)
 	d.cancels[c.key] = cancel
+	c.sent = time.Now()
 
 	err := d.pool.Submit(func() {
 		defer cancel()

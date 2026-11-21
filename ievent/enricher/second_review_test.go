@@ -126,6 +126,62 @@ func TestSecondReadOutsideListingCannotHoldRound(t *testing.T) {
 	require.Equal(t, iutil.ActionSweepEnd, (<-raised).Action)
 }
 
+// TestSecondNetworkRepliesAfterDelete: a network read taken before its delete
+// lands after it, from the sweeper or from a read a tenant's NIC asked for
+// under the tenant's key. Neither puts the network back.
+func TestSecondNetworkRepliesAfterDelete(t *testing.T) {
+	for _, path := range []string{"sweeper", "inherited network read"} {
+		t.Run(path, func(t *testing.T) {
+			p := bare(t)
+			f := &fixture{reads: map[string]int{}, fleet: testlib.NewProject("default", 0, 1)}
+			n := f.fleet.Networks[0]
+			n.Managed = true
+			var res result
+			read := time.Now()
+			if path == "inherited network read" {
+				p.reads.readNet = func(context.Context, string, string) (*api.Network, string, error) { return &n, "", nil }
+				p.readNetwork(t.Context(), "tenant", n.Name)
+				res = <-p.reads.results
+			}
+			p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkDeleted, "default", n.Name, ""))
+			if path == "sweeper" {
+				p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetwork, network: &n, at: read})
+			} else {
+				p.settleRead(t.Context(), res)
+			}
+			_, _, exists := p.state.network("tenant", n.Name)
+			require.False(t, exists, "deleted network was published under its old key")
+
+			// A read asked for after the delete is news, and is taken.
+			p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetwork, network: &n, at: time.Now()})
+			_, _, exists = p.state.network("default", n.Name)
+			require.True(t, exists, "a read after the event was not taken")
+		})
+	}
+}
+
+// TestSecondNetworkCreatedAfterListing: a network listing taken before a
+// network was created, delivered after the create's read: it prunes nothing
+// the event brought in.
+func TestSecondNetworkCreatedAfterListing(t *testing.T) {
+	p := bare(t)
+	listed := time.Now()
+	n := api.Network{Name: "new", Project: "default", Managed: true, Config: map[string]string{"ipv4.address": "10.9.0.1/24"}}
+	p.reads.readNet = func(context.Context, string, string) (*api.Network, string, error) { return &n, "", nil }
+	p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkCreated, "default", "new", ""))
+	p.settleRead(t.Context(), <-p.reads.results)
+	_, _, exists := p.state.network("default", "new")
+	require.True(t, exists)
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetworks, project: "default", at: listed})
+	_, _, exists = p.state.network("default", "new")
+	require.True(t, exists, "a listing older than the create pruned it")
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetworks, project: "default", at: time.Now()})
+	_, _, exists = p.state.network("default", "new")
+	require.False(t, exists, "a listing after the create no longer has it, and prunes it")
+}
+
 // TestSecondRoundEndNamesItsSession: the run a connected restarts ends naming
 // that connected's session, which is what the source checks it against.
 func TestSecondRoundEndNamesItsSession(t *testing.T) {

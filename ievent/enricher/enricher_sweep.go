@@ -93,7 +93,17 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		}
 
 	case sweepActionNetworks:
-		p.state.pruneNetworks(msg.project, msg.names)
+		// A network an event moved after the listing went out is the event's,
+		// whatever the listing says: one created since is not gone.
+		listed := slices.Clone(msg.names)
+
+		for key, at := range p.netMoved {
+			if key.project == msg.project && at.After(msg.at) {
+				listed = append(listed, key.name)
+			}
+		}
+
+		p.state.pruneNetworks(msg.project, listed)
 
 	case sweepActionInstances:
 		// Through accept, which is where a delete drops the instance and its
@@ -132,6 +142,11 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		}
 
 	case sweepActionNetwork:
+		// Read before an event about it, it says what that event changed.
+		if p.networkMoved(msg.network.Project, msg.network.Name, msg.at) {
+			return
+		}
+
 		p.state.setNetwork(*msg.network)
 
 	case sweepActionNetworksWarm:
