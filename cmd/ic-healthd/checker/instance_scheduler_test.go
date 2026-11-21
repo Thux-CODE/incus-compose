@@ -270,10 +270,70 @@ func TestRunInstanceActionsReturnsZeroWhenNothingIsWaiting(t *testing.T) {
 	s := newScheduler(t)
 
 	inst := s.add("a-1", testConfig())
-	s.running(t, inst, instanceChecking, time.Now().Add(time.Minute))
+	inst.state = instanceParked
+	inst.action = ""
 
 	require.True(t, s.run().IsZero(),
-		"an instance with an action in flight contributes no deadline: the loop parks instead of spinning")
+		"a parked instance has nothing due and no deadline: the loop parks instead of spinning")
+}
+
+// TestRunInstanceActionsWakesForTheWatchdog: an action in flight is the only
+// thing tracked. Its deadline is what the loop sleeps until, or a check that
+// never returns would hold the instance until an unrelated event came by -
+// up to the loop's idle hour.
+func TestRunInstanceActionsWakesForTheWatchdog(t *testing.T) {
+	t.Parallel()
+
+	for _, state := range []instanceState{instanceChecking, instanceRestarting} {
+		t.Run(string(state), func(t *testing.T) {
+			t.Parallel()
+
+			s := newScheduler(t)
+
+			inst := s.add("web-1", testConfig())
+			inst.action = instanceActionCheck
+			if state == instanceRestarting {
+				inst.action = instanceActionRestart
+			}
+
+			deadline := time.Now().Add(150 * time.Millisecond)
+			s.running(t, inst, state, deadline)
+
+			earliest := s.run()
+			require.False(t, earliest.IsZero(), "nothing would wake the loop for the watchdog")
+			require.False(t, earliest.After(deadline))
+
+			// Woken at that time, the watchdog reaps it and hands back the new due.
+			time.Sleep(time.Until(earliest))
+			for !time.Now().After(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+
+			earliest = s.run()
+			require.Equal(t, instanceIdle, inst.state, "the watchdog reaped the action")
+			require.False(t, inst.due.IsZero())
+			require.Equal(t, inst.due, earliest, "the loop is woken for what comes next")
+		})
+	}
+}
+
+// TestRunInstanceActionsWakesForAnEscalatedRestart: a timeout that exhausts the
+// retries hands the instance to the restart policy, and the loop wakes for that
+// restart's backoff.
+func TestRunInstanceActionsWakesForAnEscalatedRestart(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.config.retries = 1
+	s.running(t, inst, instanceChecking, time.Now().Add(-time.Second))
+
+	earliest := s.run()
+	require.Equal(t, instanceActionRestart, inst.action)
+	require.Equal(t, inst.due, earliest)
+
+	require.Equal(t, shared.HealthStatusUnhealthy, s.next(t).status)
 }
 
 func TestRunInstanceActionsFiresTheDueAction(t *testing.T) {
@@ -299,8 +359,9 @@ func TestRunInstanceActionsFiresTheDueAction(t *testing.T) {
 			inst.action = tt.action
 			inst.due = time.Now().Add(-time.Second)
 
-			require.True(t, s.run().IsZero(), "a fired instance contributes no deadline")
+			earliest := s.run()
 			require.Equal(t, tt.wantState, inst.state)
+			require.Equal(t, inst.actionDeadline, earliest, "a fired instance is woken for by its watchdog deadline")
 			require.NotNil(t, inst.actionContext, "the action needs a context to be told apart later")
 			require.NotNil(t, inst.actionCancel)
 

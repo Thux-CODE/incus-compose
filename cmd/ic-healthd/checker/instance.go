@@ -791,6 +791,13 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 
 	for _, inst := range instances {
 		if inst.state != instanceIdle {
+			// Not overrun yet: the loop has to wake for the watchdog by then,
+			// or a check that never returns holds the instance until some
+			// unrelated event comes by. A parked instance has no deadline.
+			if !inst.actionDeadline.IsZero() && !now.After(inst.actionDeadline) {
+				keep(inst.actionDeadline)
+			}
+
 			if !inst.actionDeadline.IsZero() && now.After(inst.actionDeadline) {
 				logger.Warn("Action deadline exceeded", "project", inst.project, "instance", inst.name, "state", inst.state)
 				// Clearing the context marks what the abandoned action reports as stale.
@@ -807,7 +814,6 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 					// A probe of the run before: its timeout is not a failure
 					// of this one, which has had no check yet.
 					inst.due = now
-					keep(inst.due)
 				} else if checking {
 					// As in docker, a probe that exceeds its timeout is a
 					// failed probe.
@@ -828,6 +834,10 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 						restartsTotal.WithLabelValues("failed").Inc()
 					}
 				}
+
+				// Whichever branch set it, an escalation included: the
+				// instance is idle again and waits on this.
+				keep(inst.due)
 			}
 			continue
 		}
@@ -864,6 +874,7 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 			inst.state = instanceRestarting
 			inst.actionDeadline = now.Add(restartTimeout)
 			inst.actionContext, inst.actionCancel = actionCtx, cancel
+			keep(inst.actionDeadline)
 		case instanceActionCheck:
 			// No need to check an instance without a test, or one that is not running.
 			if len(inst.config.test) == 0 || !inst.config.running {
@@ -898,6 +909,7 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 			inst.actionDeadline = now.Add(inst.config.timeout)
 			inst.actionContext, inst.actionCancel = actionCtx, cancel
 			inst.actionRun = inst.run
+			keep(inst.actionDeadline)
 		}
 	}
 

@@ -305,7 +305,11 @@ late, after the new run's first check was sent, costs one check more.
 The watchdog itself lives in `runInstanceActions`: an action past its deadline
 is cancelled and its slot freed. A check that overran counts as a failed probe,
 matching docker; a restart that overran counts as a failed restart and widens
-the backoff.
+the backoff. The time `runInstanceActions` returns for the loop's timer counts
+the deadline of every action in flight as well as every idle instance's `due`,
+including the one the watchdog has just set: otherwise a check that never
+returns would hold its instance until some unrelated event woke the loop, up to
+its idle hour. A parked instance contributes nothing.
 
 ### Status writes
 
