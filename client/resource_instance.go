@@ -577,6 +577,13 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 			if ownErr != nil {
 				return false, r.client.hookAfter(ctx, ActionEnsure, r, options, ownErr)
 			}
+
+			// Going away: nothing is added to it, so a surplus taken away by
+			// something else meanwhile meets no PATCH to fail on.
+			err = r.ensured()
+			err = r.client.hookAfter(ctx, ActionEnsure, r, options, err)
+
+			return err == nil, err
 		}
 
 		// Keys only: a changed value still needs --recreate.
