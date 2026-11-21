@@ -102,8 +102,10 @@ func TestReviewReplayCanLoseStoredName(t *testing.T) {
 
 // TestReviewReplaySpillKeepsOrder: the same through Run, with a replay far
 // larger than the inbox and a live update behind it. Every stored name
-// answers, and the live update - which followed the replay - wins over the
-// restored address of the same instance.
+// answers. The live update is not restored, so a full inbox with nothing
+// spilled drops it as ever; when it is not dropped - it went behind the spill,
+// or on the inbox after it - it followed the replay and wins over the restored
+// address of the same instance.
 func TestReviewReplaySpillKeepsOrder(t *testing.T) {
 	r := start(t, Suffix("incus"), InboxSize(1))
 
@@ -116,14 +118,18 @@ func TestReviewReplaySpillKeepsOrder(t *testing.T) {
 
 	r.p.Handle(enriched(incusapi.EventLifecycleInstanceUpdated, "shop", "i0", "10.0.0.200"))
 
-	folded := 0
+	live := false
 
-	for folded < n+1 {
+	for folded := 0; folded < n+1; folded++ {
 		select {
 		case ev := <-r.seen:
-			require.NoError(t, ev.Err(), "%s/%s dropped", ev.ProjectName(), ev.Name())
+			if !ev.Restored() {
+				live = ev.Err() == nil
 
-			folded++
+				continue
+			}
+
+			require.NoError(t, ev.Err(), "%s/%s dropped", ev.ProjectName(), ev.Name())
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%d of %d folded", folded, n+1)
 		}
@@ -132,8 +138,17 @@ func TestReviewReplaySpillKeepsOrder(t *testing.T) {
 	r.stop(t)
 
 	snap := r.p.state.snapshot()
-	require.Equal(t, []string{"10.0.0.200"}, answered(t, snap, "i0.shop.incus.", "10.0.0.200"))
-	require.Equal(t, []string{fmt.Sprintf("10.0.0.%d", n)}, answered(t, snap, fmt.Sprintf("i%d.shop.incus.", n-1), "10.0.0.200"))
+
+	want := "10.0.0.1"
+	if live {
+		want = "10.0.0.200"
+	}
+
+	require.Equal(t, []string{want}, answered(t, snap, "i0.shop.incus.", want))
+
+	for i := range n {
+		require.Len(t, answered(t, snap, fmt.Sprintf("i%d.shop.incus.", i), "10.0.0.200"), 1, "i%d", i)
+	}
 }
 
 // TestReviewKnownEmptyPeeringSurvivesRestart: the previous run read the
