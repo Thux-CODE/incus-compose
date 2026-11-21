@@ -233,7 +233,8 @@ func (p *Plugin) askPeers(moved bool) {
 // new network only through a peer would be told it does not exist until that
 // read lands: the network is owed a read, and a name a querier cannot see is
 // SERVFAIL rather than NXDOMAIN while one is owed - for peerOwedGrace at most,
-// so a read failing for good costs those queriers a while and no more.
+// each network from when it grew, so a read failing for good costs those
+// queriers a while and no more.
 func (p *Plugin) askIfGrew() {
 	if len(p.state.grown) == 0 {
 		return
@@ -248,12 +249,60 @@ func (p *Plugin) askIfGrew() {
 		return
 	}
 
+	by := time.Now().Add(p.peerOwedGrace)
+
 	for _, key := range grown {
-		p.peerOwed[key] = p.peerGen
+		p.peerOwed[key] = owedRead{gen: p.peerGen, by: by}
 	}
 
-	if p.peerOwedBy == nil {
-		p.peerOwedBy = time.After(p.peerOwedGrace)
+	p.armOwed()
+}
+
+// askIfShrank takes back what a network losing its last name changes: it is
+// owed no read any more, and the peering read so far may cover every network
+// there still is, while the read being retried may be failing on the one that
+// went - so the networks left are asked for afresh. It reports whether one
+// shrank, for the caller to settle once what it moved is published.
+func (p *Plugin) askIfShrank() bool {
+	if !p.state.shrunk {
+		return false
+	}
+
+	p.state.shrunk = false
+
+	for key := range p.peerOwed {
+		if p.state.nets[key] == nil {
+			delete(p.peerOwed, key)
+		}
+	}
+
+	p.armOwed()
+	p.askPeers(false)
+
+	return true
+}
+
+// owedRead is one network owed a read of its peering: the ask that has to
+// cover it, and when it is given up on.
+type owedRead struct {
+	gen uint64
+	by  time.Time
+}
+
+// armOwed sets the timer for the soonest network to be given up on, or none.
+func (p *Plugin) armOwed() {
+	p.peerOwedBy = nil
+
+	var soonest time.Time
+
+	for _, owed := range p.peerOwed {
+		if soonest.IsZero() || owed.by.Before(soonest) {
+			soonest = owed.by
+		}
+	}
+
+	if !soonest.IsZero() {
+		p.peerOwedBy = time.After(time.Until(soonest))
 	}
 }
 
@@ -379,20 +428,21 @@ func (p *Plugin) peered(read peerRead) {
 	// waiting on, the same table as the one restored included.
 	defer p.warmOnPeering()
 
-	// A network owed a read is settled by one asked for after it grew, or by
-	// nothing being on it any more.
+	// A network owed a read is settled by one covering it asked for after it
+	// grew and after the last event that can have moved the peering - an
+	// older one may have been taken before the change that event announced -
+	// or by nothing being on it any more.
 	owed := len(p.peerOwed) > 0
 
-	for key, gen := range p.peerOwed {
-		if (read.gen >= gen && p.peerCovered[key]) || p.state.nets[key] == nil {
+	for key, o := range p.peerOwed {
+		if (read.gen >= max(o.gen, p.peerNeed) && p.peerCovered[key]) || p.state.nets[key] == nil {
 			delete(p.peerOwed, key)
 		}
 	}
 
 	settled := owed && len(p.peerOwed) == 0
-	if settled {
-		p.peerOwedBy = nil
-	}
+
+	p.armOwed()
 
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if changed {
@@ -414,6 +464,7 @@ func (p *Plugin) peered(read peerRead) {
 		// Whatever was pending goes out with it, so the snapshot is one fold.
 		p.state.write(p.cfg.TTL)
 		p.askIfGrew()
+		p.askIfShrank()
 		p.publish()
 
 	case settled && p.published:
@@ -432,17 +483,30 @@ func (p *Plugin) peered(read peerRead) {
 
 // peerOwedOver gives up on the networks still owed a read of their peering:
 // a name a querier cannot see is NXDOMAIN again, peer or no peer.
+//
+// Only those whose grace is over: each network has its own, from when it grew.
 func (p *Plugin) peerOwedOver() {
-	p.peerOwedBy = nil
+	now := time.Now()
+	over := 0
 
-	if len(p.peerOwed) == 0 {
+	for key, owed := range p.peerOwed {
+		if owed.by.After(now) {
+			continue
+		}
+
+		delete(p.peerOwed, key)
+
+		over++
+	}
+
+	p.armOwed()
+
+	if over == 0 {
 		return
 	}
 
 	p.logger.Warn("the peering of networks new since warm could not be read, answering without it",
-		"networks", len(p.peerOwed), "after", p.peerOwedGrace)
-
-	clear(p.peerOwed)
+		"networks", over, "after", p.peerOwedGrace)
 
 	if p.published {
 		p.publish()

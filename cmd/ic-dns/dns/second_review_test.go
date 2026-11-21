@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"runtime"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	api "github.com/lxc/incus/v7/shared/api"
@@ -245,6 +246,112 @@ func TestSecondIncompletePeerReadStoredAsKnown(t *testing.T) {
 	_, stored, err := decodeCold(<-c.p.cold.writes)
 	require.NoError(t, err)
 	require.Equal(t, hubPeers(), stored, "the read that covers every network is what the next start restores")
+}
+
+// TestSecondPeerGraceForEachNewNetwork: B grows 44 s after A. A's grace runs
+// out and A goes back to NXDOMAIN; B has waited one second, and keeps its own
+// - until it runs out in turn.
+func TestSecondPeerGraceForEachNewNetwork(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newColdServer(t, Suffix("incus"), PeerViews(true))
+		c.p.peerReader = hubIncus()
+		fleet := hubFleet()
+		c.p.fold(fleet["default/mgmt"].Event)
+		c.p.write()
+		ask := <-c.p.peerAsk
+		c.p.peered(peerRead{keys: ask.keys, gen: ask.gen, peers: map[string][]string{}})
+		c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+		require.True(t, c.p.view.Ready())
+		c.p.fold(fleet["pvlab1/django-1"].Event)
+		c.p.write()
+		time.Sleep(c.p.peerOwedGrace - time.Second)
+		c.p.fold(fleet["pvlab2/django-1"].Event)
+		c.p.write()
+		<-c.p.peerOwedBy
+		c.p.peerOwedOver()
+		code, _ := resolve(c.a, "django-1.pvlab2.incus.", dns.TypeA, "10.146.11.6")
+		require.Equal(t, "SERVFAIL", dns.RcodeToString[code], "the second network has waited only one second")
+		code, _ = resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+		require.Equal(t, "NXDOMAIN", dns.RcodeToString[code], "the first network's grace is over")
+
+		<-c.p.peerOwedBy
+		c.p.peerOwedOver()
+		code, _ = resolve(c.a, "django-1.pvlab2.incus.", dns.TypeA, "10.146.11.6")
+		require.Equal(t, "NXDOMAIN", dns.RcodeToString[code], "and so is the second's, in its turn")
+		require.Nil(t, c.p.peerOwedBy, "nothing left to time")
+	})
+}
+
+// TestSecondOwedNetworkThenPeerEvent: the ask covering the new network is out
+// when a peer event arrives, and the answer to the older ask lands. It does
+// not settle the debt: the read the event asked for does.
+func TestSecondOwedNetworkThenPeerEvent(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true))
+	c.p.peerReader = hubIncus()
+	f := hubFleet()
+	c.p.fold(f["default/mgmt"].Event)
+	c.p.write()
+	first := <-c.p.peerAsk
+	c.p.peered(peerRead{gen: first.gen, keys: first.keys, peers: map[string][]string{}})
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.fold(f["pvlab1/django-1"].Event)
+	c.p.write()
+	old := <-c.p.peerAsk
+	c.p.fold(event(api.EventLifecycleNetworkPeerCreated, "pvlab1", "hub"))
+	c.p.peered(peerRead{gen: old.gen, keys: old.keys, peers: map[string][]string{}})
+	code, _ := resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[code])
+
+	fresh := <-c.p.peerAsk
+	c.p.peered(peerRead{gen: fresh.gen, keys: fresh.keys, peers: hubPeers()})
+	code, _ = resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "NOERROR", dns.RcodeToString[code], "the read the event asked for landed")
+}
+
+// TestSecondSameNetworkUpdateDoesNotCreatePeerDebt: web changes its address
+// on the only network it sits on. The network is not new for having been
+// empty inside one apply, and owes no read: NXDOMAIN stays NXDOMAIN.
+func TestSecondSameNetworkUpdateDoesNotCreatePeerDebt(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true))
+	c.p.peerReader = hubIncus()
+	first := eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", nil, map[string]string{"a": "10.0.0.1"})
+	c.p.fold(first)
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", "other", nil, map[string]string{"b": "10.1.0.1"}))
+	c.p.write()
+	ask := <-c.p.peerAsk
+	c.p.peered(peerRead{keys: ask.keys, gen: ask.gen, peers: map[string][]string{}})
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", nil, map[string]string{"a": "10.0.0.2"}))
+	c.p.write()
+	code, _ := resolve(c.a, "web.shop.incus.", dns.TypeA, "10.1.0.1")
+	require.Equal(t, "NXDOMAIN", dns.RcodeToString[code], "both networks are already known and unpeered")
+	require.Empty(t, c.p.peerOwed)
+}
+
+// TestSecondPeeringGateAfterLastUncoveredNetworkLeaves: a good read covers the
+// hub; the round ends while the read of hub and spoke keeps failing on the
+// spoke. The spoke's last instance goes: the good read now covers every
+// network there is, and the view turns warm without waiting on anything else.
+func TestSecondPeeringGateAfterLastUncoveredNetworkLeaves(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true))
+	c.p.peerReader = hubIncus()
+	f := hubFleet()
+	c.p.fold(f["default/mgmt"].Event)
+	c.p.write()
+	first := <-c.p.peerAsk
+	c.p.peered(peerRead{gen: first.gen, keys: first.keys, peers: map[string][]string{}})
+	c.p.fold(f["pvlab1/django-1"].Event)
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.False(t, c.p.view.Ready())
+	failing := <-c.p.peerAsk
+	require.Contains(t, failing.keys, app1)
+	c.p.fold(event(api.EventLifecycleInstanceDeleted, "pvlab1", "django-1"))
+	c.p.write()
+	require.True(t, c.p.peeringKnown(), "the good read covers every remaining network")
+	require.True(t, c.p.view.Ready(), "nothing left to wait on")
+
+	ask := <-c.p.peerAsk
+	require.NotContains(t, ask.keys, app1, "the read retried is asked for afresh without the network that went")
 }
 
 // in stamps an event with the stream session the source minted it in.

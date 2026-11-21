@@ -125,12 +125,44 @@ type Snapshot struct {
 	ByIPv4 critbit.Tree[ViewID]
 	ByIPv6 critbit.Tree[ViewID]
 
-	// PeersOwed says a network in it has a peering that has not been read
-	// yet, so a name a querier cannot see may be one it would see through a
-	// peer: that miss is not final, and is answered like one before warm. In
-	// the snapshot rather than beside it, so the names and what is owed on
-	// them are read together.
-	PeersOwed bool
+	// PeersOwed is every network whose peering has not been read yet. A name
+	// a querier cannot see, where the querier or the name sits on one of
+	// them, may be one it would see through a peer - one hop, so no other
+	// network's peering could change that - and the miss is not final: it is
+	// answered like one before warm. In the snapshot rather than beside it,
+	// so the names and what is owed on them are read together.
+	PeersOwed map[string]struct{}
+}
+
+// Owed reports whether a miss for a name holding answers, asked from view, may
+// be one the peering not read yet would answer: whether view, or a view the
+// name answers in that is not a peer half, holds a network owed a read.
+func (s *Snapshot) Owed(view ViewID, answers ViewAnswer) bool {
+	if len(s.PeersOwed) == 0 {
+		return false
+	}
+
+	owed := func(id ViewID) bool {
+		for _, key := range KeysOf(id) {
+			if _, is := s.PeersOwed[key]; is {
+				return true
+			}
+		}
+
+		return false
+	}
+
+	if owed(view) {
+		return true
+	}
+
+	for id := range answers {
+		if !strings.HasPrefix(string(id), peerPrefix) && owed(id) {
+			return true
+		}
+	}
+
+	return false
 }
 
 // ViewOf canonicalises a set of network keys, sorted so any order names the same

@@ -171,10 +171,10 @@ type Plugin struct {
 	peerGen, peerNeed, peerLanded uint64
 
 	// peerOwed is every network a name landed on after warm whose peering has
-	// not been read since, by the ask that has to cover it; peerOwedBy is when
-	// those still owed are given up on, after peerOwedGrace. Run's goroutine
-	// alone.
-	peerOwed      map[string]uint64
+	// not been read since, with the ask that has to cover it and when it is
+	// given up on, peerOwedGrace after it grew; peerOwedBy fires for the
+	// soonest. Run's goroutine alone.
+	peerOwed      map[string]owedRead
 	peerOwedBy    <-chan time.Time
 	peerOwedGrace time.Duration
 
@@ -340,7 +340,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 
 		peerCallTimeout: peerCallTimeout,
 
-		peerOwed:      map[string]uint64{},
+		peerOwed:      map[string]owedRead{},
 		peerOwedGrace: peerOwedGrace,
 	}
 
@@ -796,6 +796,7 @@ func (p *Plugin) rounded() {
 
 	p.state.write(p.cfg.TTL)
 	p.askIfGrew()
+	p.askIfShrank()
 	p.publish()
 	p.xfr.SetComplete()
 
@@ -875,7 +876,16 @@ func (p *Plugin) write() {
 	}
 
 	p.askIfGrew()
+	shrank := p.askIfShrank()
 	p.publish()
+
+	// A round waiting on the peering of a network that has just emptied may
+	// be waiting on nothing now, and nothing else would say so before the next
+	// round.
+	if shrank {
+		p.settle()
+		p.announce()
+	}
 }
 
 // publish hands the working copy over as current, and stores what it was
@@ -890,7 +900,13 @@ func (p *Plugin) publish() {
 	// Written twice, one pointer each: neither reads the other's, and the value
 	// itself is finished and shared.
 	snap := p.state.snapshot()
-	snap.PeersOwed = len(p.peerOwed) > 0
+	for key := range p.peerOwed {
+		if snap.PeersOwed == nil {
+			snap.PeersOwed = map[string]struct{}{}
+		}
+
+		snap.PeersOwed[key] = struct{}{}
+	}
 
 	p.view.Replace(snap)
 	p.xfr.Replace(snap)

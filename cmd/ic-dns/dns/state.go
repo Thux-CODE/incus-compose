@@ -74,7 +74,10 @@ type state struct {
 
 	// grown is every network a name has landed on that nothing was on: its
 	// peering has not been read, since until now it could change no answer.
-	grown []string
+	// shrunk is a network having lost the last name on it, which may leave
+	// the peering read so far covering every network there still is.
+	grown  []string
+	shrunk bool
 }
 
 // peerTargets is every network a read of the peering has to cover: each one a
@@ -128,6 +131,28 @@ func (s *state) write(ttl uint32) bool {
 	// confirmed is a restored replica read unchanged: its own records stay, but
 	// a replica this run has read outranks restored ones in its service.
 	confirmed := false
+
+	// What was on a wire before is not new on it, nor gone from it, for
+	// having been released and claimed again inside the write: an instance
+	// changing its address on the only network it sits on leaves it empty for
+	// the length of one apply.
+	before := maps.Clone(s.nets)
+
+	defer func() {
+		s.grown = slices.DeleteFunc(s.grown, func(key string) bool {
+			_, had := before[key]
+			_, has := s.nets[key]
+
+			return had || !has
+		})
+
+		for key := range before {
+			_, has := s.nets[key]
+			if !has {
+				s.shrunk = true
+			}
+		}
+	}()
 
 	for key, next := range s.pending {
 		delete(s.pending, key)
