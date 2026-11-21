@@ -317,10 +317,12 @@ func (v *ECSView) claimed(qname string) bool {
 // would, with the reply caught rather than written. A NOERROR is passed on as it
 // came, records or not: NODATA says upstream holds the name, so it is no project
 // of ours, and failing it would fail a whole lookup on musl, which asks for A
-// and AAAA at once and gives up on either's SERVFAIL. So is a truncated reply,
-// whatever it says, so the client asks again over TCP and that reply is judged
-// on its own. NXDOMAIN, another rcode, a failure or nothing written may just as
-// well be the project not read yet, so those fail like any other cold miss.
+// and AAAA at once and gives up on either's SERVFAIL. A truncated NOERROR goes
+// out as it came too, so the client asks again over TCP and that reply is
+// judged on its own. NXDOMAIN, another rcode, a failure or nothing written may
+// just as well be the project not read yet, so those fail like any other cold
+// miss - truncated or not: a client taking a truncated NXDOMAIN without asking
+// again over TCP takes it as final.
 func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, opt *dns.OPT) (bool, int, error) {
 	if v.Next == nil {
 		return v.notReady(w, r, opt)
@@ -331,7 +333,7 @@ func (v *ECSView) askNext(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
 	_, err := v.Next.ServeDNS(ctx, caught, r)
 
 	got := caught.Msg
-	if err != nil || got == nil || (got.Rcode != dns.RcodeSuccess && !got.Truncated) {
+	if err != nil || got == nil || got.Rcode != dns.RcodeSuccess {
 		return v.notReady(w, r, opt)
 	}
 

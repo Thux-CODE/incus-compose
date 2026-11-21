@@ -760,6 +760,7 @@ func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
 		answers
 		nodata
 		truncated
+		truncatedAnswer
 		fails
 		writesNothing
 	)
@@ -770,6 +771,7 @@ func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
 		"gone.edge.incus.": answers,
 		"empty.incus.":     nodata,
 		"big.incus.":       truncated,
+		"bigger.incus.":    truncatedAnswer,
 		"broken.incus.":    fails,
 		"refused.incus.":   writesNothing,
 	}
@@ -791,9 +793,12 @@ func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
 			}}
 		case nodata:
 		case truncated:
-			// Cut short on the way: whatever the rcode says, the client
-			// asks again over TCP.
+			// Cut short on the way. A client that takes it without asking
+			// again over TCP takes the NXDOMAIN as final.
 			m.Rcode = dns.RcodeNameError
+			m.Truncated = true
+		case truncatedAnswer:
+			// A NOERROR cut short: the client asks again over TCP.
 			m.Truncated = true
 		case fails:
 			return dns.RcodeServerFailure, errors.New("upstream timed out")
@@ -833,7 +838,10 @@ func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
 		{"the forwarder knows nothing of it", "web.blog.incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
 		{"the suffix itself", "incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
 		{"the forwarder has no record of this type", "empty.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
-		{"the forwarder's reply is truncated", "big.incus.", dns.RcodeNameError, dns.RcodeNameError, true},
+		// SERVFAIL cold, as the same NXDOMAIN untruncated: a claim's miss
+		// is never final before warm, however upstream's reply was cut.
+		{"the forwarder's NXDOMAIN is truncated", "big.incus.", dns.RcodeServerFailure, dns.RcodeNameError, true},
+		{"the forwarder's NOERROR is truncated", "bigger.incus.", dns.RcodeSuccess, dns.RcodeSuccess, true},
 		{"the forwarder fails", "broken.incus.", dns.RcodeServerFailure, dns.RcodeServerFailure, true},
 		{"the forwarder writes nothing", "refused.incus.", dns.RcodeServerFailure, dns.RcodeRefused, true},
 		{"a miss inside a project zone", "nope.shop.incus.", dns.RcodeServerFailure, dns.RcodeNameError, false},
@@ -896,7 +904,7 @@ func TestColdAsksTheForwarderOutsideEveryZone(t *testing.T) {
 			// Passed on as the forwarder wrote it: neither ours nor clamped,
 			// and truncated only where it was.
 			assert.False(t, w.Msg.Authoritative, label)
-			assert.Equal(t, says[tc.qname] == truncated, w.Msg.Truncated, label)
+			assert.Equal(t, says[tc.qname] == truncated || says[tc.qname] == truncatedAnswer, w.Msg.Truncated, label)
 			assert.Nil(t, w.Msg.IsEdns0(), label)
 
 			if says[tc.qname] != answers {

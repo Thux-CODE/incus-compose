@@ -1,12 +1,32 @@
 package ecs_view
 
 import (
+	"context"
 	"log/slog"
 	"testing"
 
+	"github.com/coredns/coredns/plugin"
 	"github.com/miekg/dns"
 	"github.com/stretchr/testify/require"
 )
+
+// TestReviewTruncatedNegativeInsideClaim: before warm, a name under the
+// suffix in no zone yet is asked of the forwarder, which answers NXDOMAIN with
+// TC set. SERVFAIL, as for the same NXDOMAIN untruncated.
+func TestReviewTruncatedNegativeInsideClaim(t *testing.T) {
+	v := New(slog.Default())
+	v.Claims = []string{"incus."}
+	v.Next = plugin.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) (int, error) {
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNameError)
+		m.Truncated = true
+
+		return dns.RcodeSuccess, w.WriteMsg(m)
+	})
+
+	_, m := ask(t, v, "new.shop.incus.", dns.TypeA, "10.0.0.2")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[m.Rcode])
+}
 
 // TestReviewSnapshotThenWarm: a query is suspended between its two loads
 // while the source publishes the last name and turns warm. Whichever snapshot

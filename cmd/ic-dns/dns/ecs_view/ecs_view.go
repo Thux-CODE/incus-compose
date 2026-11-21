@@ -57,8 +57,8 @@ type ECSView struct {
 	// a miss under one of them is SERVFAIL rather than a fall through: the name
 	// may only not have been read yet, and a forwarder's NXDOMAIN would be a
 	// final answer that also stops the client trying its next server. A miss in
-	// no zone we know is still asked of Next, and a NOERROR, NODATA included, or
-	// a truncated reply is passed on - a host sharing the suffix resolves by
+	// no zone we know is still asked of Next, and a NOERROR, NODATA and
+	// truncated included, is passed on - a host sharing the suffix resolves by
 	// forwarding - while anything else from it fails the same way.
 	Claims []string
 
