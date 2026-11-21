@@ -148,6 +148,29 @@ form.
   healthy replicas than declared, none at all with one, on a run that ended
   successfully. (by @sandroden)
 
+- `rollout` marks what a run does on the instance config
+  (`user.incus-compose.rollout.id` on the replicas it creates,
+  `.rollout.drain` on a drain it sets, `.rollout.pre-start` on the replica that
+  ran the service-wide `pre_start` hooks), and a run picked up again goes by
+  the marks: it keeps the replicas the interrupted run made, with any number of
+  replicas declared, runs the hooks only if no replica records they ran, and
+  never takes off a drain set by hand. The marks are taken off once a rollout
+  is over. Every round of reads that a drain or a stop goes by is made again,
+  twice at most with a backoff, when a read fails or the round takes more than
+  10 seconds, instead of stopping at a single EOF. A rollback (the new replica
+  no longer serves at the stop) puts back the old replica and takes the new one
+  away. An interrupt before the stop is sent puts the old replica back and
+  exits with an error, where it stopped and deleted it. A new replica whose
+  health cannot be read is left as it is rather than deleted; a healthy verdict
+  read past the health timeout counts as a timeout. A replica is checked to be
+  the instance first read under its name before it is stopped, deleted or
+  taken away; one read stopped is deleted only while it is; one put back by
+  something else during its grace is not stopped; one a profile makes drained
+  is taken away before it starts; a new replica's create never adopts an
+  instance found by its name. With no mark, a surplus of replicas all up to
+  date keeps the newest ones and gives up the oldest, with no create. A stop's
+  kill and status reads are bounded by its deadline. (by @sandroden)
+
 - A required `depends_on` with `condition: service_healthy` on a service
   scaled to 0 is waited for (and checked by `rollout`) as its first replica,
   which is missing, instead of not at all. A plan made again on the same

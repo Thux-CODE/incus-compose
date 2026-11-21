@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 	"testing"
@@ -24,6 +25,12 @@ import (
 // reports in turn, the last one for good. fresh is one a create of the test
 // made, current one made from the service as it is now, as every create makes
 // it: a run after the service changed sees none current.
+//
+// runID, drainBy and preStart are the marks of a rollout run: the run that
+// made it, that drained it ("" for a drain by hand) and whose service-wide
+// pre_start hooks it ran. A fixture that is fresh is one an earlier run made,
+// marked "prev" unless it says otherwise. born orders the replicas by when
+// they were made.
 type fakeReplica struct {
 	fresh    bool
 	current  bool
@@ -31,6 +38,11 @@ type fakeReplica struct {
 	drained  bool
 	statuses []string
 	seen     string
+
+	runID    string
+	drainBy  string
+	preStart string
+	born     int64
 }
 
 // fakeRollout stands in for a service's replicas. It is not a fake Incus: it
@@ -53,8 +65,10 @@ type fakeRollout struct {
 	onSleep    func(d time.Duration)
 	afterSleep func(d time.Duration)
 
-	// onHealth runs after each read of a replica's health.
+	// onHealth runs after each read of a replica's health, onRetire as a
+	// retire is sent.
 	onHealth func(status string)
+	onRetire func()
 
 	// fail makes the operation an event names fail; healthErrs fails that
 	// many reads of a new replica's health before it answers.
@@ -66,6 +80,12 @@ type fakeRollout struct {
 
 	// minReady is the fewest ready replicas the service may be left with.
 	minReady int
+
+	// runID is the run the last plan made is for, runs how many plans were
+	// made, and born the last birth handed out.
+	runID string
+	runs  int
+	born  int64
 }
 
 func newFakeRollout(t *testing.T, present map[int]*fakeReplica, scripts ...[]string) *fakeRollout {
@@ -78,10 +98,18 @@ func newFakeRollout(t *testing.T, present map[int]*fakeReplica, scripts ...[]str
 		now:        time.Unix(0, 0),
 	}
 
-	for _, r := range present {
+	for _, i := range slices.Sorted(maps.Keys(present)) {
+		r := present[i]
 		if len(r.statuses) > 0 {
 			r.seen = r.statuses[0]
 		}
+
+		if r.fresh && r.runID == "" {
+			r.runID = "prev"
+		}
+
+		f.born++
+		r.born = f.born
 	}
 
 	f.minReady = f.ready()
@@ -142,7 +170,14 @@ func (f *fakeRollout) create(ctx context.Context, index int, first bool) error {
 		return errors.New("clone failed")
 	}
 
-	f.replicas[index] = &fakeReplica{fresh: true, current: true, running: true, statuses: f.scripts[f.creates-1]}
+	f.born++
+
+	r := &fakeReplica{fresh: true, current: true, running: true, statuses: f.scripts[f.creates-1], runID: f.runID, born: f.born}
+	if first {
+		r.preStart = f.runID
+	}
+
+	f.replicas[index] = r
 	f.record("create web-%d", index)
 
 	return nil
@@ -175,7 +210,21 @@ func (f *fakeRollout) health(ctx context.Context, index int) (replicaRead, error
 		f.onHealth(r.seen)
 	}
 
-	return replicaRead{Status: r.seen, Running: r.running, Drained: r.drained}, nil
+	return replicaRead{ID: fakeID(r), Status: r.seen, Running: r.running, Drained: r.drained, DrainedBy: r.drainBy}, nil
+}
+
+// fakeID tells a fake replica from another that took its index.
+func fakeID(r *fakeReplica) string {
+	return fmt.Sprintf("%p", r)
+}
+
+func (f *fakeRollout) unmark(_ context.Context, index int) error {
+	r, ok := f.replicas[index]
+	if ok {
+		r.runID, r.preStart = "", ""
+	}
+
+	return nil
 }
 
 func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error {
@@ -190,15 +239,30 @@ func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error 
 	}
 
 	f.replicas[index].drained = drained
+
+	f.replicas[index].drainBy = ""
+	if drained {
+		f.replicas[index].drainBy = f.runID
+	}
+
 	f.record("%s", event)
 
 	return nil
 }
 
-func (f *fakeRollout) retire(ctx context.Context, index int) error {
+func (f *fakeRollout) retire(ctx context.Context, index int, stopped bool) error {
+	if f.onRetire != nil {
+		f.onRetire()
+	}
+
 	err := f.op(ctx, fmt.Sprintf("retire web-%d", index))
 	if err != nil {
 		return err
+	}
+
+	if stopped && f.replicas[index].running {
+		f.events = append(f.events, fmt.Sprintf("retire web-%d refused, it runs", index))
+		return errors.New("started again")
 	}
 
 	delete(f.replicas, index)
@@ -254,16 +318,29 @@ func (f *fakeRollout) sleep(ctx context.Context, d time.Duration) error {
 func (f *fakeRollout) plan(replicas int) rolloutPlan {
 	present := []replica{}
 	for i, r := range f.replicas {
-		present = append(present, replica{index: i, current: r.current, running: r.running, drained: r.drained})
+		present = append(present, replica{
+			index: i, id: fakeID(r), created: time.Unix(r.born, 0),
+			current: r.current, running: r.running, drained: r.drained,
+			drainedBy: r.drainBy, runID: r.runID, preStart: r.preStart,
+		})
 	}
 
 	// Ascending, as rolloutPrepare reads them.
 	slices.SortFunc(present, func(a, b replica) int { return a.index - b.index })
 
+	// The run an interrupted one marked, picked up again, or a new one.
+	f.runs++
+
+	f.runID = rolloutAdoptedRun(present)
+	if f.runID == "" {
+		f.runID = fmt.Sprintf("run-%d", f.runs)
+	}
+
 	return rolloutPlan{
 		Service:       "web",
 		Replicas:      replicas,
 		Present:       present,
+		RunID:         f.runID,
 		Name:          func(i int) string { return fmt.Sprintf("web-%d", i) },
 		HealthTimeout: time.Minute,
 		Grace:         35 * time.Second,
@@ -372,14 +449,14 @@ func TestRolloutReplacesEveryReplica(t *testing.T) {
 		{
 			name:     "a replica a killed rollout left drained, one more than declared, goes first and is not put back",
 			replicas: 1,
-			present:  map[int]*fakeReplica{1: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
+			present:  map[int]*fakeReplica{1: {running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
 			events:   []string{"drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"},
 			final:    []string{"web-1 new"},
 		},
 		{
 			name:     "a replica a killed rollout left drained, within the declared count, is put back first",
 			replicas: 2,
-			present:  map[int]*fakeReplica{1: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
+			present:  map[int]*fakeReplica{1: {running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}}, 2: old()},
 			events: []string{
 				"undrain web-1",
 				"create web-3", "drain web-1", "retire web-1",
@@ -391,7 +468,7 @@ func TestRolloutReplacesEveryReplica(t *testing.T) {
 			name:     "a drained replica is put back when the others do not serve the declared count",
 			replicas: 1,
 			present: map[int]*fakeReplica{
-				1: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
+				1: {running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}},
 				2: {running: true, statuses: []string{shared.HealthStatusUnhealthy}},
 			},
 			events: []string{"undrain web-1", "drain web-2", "retire web-2", "create web-2", "drain web-1", "retire web-1"},
@@ -618,8 +695,8 @@ func TestRolloutInterrupted(t *testing.T) {
 	}
 }
 
-// An interrupt that lands between two steps leaves both replicas serving, and
-// one that lands as the old replica is stopped lets the stop finish.
+// An interrupt that lands between two steps leaves both replicas serving, up
+// to the stop of the old one: once the stop is sent it is let finish.
 func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 	t.Parallel()
 
@@ -663,11 +740,13 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 		err := rollout(ctx, f, plan)
 		require.ErrorIs(t, err, context.Canceled)
 
-		assert.Equal(t, []string{"create web-3", "drain web-1", "retire web-1"}, f.events)
-		assert.Equal(t, []string{"web-2 old", "web-3 new"}, f.final())
+		// Before the stop is sent nothing is irreversible yet: the old one is
+		// put back, and both serve.
+		assert.Equal(t, []string{"create web-3", "drain web-1", "undrain web-1"}, f.events)
+		assert.Equal(t, []string{"web-1 old", "web-2 old", "web-3 new"}, f.final())
 	})
 
-	t.Run("as the stop of the last old replica begins, which finishes it", func(t *testing.T) {
+	t.Run("at the end of the grace of the last old replica", func(t *testing.T) {
 		t.Parallel()
 
 		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
@@ -683,6 +762,24 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 		}
 
 		err := rollout(ctx, f, plan)
+		require.ErrorIs(t, err, context.Canceled)
+
+		assert.Equal(t, []string{"create web-2", "drain web-1", "undrain web-1"}, f.events)
+		assert.Equal(t, []string{"web-1 old", "web-2 new"}, f.final())
+	})
+
+	t.Run("once the stop has begun, which is seen through", func(t *testing.T) {
+		t.Parallel()
+
+		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
+
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+
+		// The interrupt lands as the retire is sent.
+		f.onRetire = cancel
+
+		err := rollout(ctx, f, f.plan(1))
 		require.NoError(t, err)
 
 		assert.Equal(t, []string{"create web-2", "drain web-1", "retire web-1"}, f.events)
@@ -764,10 +861,13 @@ func TestRolloutStepFails(t *testing.T) {
 		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
 		f.healthErrs = rolloutHealthReads
 
+		// No verdict: the new one is not taken away, as it may be the one that
+		// serves, and the run stops with an error.
 		err := rollout(t.Context(), f, f.plan(1))
-		require.Error(t, err)
+		require.ErrorIs(t, err, errRolloutUnread)
 		assert.Contains(t, err.Error(), "connection reset")
-		assert.Equal(t, []string{"create web-2", "discard web-2"}, f.events)
+		assert.Equal(t, []string{"create web-2"}, f.events)
+		assert.Equal(t, []string{"web-1 old", "web-2 new"}, f.final())
 	})
 }
 
@@ -875,7 +975,7 @@ func TestRolloutResumes(t *testing.T) {
 	t.Parallel()
 
 	drainedOld := func() *fakeReplica {
-		return &fakeReplica{running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}}
+		return &fakeReplica{running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}}
 	}
 
 	upToDate := func(statuses ...string) *fakeReplica {
@@ -943,27 +1043,26 @@ func TestRolloutResumes(t *testing.T) {
 			replicas: 1,
 			present: map[int]*fakeReplica{
 				1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
-				2: {current: true, running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
+				2: {current: true, running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}},
 			},
 			events: []string{"drain web-2", "retire web-2"},
 			final:  []string{"web-1 old"},
 		},
 		{
-			name:     "all current with more replicas: nothing tells new from old, and every one is replaced",
+			name:     "all current with more replicas: the run's mark tells the new one, and the rest is replaced",
 			replicas: 2,
 			present: map[int]*fakeReplica{
 				1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
-				2: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}},
-				3: {current: true, running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
+				2: {current: true, running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}},
+				3: upToDate(shared.HealthStatusHealthy),
 			},
-			scripts: [][]string{slowStart, slowStart},
+			scripts: [][]string{slowStart},
 			events: []string{
-				"drain web-3", "retire web-3",
-				"create web-3", "drain web-1", "retire web-1",
-				"create web-1", "drain web-2", "retire web-2",
+				"drain web-2", "retire web-2",
+				"create web-2", "drain web-1", "retire web-1",
 			},
-			final:   []string{"web-1 new", "web-3 new"},
-			creates: 2,
+			final:   []string{"web-2 new", "web-3 new"},
+			creates: 1,
 		},
 		{
 			name:     "no config hash, made by an older binary: old",
@@ -1022,7 +1121,7 @@ func TestRolloutResumeInterrupted(t *testing.T) {
 
 	f := newFakeRollout(t, map[int]*fakeReplica{
 		1: {fresh: true, current: true, running: true, statuses: []string{shared.HealthStatusStarting}},
-		2: {running: true, drained: true, statuses: []string{shared.HealthStatusHealthy}},
+		2: {running: true, drained: true, drainBy: "prev", statuses: []string{shared.HealthStatusHealthy}},
 	})
 
 	ctx, cancel := context.WithCancel(t.Context())
@@ -1060,7 +1159,7 @@ func TestRolloutDescribe(t *testing.T) {
 		Replicas: 2,
 		Present: []replica{
 			{index: 1, running: true},
-			{index: 2, running: true, drained: true},
+			{index: 2, running: true, drained: true, drainedBy: "r"},
 			{index: 3},
 		},
 		Name:          func(index int) string { return fmt.Sprintf("web-%d", index) },
@@ -1078,10 +1177,11 @@ func TestRolloutDescribe(t *testing.T) {
 		Service:  "web",
 		Replicas: 2,
 		Present: []replica{
-			{index: 1, running: true, drained: true},
+			{index: 1, running: true, drained: true, drainedBy: "r"},
 			{index: 2, running: true},
-			{index: 3, running: true, current: true},
+			{index: 3, running: true, current: true, runID: "r"},
 		},
+		RunID:         "r",
 		Name:          func(index int) string { return fmt.Sprintf("web-%d", index) },
 		HealthTimeout: 54 * time.Second,
 		Grace:         35 * time.Second,

@@ -69,19 +69,54 @@ For each replica, in turn:
 5. stop it within the service's `stop_grace_period` (or `--stop-timeout`), and
    delete it.
 
-Right before the drain, and again right before the stop, the other replicas
-are read once more: the old one goes only while the declared count serves
+Right before the drain, and again right before the stop, every replica is read
+once more, in one round: the old one goes only while the declared count serves
 without it (running, not drained, `healthy` as read then). If not, `rollout`
-puts it back into the service name and exits with an error saying how many
-serve. A read that fails is no verdict either way: the run stops with an error
-and retires nothing. A new replica that no longer serves when the replicas are
-read (ic-healthd restarted it, or it turned `unhealthy`) is old again: it is
-the one taken away, the old ones serve on, and `rollout` exits with an error.
+puts it back into the service name, takes away the new replicas of the run
+that no longer serve (a rollback), and exits with an error saying how many
+serve. A round whose reads take more than 10 seconds in all is not trusted,
+since a verdict read at its start may have changed by its end; one that fails
+or is that slow is made again, twice at most, after 2 and 4 seconds, and only
+then does the run stop with an error, retiring nothing. That narrows the window
+in which ic-healthd may change a verdict before the stop; it cannot close it. A
+new replica that no longer serves when the replicas are read (ic-healthd
+restarted it, or it turned `unhealthy`) is old again: it is the one taken away,
+the old ones serve on, and `rollout` exits with an error.
+
+Each replica is checked to be the instance first read under its name
+(`volatile.uuid`) before it is stopped, deleted or taken away: one whose name
+another instance took meanwhile is left alone, and the run fails. A replica
+read stopped is deleted only while it is stopped, with no drain; one that
+started again in between is left, and the run fails. A drain set by hand
+(without the rollout's mark, below) is never taken off: such a replica does not
+count as serving, and is replaced like any old one. One put back into the
+service name by something else during its grace is not stopped.
 
 A new replica that reports `unhealthy`, stops, fails to be created or started,
 or is not `healthy` within the health timeout is deleted (or, with
-`--keep-failed`, left stopped), and `rollout` exits with an error naming it. The
-old replica was never drained, so it serves throughout.
+`--keep-failed`, left stopped), and `rollout` exits with an error naming it.
+One whose health cannot be read three times in a row is left as it is, since it
+may be the one that serves, and `rollout` exits with an error. The old replica
+was never drained, so it serves throughout.
+
+Two `up` or `rollout` run at once on the same service are not supported: the
+checks above catch a replica taken away or replaced under a run, they do not
+coordinate two runs.
+
+### The marks of a run
+
+A run marks what it does on the instances' config, which is how a run picked up
+again tells new from old:
+
+- `user.incus-compose.rollout.id`: the run's id, on every replica it creates;
+- `user.incus-compose.rollout.drain`: the run's id, next to
+  `user.label.dns.drain`, on a replica it drains;
+- `user.incus-compose.rollout.pre-start`: the run's id, on the replica that ran
+  the service-wide `pre_start` hooks, written once they succeed and before it
+  starts.
+
+Once the rollout is over the `id` and `pre-start` marks are taken off the
+replicas it leaves; the drain mark goes with the replica it is on.
 
 Services named together are checked first, all of them, and rolled out one after
 the other; the first failure stops the run.
@@ -104,9 +139,11 @@ healthy replicas serving. Incus cannot rename a running instance, so the names
 are not put back afterwards: `up` leaves the replicas where they are.
 
 A new replica is placed where `up --scale <service>=N+1` would place a replica,
-on a member none of the others runs on when there is one. The first replica a
-rollout creates runs the service's `pre_start` hooks that are not `per_replica`,
-once per rollout.
+on a member none of the others runs on when there is one, and takes an index
+no instance holds, the service's or not. The first replica a rollout creates
+runs the service's `pre_start` hooks that are not `per_replica`, once per
+rollout (see [The marks of a run](#the-marks-of-a-run)). A replica a profile
+makes drained is taken away before it starts, and the run fails.
 
 ### Timeouts
 
@@ -132,10 +169,10 @@ second one kills it outright.
   carry on without us) and the replica is then deleted.
 - While it starts or is checked, it is deleted. The old replicas were not
   touched.
-- While an old replica is drained, it is put back into the service name and both
-  replicas are left running. One that an earlier rollout drained stays drained.
-- Once an old replica is being stopped, the stop and the delete are seen
-  through.
+- While an old replica is drained, up to the moment its stop is sent, it is put
+  back into the service name, both replicas are left running, and `rollout`
+  exits with an error. One drained by hand stays drained.
+- Once an old replica's stop is sent, the stop and the delete are seen through.
 
 ### Running it again
 
@@ -145,24 +182,29 @@ replica more than declared (an interrupt while draining), one is given back
 first: a stopped one or one that is not healthy before a healthy one, so the
 service keeps N replicas serving. A rollout refuses to start with more than N+1.
 
-A running replica left drained by a rollout that was killed stays drained and
-goes first when the others serve the declared count without it; otherwise it is
-put back into the service name first: only a rollout drains, right before a
-stop. `up` does not clear the drain label.
+A run that finds replicas marked by an earlier one, at least one of them still
+what a create makes now (the service's config hash and image), picks that run
+up: it takes its id, keeps the replicas marked with it once they are `healthy`,
+and does not run the service-wide `pre_start` hooks again when a replica records
+they ran. Otherwise it is a new run: every replica found counts as old, and the
+hooks run with its first create.
 
-A replica an earlier run made that is up to date is kept once it is `healthy`.
-One that does not get there is old again: when the drained old replica is then
-the only one that serves, it is put back and the new one taken away, a
-rollback, and `rollout` exits with an error. Health that cannot be read stops
-the run before anything is retired.
+A running replica left drained by an earlier rollout (its drain carries the
+mark) stays drained and goes first when the others serve the declared count
+without it; otherwise it is put back into the service name first. `up` does not
+clear the drain label.
 
-When every replica is up to date, as after a rollout of a service that did not
-change, nothing tells the new ones from the old ones and all are replaced. The
-exception is one replica declared next to one left drained: only a rollout
-drains, once the replica taking its place is healthy, so the drained one is the
-old one and its retire is all that is left, with no create. A rollout that
-keeps a replica an earlier run made does not run the service-wide `pre_start`
-hooks again: they ran with that replica.
+A marked replica that does not get to `healthy` is old again: when the drained
+old replica is then the only one that serves, it is put back and the new one
+taken away, a rollback, and `rollout` exits with an error. Health that cannot
+be read stops the run before anything is retired.
+
+With no mark at all, as `up` or a rollout from before the marks leaves them,
+every replica up to date and more of them than declared, the newest ones that
+serve are kept, up to the declared count, and the oldest are the surplus that
+goes, with no create. With no mark and as many as declared, nothing tells the
+new from the old, and a rollout of a service that did not change replaces them
+all, as it is asked to.
 
 When old replicas are left, the last line says to run `rollout` again. `up` is
 safe on what a rollout leaves: it creates and deletes nothing while the count is

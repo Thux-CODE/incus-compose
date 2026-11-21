@@ -34,6 +34,7 @@ func reviewCurrent() *fakeReplica {
 func TestReviewDrainedOnResume(t *testing.T) {
 	oldOne := old()
 	oldOne.drained = true
+	oldOne.drainBy = "prev"
 	newOne := reviewCurrent()
 	newOne.statuses = []string{shared.HealthStatusUnhealthy}
 	f := newFakeRollout(t, map[int]*fakeReplica{1: oldOne, 2: newOne})
@@ -85,7 +86,8 @@ func TestReviewHealthyBudget(t *testing.T) {
 }
 
 // The new replica restarted during the grace of the old one's drain: the
-// stop is put off, the old one put back, and the run fails.
+// stop is put off, the old one put back, the new one, which no longer serves,
+// taken away, and the run fails.
 func TestReviewRestartDuringGrace(t *testing.T) {
 	f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
 	plan := f.plan(1)
@@ -100,7 +102,8 @@ func TestReviewRestartDuringGrace(t *testing.T) {
 	require.ErrorIs(t, err, errRolloutShort)
 	assert.Contains(t, err.Error(), "web-1 not retired")
 
-	assert.Equal(t, []string{"create web-2", "drain web-1", "undrain web-1"}, f.events)
+	assert.Equal(t, []string{"create web-2", "drain web-1", "undrain web-1", "discard web-2"}, f.events)
+	assert.Equal(t, []string{"web-1 old"}, f.final())
 	assert.Equal(t, 1, f.ready())
 }
 
@@ -126,6 +129,7 @@ func TestReviewAllCurrent(t *testing.T) {
 	oldOne := reviewCurrent()
 	oldOne.fresh = false
 	oldOne.drained = true
+	oldOne.drainBy = "prev"
 	f := newFakeRollout(t, map[int]*fakeReplica{1: oldOne, 2: reviewCurrent()}, slowStart)
 	plan := f.plan(1)
 
@@ -144,8 +148,11 @@ func TestReviewAllCurrent(t *testing.T) {
 	assert.Equal(t, []string{"drain web-1", "retire web-1"}, f.events)
 }
 
-// With none drained, all current tells nothing even with one replica: both
-// count as old, and the one the run creates replaces them.
+// A surplus of current replicas with no mark, as `up` or a rollout from
+// before the marks leaves: the newest serves on, the oldest is the surplus
+// given back, and nothing is created. (The second review pointed out that
+// the first version of this test replaced both, against the promise that a
+// run again never retires a replica already new and healthy.)
 func TestReviewAllCurrentNoneDrained(t *testing.T) {
 	f := newFakeRollout(t, map[int]*fakeReplica{1: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}}, 2: {current: true, running: true, statuses: []string{shared.HealthStatusHealthy}}}, slowStart)
 	f.minReady = 1
@@ -153,14 +160,17 @@ func TestReviewAllCurrentNoneDrained(t *testing.T) {
 	err := rollout(t.Context(), f, f.plan(1))
 	require.NoError(t, err)
 
-	assert.Equal(t, []string{"drain web-1", "retire web-1", "create web-1", "drain web-2", "retire web-2"}, f.events)
-	assert.Equal(t, []string{"web-1 new"}, f.final())
+	assert.Equal(t, []string{"drain web-1", "retire web-1"}, f.events)
+	assert.Equal(t, []string{"web-2 old"}, f.final())
+	assert.Zero(t, f.creates)
 }
 
 // The service-wide pre_start hooks ran with the replica an earlier run made:
 // picked up again, the rollout does not run them a second time.
 func TestReviewOnceOnResume(t *testing.T) {
-	f := newFakeRollout(t, map[int]*fakeReplica{3: reviewCurrent(), 2: old()}, slowStart)
+	ran := reviewCurrent()
+	ran.preStart = "prev"
+	f := newFakeRollout(t, map[int]*fakeReplica{3: ran, 2: old()}, slowStart)
 	err := rollout(t.Context(), f, f.plan(2))
 	if err != nil || len(f.firsts) != 0 {
 		t.Fatalf("pre_start repeated on %v, err=%v", f.firsts, err)
@@ -211,8 +221,8 @@ func TestReviewStopDeadline(t *testing.T) {
 	assert.Contains(t, err.Error(), "still Running")
 }
 
-// An interrupt during the grace of a replica an earlier run drained leaves
-// it drained: the drain is not this run's to take off.
+// An interrupt during the grace of a replica drained by hand, a drain no
+// rollout marked, leaves it drained: it is neither set again nor taken off.
 func TestReviewKeepsAnEarlierDrain(t *testing.T) {
 	oldOne := old()
 	oldOne.drained = true
@@ -231,6 +241,6 @@ func TestReviewKeepsAnEarlierDrain(t *testing.T) {
 	err := rollout(ctx, f, plan)
 	require.ErrorIs(t, err, context.Canceled)
 
-	assert.Equal(t, []string{"drain web-1"}, f.events)
+	assert.Empty(t, f.events)
 	assert.Equal(t, []string{"web-1 old drained", "web-2 new"}, f.final())
 }

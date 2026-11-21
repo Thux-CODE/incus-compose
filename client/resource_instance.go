@@ -141,6 +141,10 @@ type InstanceConfig struct {
 	// PreRun holds init container instances run to completion before this instance starts.
 	PreRun []*Instance
 
+	// PreRunMark is written to the instance's config once every PreRun has
+	// succeeded, before the instance starts: a record that its hooks ran.
+	PreRunMark map[string]string
+
 	// PostRun holds commands executed inside the container after this instance starts.
 	PostRun []PostRunHook
 }
@@ -1037,6 +1041,13 @@ func (r *Instance) Start(ctx context.Context, opts ...Option) error {
 			err := runner.Run(startCtx, opts...)
 			if err != nil {
 				return r.client.hookAfter(ctx, action, r, options, fmt.Errorf("service %q pre_start[%d] failed: %w", r.Config.ServiceName, i, err))
+			}
+		}
+
+		if len(r.Config.PreRunMark) > 0 {
+			err := r.patchConfig(startCtx, r.Config.PreRunMark)
+			if err != nil {
+				return r.client.hookAfter(ctx, action, r, options, fmt.Errorf("service %q: recording its pre_start: %w", r.Config.ServiceName, err))
 			}
 		}
 	}
@@ -2217,6 +2228,15 @@ func (r *Instance) SetDrained(ctx context.Context, drained bool) error {
 	value := strconv.FormatBool(drained)
 
 	return r.patchConfig(ctx, map[string]string{shared.DNSDrainKey: value})
+}
+
+// SetConfigKeys writes the keys to the instance's config; an empty value
+// removes the key.
+func (r *Instance) SetConfigKeys(ctx context.Context, config map[string]string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	return r.patchConfig(ctx, config)
 }
 
 // Exec runs a command in the instance and waits for it to finish, discarding

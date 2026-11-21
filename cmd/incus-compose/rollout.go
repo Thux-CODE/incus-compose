@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,6 +28,28 @@ import (
 	"github.com/lxc/incus-compose/project"
 	"github.com/lxc/incus-compose/shared"
 )
+
+// The marks of a rollout run on the instance config, which a run picked up
+// again goes by: the run that made a replica, that drained it, and whose
+// service-wide pre_start hooks it ran. The first and the last are taken off
+// once the rollout is over; a drain's goes with the replica it is on.
+const (
+	rolloutIDKey       = "user.incus-compose.rollout.id"
+	rolloutDrainKey    = "user.incus-compose.rollout.drain"
+	rolloutPreStartKey = "user.incus-compose.rollout.pre-start"
+)
+
+// rolloutNewRunID returns the id of a new rollout run.
+func rolloutNewRunID() (string, error) {
+	b := make([]byte, 8)
+
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", fmt.Errorf("making a rollout id: %w", err)
+	}
+
+	return hex.EncodeToString(b), nil
+}
 
 const (
 	// rolloutHealthMargin is added to the time a healthcheck needs for a
@@ -352,9 +376,14 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		}
 
 		present = append(present, replica{
-			index:   i,
-			running: rolloutRunning(info.StatusCode),
-			drained: util.IsTrue(info.Config[shared.DNSDrainKey]),
+			index:     i,
+			id:        info.Config["volatile.uuid"],
+			created:   info.CreatedAt,
+			running:   rolloutRunning(info.StatusCode),
+			drained:   util.IsTrue(rolloutExpanded(info)[shared.DNSDrainKey]),
+			drainedBy: info.Config[rolloutDrainKey],
+			runID:     info.Config[rolloutIDKey],
+			preStart:  info.Config[rolloutPreStartKey],
 		})
 		instances[i] = inst
 
@@ -442,6 +471,21 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	var target string
 	if alias != nil {
 		target = alias.Target
+	}
+
+	// The run an interrupted one marked its replicas with is picked up again;
+	// else this is a new one.
+	runID := rolloutAdoptedRun(present)
+	if runID == "" {
+		runID, err = rolloutNewRunID()
+		if err != nil {
+			return nil, rolloutPlan{}, err
+		}
+	}
+
+	uuids := map[int]string{}
+	for _, r := range present {
+		uuids[r.index] = r.id
 	}
 
 	var (
@@ -537,6 +581,8 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		service:     svcName,
 		name:        name,
 		instances:   instances,
+		uuids:       uuids,
+		runID:       runID,
 		target:      target,
 		order:       args.Order,
 		startOpts:   args.StartOptions,
@@ -552,6 +598,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		Replicas:      n,
 		Present:       present,
 		Taken:         taken,
+		RunID:         runID,
 		Name:          name,
 		KeepFailed:    args.KeepFailed,
 		HealthTimeout: healthTimeout,
@@ -779,6 +826,13 @@ type rolloutRunner struct {
 	// read at the start, and the new ones as created.
 	instances map[int]*client.Instance
 
+	// uuids are the instances' volatile.uuid as first read: what is stopped,
+	// deleted or taken away is checked to be still that instance.
+	uuids map[int]string
+
+	// runID marks what this run makes and drains (rolloutIDKey).
+	runID string
+
 	// target is the fingerprint the service's image pointed at when the plan
 	// was made, or the one the first new replica was made from when that was
 	// not known: every new replica of the run is made from it.
@@ -837,6 +891,19 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 
 	r.instances[index] = inst
 
+	// Marked as this run's from its create on, and, the first one, as having
+	// run the service-wide pre_start hooks once they succeed: a run picked up
+	// again keeps it, and does not run them again.
+	if inst.Config.Extensions == nil {
+		inst.Config.Extensions = map[string]string{}
+	}
+
+	inst.Config.Extensions[rolloutIDKey] = r.runID
+
+	if first {
+		inst.Config.PreRunMark = map[string]string{rolloutPreStartKey: r.runID}
+	}
+
 	if !r.debug {
 		progress := newProgressRenderer(r.writer, r.noColor, isatty.IsTerminal(os.Stdout.Fd()))
 		progress.Start(cc)
@@ -852,24 +919,37 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 
 	// An interrupted create would go on in Incus without us, so it is let
 	// finish and taken away after.
-	err = stack.ForActionF(client.ActionEnsure, only).Run(context.WithoutCancel(ctx), client.ActionEnsure, append(slices.Clone(r.startOpts), client.OptionCreate())...)
+	// No adoption: one made by something else between the check and the
+	// create fails the Ensure untouched.
+	err = stack.ForActionF(client.ActionEnsure, only).Run(context.WithoutCancel(ctx), client.ActionEnsure, append(slices.Clone(r.startOpts), client.OptionCreate(), client.OptionNoAdopt())...)
 	if err != nil {
 		return err
 	}
 
-	// Created by something else between the check and the create, it was
-	// adopted: not this run's to start, wait for or take away.
 	if !inst.Created() {
 		return fmt.Errorf("%s exists already, made by something else than this rollout", r.name(index))
+	}
+
+	var (
+		made    string
+		drained bool
+	)
+
+	if info := inst.State().IncusInstance; info != nil {
+		made = info.Config["volatile.base_image"]
+		drained = util.IsTrue(rolloutExpanded(info)[shared.DNSDrainKey])
+		r.uuids[index] = info.Config["volatile.uuid"]
+	}
+
+	// A profile may drain it from its create on, which the compose file does
+	// not tell: it would pass its check and serve nothing.
+	if drained {
+		return fmt.Errorf("%s was made drained, by a profile: %s keeps it out of the service name", r.name(index), shared.DNSDrainKey)
 	}
 
 	// Each create ensures the image again, on a client of its own: a pull in
 	// between moves the alias, and the replicas of one rollout would run two
 	// images. One made from another than the plan's is not started.
-	var made string
-	if info := inst.State().IncusInstance; info != nil {
-		made = info.Config["volatile.base_image"]
-	}
 
 	switch {
 	case r.target == "":
@@ -930,18 +1010,97 @@ func (r *rolloutRunner) health(ctx context.Context, index int) (replicaRead, err
 	}
 
 	return replicaRead{
-		Status:  inst.Config[shared.HealthStatusKey],
-		Running: rolloutRunning(inst.StatusCode),
-		Drained: util.IsTrue(inst.Config[shared.DNSDrainKey]),
+		ID:        inst.Config["volatile.uuid"],
+		Status:    inst.Config[shared.HealthStatusKey],
+		Running:   rolloutRunning(inst.StatusCode),
+		Drained:   util.IsTrue(rolloutExpanded(&inst.Instance)[shared.DNSDrainKey]),
+		DrainedBy: inst.Config[rolloutDrainKey],
 	}, nil
 }
 
-func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) error {
-	return r.instances[index].SetDrained(ctx, drained)
+// rolloutExpanded is the config ic-dns and ic-healthd go by, profiles
+// included, or the instance's own when Incus gave no expanded one.
+func rolloutExpanded(info *incusApi.Instance) map[string]string {
+	if len(info.ExpandedConfig) > 0 {
+		return info.ExpandedConfig
+	}
+
+	return info.Config
 }
 
-func (r *rolloutRunner) retire(ctx context.Context, index int) error {
-	return r.takeDown(ctx, index, true, false)
+func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) error {
+	keys := map[string]string{shared.DNSDrainKey: "", rolloutDrainKey: ""}
+	if drained {
+		keys = map[string]string{shared.DNSDrainKey: "true", rolloutDrainKey: r.runID}
+	}
+
+	return r.instances[index].SetConfigKeys(ctx, keys)
+}
+
+func (r *rolloutRunner) unmark(ctx context.Context, index int) error {
+	return r.instances[index].SetConfigKeys(ctx, map[string]string{rolloutIDKey: "", rolloutPreStartKey: ""})
+}
+
+// sameInstance reads the replica and checks it is still the instance first
+// read by its name, by volatile.uuid; nil, nil when there is none.
+func (r *rolloutRunner) sameInstance(ctx context.Context, index int) (*incusApi.Instance, error) {
+	conn, err := r.c.Connection()
+	if err != nil {
+		return nil, err
+	}
+
+	info, _, err := conn.GetInstance(ctx, r.c.IncusProject(), r.name(index), nil)
+	if incusApi.StatusErrorCheck(err, http.StatusNotFound) {
+		return nil, nil
+	}
+
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", r.name(index), err)
+	}
+
+	want := r.uuids[index]
+	if want != "" && info.Config["volatile.uuid"] != want {
+		return nil, fmt.Errorf("%s %w: left as it is", r.name(index), errRolloutReplaced)
+	}
+
+	return &info.Instance, nil
+}
+
+func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool) error {
+	info, err := r.sameInstance(ctx, index)
+	if err != nil {
+		return err
+	}
+
+	if info == nil {
+		return client.ErrNotFound.WithKindName(client.KindInstance, r.name(index))
+	}
+
+	if !stopped {
+		return r.takeDown(ctx, index, true, false)
+	}
+
+	// One read stopped serves nothing and was not drained: it is deleted only
+	// while it is stopped, which Incus checks too, and never stopped here.
+	if rolloutRunning(info.StatusCode) {
+		return fmt.Errorf("%s started again since it was read stopped: not retired", r.name(index))
+	}
+
+	inst := r.instances[index]
+
+	err = inst.SetHealthCheckingStopped(ctx, true)
+	if err != nil {
+		return err
+	}
+
+	err = inst.Delete(ctx)
+	if err != nil {
+		return err
+	}
+
+	delete(r.instances, index)
+
+	return nil
 }
 
 func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error {
@@ -950,15 +1109,17 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 		return nil
 	}
 
-	// Only what this run's own create made is deleted. The name was free when
-	// it was checked, but another process may have created an instance by it
-	// in between, which the create then adopted or conflicted with.
-	if !inst.Created() {
-		absent, err := instanceAbsent(ctx, r.c, r.name(index))
-		if err != nil || absent {
-			return err
-		}
+	info, err := r.sameInstance(ctx, index)
+	if err != nil || info == nil {
+		return err
+	}
 
+	// Only what this run made is taken away: what its own create made, or
+	// what carries its mark, made by the run picked up again. The name was
+	// free when it was checked, but another process may have created an
+	// instance by it in between, which the create then conflicted with.
+	ours := inst.Created() || r.runID != "" && info.Config[rolloutIDKey] == r.runID
+	if !ours {
 		return fmt.Errorf("%s exists but was not created by this run: left as it is", r.name(index))
 	}
 
@@ -978,7 +1139,12 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool) error {
 	inst := r.instances[index]
 
+	// Each read is bounded, so a read that hangs does not hold up the stop's
+	// deadline.
 	status := func(ctx context.Context) (incusApi.StatusCode, error) {
+		ctx, cancel := context.WithTimeout(ctx, 2*rolloutKillEvery)
+		defer cancel()
+
 		return r.status(ctx, index)
 	}
 
@@ -1106,6 +1272,11 @@ func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) e
 
 	deadline := time.Now().Add(settle)
 
+	// A kill that hangs on the API is bounded by the deadline, which it would
+	// otherwise outlast: the transport waits up to an hour for an answer.
+	killCtx, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
+
 	var lastKill time.Time
 
 	for {
@@ -1117,7 +1288,7 @@ func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) e
 		if err == nil && rolloutRunning(s) && (lastKill.IsZero() || time.Since(lastKill) >= killEvery) {
 			lastKill = time.Now()
 
-			killErr := kill(ctx)
+			killErr := kill(killCtx)
 			if killErr != nil {
 				errs = append(errs, killErr)
 			}
