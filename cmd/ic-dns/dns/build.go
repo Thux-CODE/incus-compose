@@ -46,6 +46,12 @@ type instance struct {
 	// depends on the others too, so services writes it for all of them.
 	service string
 
+	// standby is the service name a drained replica named after its service
+	// answers to as its own, empty otherwise. That one name is both: it is
+	// the service's while another replica carries it, and this instance's own
+	// where none does, so refresh writes it rather than the instance.
+	standby string
+
 	// ready is whether this replica may answer for its service while another
 	// may not.
 	ready bool
@@ -218,6 +224,12 @@ func patchInstance(ev *iutil.Event, suffix string) *instance {
 	service := own[metaService]
 	if service != "" && !incusutil.IsTrue(own[metaDrain]) {
 		inst.names = append(inst.names, dns.CanonicalName(service)+zone)
+	}
+
+	// Drained and named after its service, its own name is the service's
+	// name: refresh writes it, from the other replicas while one serves.
+	if service != "" && incusutil.IsTrue(own[metaDrain]) && dns.CanonicalName(service)+zone == inst.names[0] {
+		inst.standby = inst.names[0]
 	}
 
 	for key, net := range nets {

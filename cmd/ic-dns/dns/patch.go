@@ -217,7 +217,7 @@ func (s *state) contributions(inst *instance, ttl uint32) map[string]ecs_view.Vi
 
 	for _, name := range inst.names {
 		// Written for every replica at once, by refresh.
-		if name == inst.service {
+		if name == inst.service || name == inst.standby {
 			continue
 		}
 
@@ -253,13 +253,28 @@ func (s *state) refresh(ttl uint32) bool {
 	carriers := map[string][]*instance{}
 	zones := map[string]string{}
 
+	// A drained replica named after its service answers to that name as its
+	// own only where no other replica carries it.
+	standby := map[string][]*instance{}
+
 	for _, inst := range s.held {
+		if inst.standby != "" {
+			standby[inst.standby] = append(standby[inst.standby], inst)
+			zones[inst.standby] = inst.zone
+		}
+
 		if inst.service == "" {
 			continue
 		}
 
 		carriers[inst.service] = append(carriers[inst.service], inst)
 		zones[inst.service] = inst.zone
+	}
+
+	for name, replicas := range standby {
+		if _, carried := carriers[name]; !carried {
+			carriers[name] = replicas
+		}
 	}
 
 	changed := false
@@ -313,7 +328,7 @@ func (s *state) refresh(ttl uint32) bool {
 // the old service answer is dropped, and would lose it with it.
 func (s *state) ownBack(name string, ttl uint32) {
 	for _, inst := range s.held {
-		if name == inst.service || !slices.Contains(inst.names, name) {
+		if name == inst.service || name == inst.standby || !slices.Contains(inst.names, name) {
 			continue
 		}
 

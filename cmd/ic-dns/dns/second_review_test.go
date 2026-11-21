@@ -354,6 +354,39 @@ func TestSecondPeeringGateAfterLastUncoveredNetworkLeaves(t *testing.T) {
 	require.NotContains(t, ask.keys, app1, "the read retried is asked for afresh without the network that went")
 }
 
+// TestSecondDrainWhenReplicaHasTheServiceName: web and spare both serve
+// web.shop, and web is drained. Its own name is the service's: answered by
+// spare alone while spare serves, by web again once it is the only one left,
+// and by both once web is put back.
+func TestSecondDrainWhenReplicaHasTheServiceName(t *testing.T) {
+	rep := func(name, ip string, drain bool) *iutil.Event {
+		cfg := map[string]string{userLabel(labelServiceCompose): "web", shared.HealthEnabledKey: "true", shared.HealthKeyPrefix + "test": healthTest, shared.HealthStatusKey: shared.HealthStatusHealthy}
+		if drain {
+			cfg[userLabel(labelPrefix+metaDrain)] = "true"
+		}
+		return event(api.EventLifecycleInstanceUpdated, "shop", name).WithInstance(read("shop", true, cfg, netsOf(map[string]string{"a": ip})), true)
+	}
+	c := newColdServer(t, Suffix("example"))
+	c.p.fold(rep("web", "10.0.0.2", false))
+	c.p.fold(rep("spare", "10.0.0.3", false))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.fold(rep("web", "10.0.0.2", true))
+	c.p.write()
+	_, ips := resolve(c.a, "web.shop.example.", dns.TypeA, "10.0.0.3")
+	require.Equal(t, []string{"10.0.0.3"}, ips)
+
+	c.p.fold(event(api.EventLifecycleInstanceDeleted, "shop", "spare"))
+	c.p.write()
+	_, ips = resolve(c.a, "web.shop.example.", dns.TypeA, "10.0.0.2")
+	require.Equal(t, []string{"10.0.0.2"}, ips, "the drained replica is the only one left, and keeps its own name")
+
+	c.p.fold(rep("spare", "10.0.0.3", false))
+	c.p.fold(rep("web", "10.0.0.2", false))
+	c.p.write()
+	_, ips = resolve(c.a, "web.shop.example.", dns.TypeA, "10.0.0.3")
+	require.ElementsMatch(t, []string{"10.0.0.2", "10.0.0.3"}, ips, "put back")
+}
+
 // in stamps an event with the stream session the source minted it in.
 func in(session uint64, ev *iutil.Event) *iutil.Event { return ev.WithSession(session) }
 
