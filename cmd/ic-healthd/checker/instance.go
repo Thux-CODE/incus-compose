@@ -123,8 +123,10 @@ type instanceResult struct {
 
 	config *instanceConfig
 
-	// status is the value that was written (instanceResultStatus).
+	// status is the value that was written (instanceResultStatus), and run the
+	// instance's run when the write was sent.
 	status string
+	run    uint64
 
 	err error
 }
@@ -176,10 +178,11 @@ type instance struct {
 	run       uint64
 	actionRun uint64
 
-	// unproven says this run, opened by a start, has not passed a check yet.
-	// Its first pass writes healthy even when status already says so: status
-	// may come from a read taken before starting landed, which still carried
-	// the last run's healthy.
+	// unproven says this run, opened by a start, has no healthy of its own on
+	// the instance yet. Until one lands, every pass writes healthy even when
+	// status already says so: status may come from a read taken before the
+	// daemon's last write landed, which still carried the last run's healthy -
+	// or before a healthy write that then failed.
 	unproven bool
 
 	// failures counts consecutive failed checks since the last success.
@@ -743,9 +746,11 @@ func reportStarting(ctx context.Context, logger *slog.Logger, conn *iclient.Conn
 // sends whatever was queued behind it.
 func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance, status string) {
 	inst.writing = true
+	run := inst.run
 
 	go func(name string) {
 		res := instanceStatusAction(ctx, logger, conn, project, name, status)
+		res.run = run
 
 		select {
 		case <-ctx.Done():
@@ -998,8 +1003,9 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 		force := false
 
 		if res.err == nil {
+			// Spent when the write lands, not here: a write that fails
+			// leaves status open to a stale read again.
 			force = inst.unproven
-			inst.unproven = false
 
 			inst.failures = 0
 			want = shared.HealthStatusHealthy
@@ -1104,6 +1110,13 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 		} else {
 			// Only transitions get here, so this stays quiet on a healthy fleet.
 			logger.Info("Health status", "project", res.project, "instance", res.name, "status", res.status)
+
+			// The run's own healthy is on the instance: from here a read
+			// saying healthy can be believed. One sent in an earlier run
+			// says nothing about this one.
+			if res.status == shared.HealthStatusHealthy && res.run == inst.run {
+				inst.unproven = false
+			}
 		}
 
 		// What was asked for meanwhile, unless it is what just landed.

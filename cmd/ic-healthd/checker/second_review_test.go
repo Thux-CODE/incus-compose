@@ -6,6 +6,7 @@ import (
 	"time"
 
 	api "github.com/lxc/incus/v7/shared/api"
+	"github.com/stretchr/testify/require"
 
 	"github.com/lxc/incus-compose/shared"
 )
@@ -27,6 +28,28 @@ func TestSecondWatchdogExpiresStartPeriod(t *testing.T) {
 		}
 	}
 	t.Fatal("three timed out probes after the start period, still starting without restart")
+}
+
+func TestSecondHealthyAfterFailedPatchAndStaleRead(t *testing.T) {
+	s := newScheduler(t)
+	inst := s.add("web", testConfig())
+	s.event(api.EventLifecycleInstanceRestarted, "web")
+	s.result(landed(s.next(t)))
+	s.result(s.checked(t, inst, nil))
+	failed := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, failed.status)
+	require.Error(t, failed.err)
+	s.result(failed)
+	s.staleRead(inst)
+	for range 3 {
+		s.result(s.checked(t, inst, nil))
+	}
+	select {
+	case res := <-s.results:
+		require.Equal(t, shared.HealthStatusHealthy, res.status)
+	case <-time.After(absenceGrace):
+		t.Fatal("starting is the last successful write")
+	}
 }
 
 func TestSecondFullResultsBlocksScheduler(t *testing.T) {

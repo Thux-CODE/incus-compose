@@ -1850,6 +1850,70 @@ func TestADiscoveredInstanceIsNotForced(t *testing.T) {
 	s.silent(t)
 }
 
+// TestAFailedFirstHealthyStaysForcedUntilOneLands: the first healthy of the
+// run fails to land and a stale read then says healthy. The passes after it
+// still write, and once one lands the fleet is quiet again.
+func TestAFailedFirstHealthyStaysForcedUntilOneLands(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	s.result(s.checked(t, inst, nil))
+	failed := s.next(t)
+	require.Error(t, failed.err)
+	s.result(failed)
+
+	s.staleRead(inst)
+	require.True(t, inst.unproven, "nothing of this run's has landed")
+
+	s.result(s.checked(t, inst, nil))
+	retry := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, retry.status)
+
+	// A pass while it is out queues nothing new behind the same value.
+	s.result(s.checked(t, inst, nil))
+	s.result(landed(retry))
+	require.False(t, inst.unproven)
+	s.silent(t)
+
+	s.staleRead(inst)
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
+// TestAPreviousRunHealthyDoesNotProveTheNewRun: a healthy sent in the run before
+// lands after the restart. It is not the new run's, so the new run's first pass
+// is still written over a stale healthy.
+func TestAPreviousRunHealthyDoesNotProveTheNewRun(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusUnhealthy
+
+	s.result(s.checked(t, inst, nil))
+	old := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, old.status)
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(old))
+	require.True(t, inst.unproven)
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.staleRead(inst)
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
 // ----------------------------------------------------------------------------
 // the start period through the watchdog
 // ----------------------------------------------------------------------------
