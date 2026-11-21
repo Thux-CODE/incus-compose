@@ -180,7 +180,7 @@ func (p *Plugin) sweepEnd(ctx context.Context) {
 	p.updateMetrics()
 
 	select {
-	case p.args.CommandOut <- iutil.Command{Action: iutil.ActionSweepEnd, ChainState: iutil.ChainWarm}:
+	case p.args.CommandOut <- iutil.Command{Action: iutil.ActionSweepEnd, ChainState: iutil.ChainWarm, Session: p.sweepSession}:
 	case <-ctx.Done():
 	}
 }

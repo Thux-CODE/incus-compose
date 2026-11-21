@@ -117,6 +117,12 @@ type Plugin struct {
 	// abandoned one still says is not listened to.
 	sweepRun uint64
 
+	// sweepSession is the stream session the run now running was started
+	// for: the connected that restarted it. Its end names it, so the source
+	// takes that end only while the same stream is up. 0, the run Run starts
+	// before any stream opened, is never taken.
+	sweepSession uint64
+
 	// sweepEnding says a run reached its end while its project reads were still
 	// out, or instances it listed were unread, so whatever settles the last of
 	// them announces it instead.
@@ -756,6 +762,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 	// happened while it was down was announced to nobody.
 	if ev.Action() == iutil.ActionConnected {
 		p.q.push(ev, true)
+		p.sweepSession = ev.Session()
 		p.restartSweep(ctx)
 
 		return

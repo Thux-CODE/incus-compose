@@ -66,6 +66,14 @@ type Command struct {
 	// ChainState is what the chain is from here on. Empty leaves it as it
 	// stands. Independent of Action: a plugin sets either, or both.
 	ChainState ChainState
+
+	// Session is the stream session a command setting ChainState belongs to,
+	// as Event.Session names it. The source takes such a command only within
+	// that session, with its stream open: one raised for a session that has
+	// ended - the end of a round read before the stream went - or before any
+	// stream opened is dropped whole, action and all. Ignored on a command
+	// that sets no ChainState.
+	Session uint64
 }
 
 // SetupArgs is everything a plugin is handed at Setup. An argument bundle, not

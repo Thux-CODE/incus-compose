@@ -29,6 +29,10 @@ type Event struct {
 	// received is when the event was decoded.
 	received time.Time
 
+	// session is the stream session the source minted this event in. See
+	// Session.
+	session uint64
+
 	// enriched says which reads landed.
 	enriched Enrichment
 
@@ -79,6 +83,23 @@ func (e *Event) ChainState() ChainState { return e.chainState }
 func (e *Event) WithChainState(state ChainState) *Event {
 	next := *e
 	next.chainState = state
+
+	return &next
+}
+
+// Session is the event stream session the source minted this event in,
+// counted from 1 at each listener that opened; 0 is an event the source did
+// not mint, or one minted before any listener opened. A connected names the
+// session it opens and a disconnected the one it closes, so a plugin can tell
+// which of two it was handed out of order is the newer, and that an event
+// from a session after the last disconnected it saw means the stream came
+// back even when the connected that said so was lost on the way.
+func (e *Event) Session() uint64 { return e.session }
+
+// WithSession derives an event minted in session. Only the source calls this.
+func (e *Event) WithSession(session uint64) *Event {
+	next := *e
+	next.session = session
 
 	return &next
 }

@@ -54,9 +54,14 @@ type Source struct {
 	// chain at the head.
 	raised chan iutil.Command
 
-	// chain is stamped onto every event; a plugin sets it, nothing here
-	// derives or checks it.
+	// chain is stamped onto every event; a plugin sets it, and only within
+	// the session its command names (see apply).
 	chain iutil.ChainState
+
+	// sessionID is the listener session now or last open, counted from 1, and
+	// open says whether it still is. Run's goroutine alone.
+	sessionID uint64
+	open      bool
 }
 
 // plugged is one plugin plus the channel the source asks it questions through.
@@ -218,18 +223,22 @@ func (s *Source) session(ctx context.Context) bool {
 	}
 
 	// Connected the moment Incus accepts the listener; the enricher reads a
-	// whole fleet off it. Cold until that read ends: a command taken during
-	// the backoff - the end of a run started before the stream went - may
-	// have stamped the chain warm, and that run missed what happened since.
+	// whole fleet off it. A session of its own, and cold until that read
+	// ends: what a run started before it says can no longer turn it warm.
+	s.sessionID++
+	s.open = true
 	s.chain = iutil.ChainCold
 
 	s.hand(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", ""))
 
 	// Paired on every way out, including a canceled context, and cold with it.
+	// Stamped with the session it closes.
 	defer func() {
 		s.chain = iutil.ChainCold
 
 		s.hand(iutil.NewEvent(time.Now(), iutil.ActionDisconnected, "", "", ""))
+
+		s.open = false
 	}()
 
 	for {
@@ -294,13 +303,26 @@ func (s *Source) route(raw incusapi.Event) {
 
 // hand gives one event to the head of the chain; each plugin calls its own successor.
 func (s *Source) hand(ev *iutil.Event) {
-	s.head(ev.WithChainState(s.chain))
+	s.head(ev.WithChainState(s.chain).WithSession(s.sessionID))
 }
 
 // apply takes one command a plugin raised: a state sets, an action walks, and
-// either may be left empty. Nothing here checks the transition.
+// either may be left empty.
+//
+// A command setting the state is the end of a round, which says the fleet was
+// read whole from a stream that was up. It belongs to the session its run was
+// started in: taken in another one, or with no stream open, it would stamp
+// warm a chain whose stream missed what happened since, so it is dropped,
+// action and all - the run the new session starts raises its own.
 func (s *Source) apply(cmd iutil.Command) {
 	if cmd.ChainState != "" {
+		if !s.open || cmd.Session != s.sessionID {
+			s.logger.Debug("dropping a command from another stream session",
+				"action", cmd.Action, "session", cmd.Session, "now", s.sessionID, "open", s.open)
+
+			return
+		}
+
 		s.chain = cmd.ChainState
 	}
 

@@ -469,14 +469,17 @@ func TestRunReopensAClosedStream(t *testing.T) {
 	assert.Equal(t, iutil.ActionDisconnected, (<-rec.saw).Action())
 
 	// The source is now in the backoff between sessions, with no stream at all.
-	rec.args.CommandOut <- iutil.Command{Action: iutil.ActionSweepEnd, ChainState: iutil.ChainWarm}
-	assert.Equal(t, iutil.ActionSweepEnd, (<-rec.saw).Action())
+	// A plain action still walks; the end of a run started in the session that
+	// went says nothing about what happened while it was down, and is dropped.
+	rec.args.CommandOut <- iutil.Command{Action: "dns/ready"}
+	assert.Equal(t, "dns/ready", (<-rec.saw).Action())
 
-	// The end of a run that started before the stream went says nothing about
-	// what happened while it was down: the stream comes back cold.
+	rec.args.CommandOut <- iutil.Command{Action: iutil.ActionSweepEnd, ChainState: iutil.ChainWarm, Session: 1}
+
 	connected := <-rec.saw
-	assert.Equal(t, iutil.ActionConnected, connected.Action())
+	assert.Equal(t, iutil.ActionConnected, connected.Action(), "the old end walked")
 	assert.Equal(t, iutil.ChainCold, connected.ChainState())
+	assert.Equal(t, uint64(2), connected.Session())
 
 	cancel()
 	require.NoError(t, <-done)
