@@ -30,6 +30,10 @@ type Options struct {
 	// Create resources if they don't exist (for ActionEnsure).
 	Create bool
 
+	// NoAdopt makes an Ensure of an instance that finds one by its name fail
+	// instead of taking it as its own (for ActionEnsure).
+	NoAdopt bool
+
 	// Force deletion/stop even if resource is in use.
 	Force bool
 
@@ -88,6 +92,14 @@ type Option func(o *Options)
 func OptionCreate() Option {
 	return func(o *Options) {
 		o.Create = true
+	}
+}
+
+// OptionNoAdopt makes an instance's Ensure fail on an instance found by its
+// name, which it otherwise adopts: for a caller that must only ever create.
+func OptionNoAdopt() Option {
+	return func(o *Options) {
+		o.NoAdopt = true
 	}
 }
 

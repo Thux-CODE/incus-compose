@@ -547,6 +547,20 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 	// Check if exists
 	err := r.fetch(ctx, nil)
 	if err == nil {
+		if options.NoAdopt {
+			err = ErrCreate.WithText(fmt.Sprintf("%s exists already, and is not adopted", r.incusName))
+			return false, r.client.hookAfter(ctx, ActionEnsure, r, options, err)
+		}
+
+		// One marked to go is torn down only while it is the instance the plan
+		// saw: one that took the name since, without its labels, stays.
+		if r.deleteMarked && options.Create {
+			ownErr := r.carriesOwnerLabels()
+			if ownErr != nil {
+				return false, r.client.hookAfter(ctx, ActionEnsure, r, options, ownErr)
+			}
+		}
+
 		// Keys only: a changed value still needs --recreate.
 		if addErr := r.addMissingConfig(ctx); addErr != nil {
 			return false, r.client.hookAfter(ctx, ActionEnsure, r, options, addErr)
@@ -588,10 +602,44 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 		return false, err
 	}
 
+	// A read that failed is no sign the instance is missing: creating it
+	// then would conflict with the one there, or make one more.
+	if !incusApi.StatusErrorCheck(err, http.StatusNotFound) {
+		return false, r.client.hookAfter(ctx, ActionEnsure, r, options, err)
+	}
+
+	// One marked to go that is gone already, taken away by something else
+	// since the plan, is what the plan asked for: it is not made again.
+	if r.deleteMarked {
+		r.client.resources.Remove(r)
+
+		return false, r.client.hookAfter(ctx, ActionEnsure, r, options, nil)
+	}
+
 	err = r.create(ctx, opts...)
 	err = r.client.hookAfter(ctx, ActionEnsure, r, options, err)
 
 	return false, err
+}
+
+// ownerLabelPrefix holds the labels incus-compose puts on what it makes, the
+// service and the compose project among them.
+const ownerLabelPrefix = "user.label.incus-compose."
+
+// carriesOwnerLabels reports, as an error, an instance fetched by name that
+// does not carry the incus-compose labels this one is declared with.
+func (r *Instance) carriesOwnerLabels() error {
+	info := r.State().IncusInstance
+
+	for key, value := range r.Config.Extensions {
+		if !strings.HasPrefix(key, ownerLabelPrefix) || info.Config[key] == value {
+			continue
+		}
+
+		return ErrUnknown.WithText(fmt.Sprintf("%s not deleted: %s is %q, not %q, so it is not the instance planned to go", r.incusName, key, info.Config[key], value))
+	}
+
+	return nil
 }
 
 func (r *Instance) ensured() error {
