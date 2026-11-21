@@ -184,7 +184,7 @@ func TestReviewNetworkEventDuringRead(t *testing.T) {
 			defer p.reads.stop()
 			ctx := t.Context()
 			p.readNetwork(ctx, "p", oldName)
-			old := <-p.reads.results
+			old := awaitResult(t, p)
 			require.NoError(t, old.err)
 			// Keep an API reply as actually captured before the config update.
 			snapshot := *old.network
@@ -198,10 +198,17 @@ func TestReviewNetworkEventDuringRead(t *testing.T) {
 			n.Config["ipv4.address"] = "10.2.0.1/24"
 			p.acceptNetwork(ctx, iutil.NewEvent(time.Now(), action, "p", newName, previous))
 			p.settleRead(ctx, old)
-			select {
-			case refresh := <-p.reads.results:
-				p.settleRead(ctx, refresh)
-			case <-time.After(60 * time.Millisecond):
+
+			// The update is read again, and has to land; a delete reads
+			// nothing, and a rename reads the new name, which is not asked.
+			switch action {
+			case incusapi.EventLifecycleNetworkUpdated:
+				p.settleRead(ctx, awaitResult(t, p))
+			default:
+				refresh, landed := maybeResult(ctx, p, 60*time.Millisecond)
+				if landed {
+					p.settleRead(ctx, refresh)
+				}
 			}
 			net, _, exists := p.state.network("p", oldName)
 			if action == incusapi.EventLifecycleNetworkUpdated {

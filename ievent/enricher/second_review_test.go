@@ -15,6 +15,38 @@ import (
 	"github.com/lxc/incus-compose/internal/testlib"
 )
 
+// awaitResult is the next read to land, served the way Run serves the pool. A
+// test driving the plugin by hand has to: a read the pool refuses - its one
+// worker not back yet from handing on the last result - waits for the pool's
+// timer, which only Run, or this, takes.
+func awaitResult(t *testing.T, p *Plugin) result {
+	t.Helper()
+
+	res, landed := maybeResult(t.Context(), p, 5*time.Second)
+	if !landed {
+		t.Fatal("no read landed")
+	}
+
+	return res
+}
+
+// maybeResult is the next read to land within d, served as awaitResult does,
+// and whether one did.
+func maybeResult(ctx context.Context, p *Plugin, d time.Duration) (result, bool) {
+	deadline := time.After(d)
+
+	for {
+		select {
+		case res := <-p.reads.results:
+			return res, true
+		case <-p.reads.timer.C:
+			p.reads.retry(ctx)
+		case <-deadline:
+			return result{}, false
+		}
+	}
+}
+
 // TestSecondDeleteObligationSurvivesReadError: 404 with a read owed, the owed
 // read times out, the retry finds 404 again. The delete the first 404 handed
 // on is still owed, and that retry announces it.
@@ -33,12 +65,12 @@ func TestSecondDeleteObligationSurvivesReadError(t *testing.T) {
 	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
 	ev := iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", inst.Name, "")
 	p.accept(t.Context(), ev)
-	first := <-p.reads.results
+	first := awaitResult(t, p)
 	p.accept(t.Context(), ev)
 	p.settleRead(t.Context(), first)
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 	p.accept(t.Context(), ev)
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 	for ev := range p.q.release() {
 		if ev.Action() == api.EventLifecycleInstanceDeleted {
 			return
@@ -65,10 +97,10 @@ func TestSecondOwedDeleteByTheListing(t *testing.T) {
 	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
 	ev := iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", inst.Name, "")
 	p.accept(t.Context(), ev)
-	first := <-p.reads.results
+	first := awaitResult(t, p)
 	p.accept(t.Context(), ev)
 	p.settleRead(t.Context(), first)
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 
 	var deleted bool
 
@@ -101,15 +133,15 @@ func TestSecondReadOutsideListingCannotHoldRound(t *testing.T) {
 	}
 	// One listed project read is finished by the worker, and awaits settlement.
 	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionProjects, names: []string{"p", "q"}})
-	proj := <-p.reads.results
+	proj := awaitResult(t, p)
 	p.settleRead(t.Context(), proj)
-	other := <-p.reads.results
+	other := awaitResult(t, p)
 	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: proj.call.project})
 	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: other.call.project})
 	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone})
 	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
 	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, proj.call.project, "live", ""))
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 	p.settleRead(t.Context(), other)
 	select {
 	case cmd := <-raised:
@@ -143,7 +175,7 @@ func TestSecondNetworkRepliesAfterDelete(t *testing.T) {
 			if path == "inherited network read" {
 				p.reads.readNet = func(context.Context, string, string) (*api.Network, string, error) { return &n, "", nil }
 				p.readNetwork(t.Context(), "tenant", n.Name)
-				res = <-p.reads.results
+				res = awaitResult(t, p)
 			}
 			p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkDeleted, "default", n.Name, ""))
 			if path == "sweeper" {
@@ -171,7 +203,7 @@ func TestSecondNetworkCreatedAfterListing(t *testing.T) {
 	n := api.Network{Name: "new", Project: "default", Managed: true, Config: map[string]string{"ipv4.address": "10.9.0.1/24"}}
 	p.reads.readNet = func(context.Context, string, string) (*api.Network, string, error) { return &n, "", nil }
 	p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkCreated, "default", "new", ""))
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 	_, _, exists := p.state.network("default", "new")
 	require.True(t, exists)
 
@@ -198,7 +230,7 @@ func TestSecondInstanceCreatedAfterListing(t *testing.T) {
 		return &inst, nil, nil
 	}
 	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceStarted, "p", inst.Name, ""))
-	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), awaitResult(t, p))
 	events := make([]string, 0)
 	p.args.Next = func(ev *iutil.Event) { events = append(events, ev.Action()) }
 	for ev := range p.q.release() {
