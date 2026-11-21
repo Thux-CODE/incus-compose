@@ -330,40 +330,64 @@ form.
 - `ic-dns` turns ready only on a round that read what it listed: the enricher
   ends a round once every instance it listed and nothing held has been read,
   deleted or left out of a listing, and an instance whose read keeps failing
-  holds it for a minute at most. A round that ended while the Incus event
-  stream was down no longer makes `/ready` 200 at the reconnection: the stream
-  comes back cold and `/ready` waits on the round the reconnection starts. The
-  `/ready` decision no longer races a dropped disconnect. (by @sandroden)
+  holds it for a minute at most, from the moment the run first waits on it. A
+  run whose network or instance listing failed is not whole, and is tried again
+  after the backoff. Every event carries the event stream session it was
+  minted in, and the end of a round is taken only within the session its run
+  was started for, with the stream open: one read before the stream went, or
+  with no stream ever open, no longer makes `/ready` 200 or the view warm.
+  `ic-dns` and `/ready` tell whether the stream is up by the sessions, not by
+  the last control they were handed, so a connected dropped on a full inbox no
+  longer keeps the view cold for the whole session, nor does an older
+  disconnected handed on after it keep `/ready` at 503. A peering that becomes
+  known while the stream is down turns the view warm, clamped and not ready,
+  instead of leaving every name `SERVFAIL` with `--cold-answers=false`.
+  (by @sandroden)
 
 - `ic-dns` refuses zone transfers (`SERVFAIL`) until the first round after a
   start has ended, instead of handing a secondary the part of a zone replayed so
-  far under the serial the whole zone was published with. A change folded after
-  the round steps its zone's serial even when its read was stamped cold before
-  the round ended. (by @sandroden)
+  far under the serial the whole zone was published with. A zone's serial now
+  steps exactly when what a transfer of it carries changes, by a digest of the
+  zone stored with the serial in the cold store: after a restart, a change made
+  while `ic-dns` was down - a delete inside the replay, a peering that took a
+  service address out, an enricher store newer than `ic-dns`'s own - steps it
+  once, and a restart that changed nothing, an identical confirmation
+  included, steps nothing. A zone that empties keeps its serial instead of
+  starting again at 1 when it comes back. A cold store from before the digest
+  is taken on trust, as before. (by @sandroden)
 
 - `ic-dns --peer-views`: a service's healthy replicas are picked over the
   querier's networks and their peers at once, so a replica `starting` on the
   querier's own network no longer answers beside a `healthy` one reached through
   a peer. A peering read asked for before a `network-peer-*` event no longer
-  turns the server warm on the topology from before it. A peering read with
-  nothing peered survives a restart as known, so a slow peering read after it no
-  longer keeps `/ready` at 503; a pair stored one way round only in the cold
-  store is dropped. A network that gets its first instance after warm holds the
-  misses of queriers that may see it through a peer at `SERVFAIL` until its
-  peering is read, 45 seconds at most, instead of `NXDOMAIN`. (by @sandroden)
+  turns the server warm on the topology from before it. The cold store keeps
+  the last peering that counted as known, an empty one included, so a slow
+  peering read after a restart no longer keeps `/ready` at 503 and a read too
+  old or too narrow to count is not restored as known; a pair stored one way
+  round only is dropped. A network that gets its first instance after warm
+  holds at `SERVFAIL`, for 45 seconds at most from when it appeared, the misses
+  of queriers on it or for names on it, until a read covering it asked for
+  after the last peer event lands; an address changing on a network already
+  known owes nothing, and a network losing its last name lets the view turn
+  warm if what was read covers the rest. (by @sandroden)
 
 - `ic-dns` keeps an instance's own name when its service, named after it, is
-  renamed; never drops a name replayed from the cold store on a full inbox;
-  answers a truncated `NXDOMAIN` from the forwarder under the suffix
-  `SERVFAIL` before warm, like an untruncated one; and takes an IPv4-mapped CIDR
-  in `--trusted-client`, `--allow-transfer` or `--claim-reverse` as the IPv4
-  prefix it names (one shorter than `/96` is refused). A query can no longer
-  pair the snapshot from before the end of the first round with the warm after
-  it. (by @sandroden)
+  renamed, and a drained replica named after its service leaves that name
+  while another replica serves it; never drops a name replayed from the cold
+  store on a full inbox, and folds the spill in arrival order; answers a
+  truncated `NXDOMAIN` from the forwarder under the suffix `SERVFAIL` before
+  warm, like an untruncated one; and takes an IPv4-mapped CIDR in
+  `--trusted-client`, `--allow-transfer` or `--claim-reverse` as the IPv4 prefix
+  it names (one shorter than `/96` is refused). A query can no longer pair the
+  snapshot from before the end of the first round with the warm after it.
+  (by @sandroden)
 
 - The `ievent` enricher no longer deletes an instance made again under the same
-  name on the strength of a 404 read before it, nor lets a network read taken
-  before a network update, delete or rename undo it. (by @sandroden)
+  name on the strength of a 404 read before it, and no longer loses the delete
+  of one found gone when the reads after it fail; no listing older than an
+  instance's read announces it deleted; and no network read or listing older
+  than a network event undoes it, from the sweeper or from a read a tenant's
+  NIC asked for under the tenant's key. (by @sandroden)
 
 - `ic-healthd` no longer lets a check sent before an instance restarted decide
   the new run: its verdict, pass, fail or timeout, is dropped and the new run is

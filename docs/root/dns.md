@@ -371,8 +371,13 @@ global DNS sidecar, individual projects can opt into transfers by specifying
   the fleet has been read once. The zone is rebuilt from the cold store under
   the serial it was last published with, and part of it would go over under a
   serial that never moves for the rest. The secondary keeps what it holds and
-  tries again at its retry interval. A change found once the round has ended
-  steps the serial, whatever read found it.
+  tries again at its retry interval.
+- **The serial follows the content**: it steps when what a transfer of the zone
+  carries changes, and only then. After a restart the zone rebuilt is compared
+  with what the stored serial was published with, so a change made while
+  `ic-dns` was down steps it once and a restart that changed nothing transfers
+  nothing. A zone that empties keeps its serial, and one that comes back goes on
+  from it.
 - **Apex queries only**: Transfers must target the exact zone apex (e.g.,
   `shop.example.org`). Requests for individual subdomains or invented shadowing
   zones (such as absolute external aliases) are refused.

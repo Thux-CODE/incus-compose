@@ -110,7 +110,13 @@ round is abandoned and started again.
 `ActionConnected` is raised the moment the listener opens - the moment Incus has
 accepted the socket - and it is what the enricher reads a whole fleet off the
 back of. `ActionDisconnected` pairs with every way a session can end, a canceled
-context included, and resets `chain` to `iutil.ChainCold` along with it.
+context included, and resets `chain` to `iutil.ChainCold` along with it. Each
+listener that opens is a session of its own, counted from 1, and cold from its
+connected on; every event handed to the head carries the session it was
+minted in (`Event.Session`), the connected the one it opens and the
+disconnected the one it closes. That is what lets a plugin handed controls out
+of order - one dropped on a full inbox goes on ahead of what is queued - tell a
+leftover from news.
 
 A daemon that is not there is not treated as a failure: `Run` just keeps opening
 listeners on backoff. `Run` returning says only that the stream is closed - it
@@ -121,9 +127,15 @@ The wait between sessions still drains `raised` and applies whatever comes
 through: the command line has to stay served between sessions as well as inside
 one, and a reconnect is exactly the moment a pass fails and raises something.
 
-`chain` itself is blind cargo: a plugin's `Command` sets it, `apply` stamps it
-onto every event handed to the head, and nothing here derives or checks the
-transition between one value and the next.
+`chain` itself is cargo: a plugin's `Command` sets it, `apply` stamps it onto
+every event handed to the head, and nothing here derives the transition between
+one value and the next. What is checked is the session: a command setting the
+state is the end of a round, read from a stream that was up, and it names the
+session its run was started for (`Command.Session`). Taken in another one, or
+with no stream open, it would stamp warm a chain whose stream missed what
+happened since - the end of a run read before the stream went, applied in the
+backoff or right after the next connected, or the end of the run `Run` starts
+before any listener opened - so it is dropped, action and all.
 
 ## Shutdown Order
 

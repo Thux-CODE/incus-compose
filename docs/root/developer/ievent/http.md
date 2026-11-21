@@ -44,7 +44,12 @@ came back, until the round its reconnection starts has ended - one that ended
 while it was down missed what happened then. The decision is taken under a
 lock: `Handle` is called from more than one goroutine at once, since a plugin
 before this one hands on what it drops from its caller's goroutine while its
-fold hands on the rest. An event stamped `ChainCold` clears nothing. The
+fold hands on the rest - which is also why the controls can arrive out of
+order, and are told apart by the session they carry (`Event.Session`): a
+disconnected of a session older than the one up is a leftover, an event of a
+session newer than the one that went says the stream is back, and a warm event
+counts only in the session up now. An event stamped `ChainCold` clears
+nothing. The
 stamp says what the chain was when the event was minted, and a read the
 enricher sent before a round ended - or one that failed - can walk past here
 after it still cold; clearing on it left `/ready` at 503 until the next round,

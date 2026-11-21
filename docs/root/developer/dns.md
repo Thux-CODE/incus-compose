@@ -191,34 +191,33 @@ authoritative for the rest of that domain too.
 
 ## Zone Serials
 
-A zone's serial moves when that zone's records move and at no other time. **A
-patch marks the zone it touched**, and publish steps every zone carrying a mark
+A zone's serial moves when what a transfer of that zone carries moves, and at
+no other time. **Each serial is kept with a digest** (`zoneDigest`) of the zone
+it was published with - its NS set and every record, every view folded
+together, the SOA left out. A patch marks the zones it touched, and publish
+compares each marked zone's digest with the one its serial holds: different
+steps the serial, equal steps nothing, so a view moving or a read confirming
+what was there claims nothing.
 
-- a bool says what a digest over the instances was working out, and it went with
-  the rebuild it existed for. Reachability is covered without a special case: a
-  patch is what moves an instance between networks, so the mark lands whether or
-  not any address changed.
+Only once a round has ended in this run (`state.complete`), whatever the stamp
+of the event that changed it: before it a zone holds whatever the replay and
+the reads have reached, and a step is a claim that nothing has confirmed. The
+digest is left as it was stored until then, so the first publish once complete
+compares every zone against what its serial was published with and steps each
+that differs, once. That is what catches what the replay gets wrong: a delete
+inside its window, a peering that changed which service replicas answer, an
+enricher store - written on its own clock - newer than this one's. The digest
+goes to the cold store with the serial. Its first publish is a birth rather
+than a step, since a secondary reads zero as "no zone here"; a zone born before
+the round takes what it holds at the round as what 1 describes, since nothing
+could transfer it before.
 
-A serial is stepped only once a round has ended in this run (`state.complete`),
-whatever the stamp of the event that changed it: a read minted cold before the
-end of the round and folded after it changes a zone already served whole, and
-leaving the serial alone would keep a secondary on the old address. Before the
-round a step is a claim that the zone changed, and nothing has been confirmed,
-so it has no standing to make one. Its first publish is a birth rather than a
-step, since a secondary reads zero as "no zone here".
-
-What changes before the round is **owed** instead: the zone is marked, and the
-first publish once the round has ended steps it once, however many changes it
-collected. Only what is owed steps: a zone the replay marked moved and nothing
-else did is rendered under the serial it was stored with. Without it a
-secondary already holding the serial would keep what that serial described - an
-address the first round after a restart or a reconnect corrected - until a later
-change happened to step it. The replay of what the cold store restored, landing
-where nothing was held, owes nothing: it is what the stored serial was published
-with. The mark goes to the cold store with the serial, so a restart before the
-first warm publish still owes the step. A zone born cold may be stepped once
-more when warm, since the names it collected after its birth were not confirmed
-either.
+A zone nothing is left in stops being served but keeps its serial for good,
+under a digest no content has: forgetting it would publish it at 1 when its
+names come back, which a secondary that polled before may hold for the old
+content. A file from before the digest is taken on trust as it was then - the
+replay's first publish of a zone is what its serial is taken to describe -
+unless it says a step was owed.
 
 The plugin stamps it because it is the only thing that knows what it published
 last - the engine is a read-only view and holds nothing to compare against.
@@ -278,10 +277,14 @@ goroutine to hang.
 
 ## The Cold Store
 
-With `ColdDir` set, every zone's serial is written to disk. Records come back
-from the enricher's own store or an Incus fleet read; a serial cannot be
-recovered from anywhere, and a secondary reading one going backwards
-re-transfers on every restart of this process. Serials are the whole of it.
+With `ColdDir` set, every zone's serial is written to disk, with the digest of
+what the zone carried under it. Records come back from the enricher's own store
+or an Incus fleet read; a serial cannot be recovered from anywhere, and a
+secondary reading one going backwards re-transfers on every restart of this
+process. With `--peer-views` the peering goes with them - the last one that
+counted as known: the one restored, or a read asked for after the last peer
+event that covered every network a name was on. A read this run would not turn
+warm on is not stored as one the next run would.
 
 On a restart the enricher replays what it held before it has read anything, as
 `instance-updated` events stamped cold and marked `Restored`, so names are
@@ -289,17 +292,16 @@ answered from the first publish - one `publishWindow` after the start - rather
 than falling through to the forwarders until the first round ends. Nothing is
 `Ready` and every answer is clamped until that round does, and no serial moves
 while cold: a zone comes back under the serial it was stored with. A zone whose
-names have not come back by a publish stops being served but keeps its serial
-until the chain is warm - the replay may simply not have reached it yet, and
-forgetting it would publish it at 1. Once warm, a zone nothing came back to is
-gone, serial and all.
+names have not come back by a publish stops being served but keeps its serial,
+then and once warm - the replay may simply not have reached it yet, and
+forgetting it would publish it at 1.
 
 A read in this run that finds what was restored changes no record and moves no
 serial, but replaces the event held for that instance, so what is held stops
 reading as restored. What the round finds changed while the process was down is
-published at once under the serial the zone was stored with, and owed one step
-at the first warm publish (see Zone Serials), which is when a secondary
-transfers it.
+published at once under the serial the zone was stored with, and stepped once
+by the first compare after the round (see Zone Serials), which is when a
+secondary transfers it.
 
 How long that takes is how long the first round takes. One that breaks - Incus
 refusing the listings at start, say - leaves the restored names served, clamped
@@ -330,7 +332,9 @@ restored one, which spills instead: the enricher replays its whole store at
 once before anything reads Incus, and a stored name dropped there stayed
 `SERVFAIL` until the round read it. What arrives while something has spilled
 goes behind it, so nothing overtakes the replay; the live events among it are
-bounded by the inbox size, and dropped past it as before.
+bounded by the inbox size, and dropped past it as before. The fold takes what
+is left on the inbox and the spill under the lock `Handle` takes, as one cut,
+so nothing that arrives meanwhile lands between the two.
 
 Patches collect in a 150ms `publishWindow` before a snapshot is published, so an
 instance that moved and moved back inside one window compares equal and reaches
@@ -437,8 +441,11 @@ from before the last name and the warm after it.
 
 ### Turning Warm, In Order
 
-Warm is the engine's own latch rather than `ChainState`. It sets on the first
-`SetHealthy(true)`, which only `rounded` makes, and it never clears.
+Warm is the engine's own latch rather than `ChainState`. It sets once a round
+has ended in this run and the peering is known (`settle`), and it never clears.
+Healthy is set apart from it, on the same and a round having ended since the
+stream was last lost: the peering can become known while the stream is down,
+and the zones are whole then - answered clamped rather than failed as cold.
 `ChainState` drops to cold on every lost stream, while the zones it leaves
 behind are full - failing misses for a blip would fail them on every replica at
 once, since an Incus outage drops every stream together. A lost stream clamps
@@ -465,12 +472,16 @@ reconnect is asked for again too, or the view would stay unhealthy, and
 `/ready` down, until the next round.
 
 Neither signal counts while the stream is down, and a reconnection takes back
-what came while it was: the source takes commands during its backoff, so the
-end of a round started before the stream went can arrive then, stamped warm,
-having missed what happened since. The source stamps the stream cold again when
-it comes back, `dns` and `http` take `connected` as a loss of what is
-confirmed, and the enricher no longer listens to the run the reconnection
-abandoned: the round that counts is the one the reconnection starts.
+what came while it was. Every event carries the stream session the source
+minted it in (`Event.Session`), and the end of a round names the session of
+the connected that started its run: the source takes it only within that
+session with the stream open, so the end of a run read before the stream went,
+or with no stream ever open, never reaches the chain. Whether the stream is up
+is told by the sessions too, not by which control arrived last - one dropped
+on a full inbox goes past the fold ahead of what is queued: a disconnected of
+a session older than the one up is a leftover, and any event of a session newer
+than the one that went says the stream is back, its connected lost or not. A
+warm event counts for a round only in the session up now.
 
 `/ready` follows the same signal, with the same rule. `http` turns ready on a
 warm event only when it was not dropped and was stamped after the last lost

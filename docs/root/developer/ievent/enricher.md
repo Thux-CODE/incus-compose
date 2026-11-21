@@ -376,18 +376,27 @@ fan-out that reaches it before the listing leaves the listing nothing to prune.
 A second delete for one name changes nothing downstream. Unless a read of the
 same key was asked for while this one was out: its events are ahead in the line
 of where the delete would go, and an instance made again under the name in
-between would reach the chain and then be taken away by the older news. That
-read announces the delete instead, if it finds the instance gone too.
+between would reach the chain and then be taken away by the older news. The
+delete is owed by the key instead (`owedDelete`), not by that read: the next
+read of it that lands announces it if it finds the instance gone, however many
+fail first, and a listing that leaves the instance out announces it too. A
+read finding it there owes nothing any more.
 
-A network read already out when its network is updated is followed by a read
-of its own, as an instance read is, and one out when the network is deleted or
-renamed away is abandoned: landing, it would put back the key just dropped.
+**Nothing older than an event undoes it.** A network read already out when its
+network is updated is followed by a read of its own, as an instance read is,
+and one out when the network is deleted or renamed away is abandoned. Beyond
+that, the time of the last event about each network is kept, and a read or a
+listing of it asked for before then - the sweeper's, or a read a tenant's NIC
+asked for under the tenant while Incus answers with the default project's
+network - is not taken. A listing of instances or projects is no news about an
+instance a read answered after it went out: it may have been made since, and
+it is not pruned.
 
 **A listing that failed prunes nothing.** An empty answer and a daemon that
 would not answer arrive the same way, and one of them means every name in the
-project. A failed listing of instances also keeps the round from being done:
-what that project holds has been neither confirmed nor pruned, so the round goes
-on through the other projects, then ends as one that broke.
+project. A failed listing - of instances or of networks - also keeps the round
+from being done: what that project holds has been neither confirmed nor pruned,
+so the round goes on through the other projects, then ends as one that broke.
 
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
@@ -401,13 +410,18 @@ instance the listing has and nothing holds, or one whose read failed and that
 nothing holds, is `unread`; the end waits until each has a read that landed (a
 404 and an unserved instance count), has been deleted, or a listing no longer
 has it. One that keeps failing holds the end for `roundGrace` (a minute) and no
-more: past it the round ends with a warning, and its name waits on the retry
-like any other. A held instance whose read fails waits on nothing: what it
-holds is already downstream.
+more, armed the first time a run held at its end has anything unread - at its
+end or on a read failing later: past it the round ends with a warning, and its
+name waits on the retry like any other. A held instance whose read fails waits
+on nothing: what it holds is already downstream.
 
 A reconnect abandons the run under way and its end with it, held or not.
 Messages carry the run they belong to, and those of an abandoned one - whose
-send races the cancel - are not listened to.
+send races the cancel - are not listened to. The end of a run names the stream
+session of the connected that started it, and the source takes it only in that
+session with the stream open (see [[developer/ievent/source|source]]): the run
+`Run` starts before any stream opened, and one whose end is still in flight
+when the stream comes back, end nothing.
 
 ## A Start Replays What The Last One Held
 
