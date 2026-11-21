@@ -35,6 +35,12 @@ func PeerOf(id ViewID) ViewID {
 	return ViewID(peerPrefix + string(id))
 }
 
+// OwnOf is the view a peer half belongs to, and a view itself for one that is
+// not a peer half.
+func OwnOf(id ViewID) ViewID {
+	return ViewID(strings.TrimPrefix(string(id), peerPrefix))
+}
+
 // Records is one name's records for one view, by query type. The grouping is
 // what keeps NXDOMAIN and NODATA apart.
 type Records map[uint16][]dns.RR

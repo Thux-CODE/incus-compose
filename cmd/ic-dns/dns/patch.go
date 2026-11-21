@@ -302,17 +302,38 @@ func (s *state) service(name string, replicas []*instance, ttl uint32) ecs_view.
 		}
 	}
 
-	for id, list := range offers {
-		candidates := make([]*instance, len(list))
-		for i, o := range list {
-			candidates[i] = o.inst
+	// A querier is answered from its view and its peer half at once, so the
+	// two are one choice: a replica starting on the querier's own network
+	// does not answer beside a healthy one it reaches through a peer.
+	done := map[ecs_view.ViewID]bool{}
+
+	for id := range offers {
+		own := ecs_view.OwnOf(id)
+		if done[own] {
+			continue
+		}
+
+		done[own] = true
+
+		halves := []ecs_view.ViewID{own, ecs_view.PeerOf(own)}
+
+		var candidates []*instance
+
+		for _, half := range halves {
+			for _, o := range offers[half] {
+				if !slices.Contains(candidates, o.inst) {
+					candidates = append(candidates, o.inst)
+				}
+			}
 		}
 
 		answering := pick(candidates)
 
-		for _, o := range list {
-			if slices.Contains(answering, o.inst) {
-				out[id] = union(out[id], o.records)
+		for _, half := range halves {
+			for _, o := range offers[half] {
+				if slices.Contains(answering, o.inst) {
+					out[half] = union(out[half], o.records)
+				}
 			}
 		}
 	}

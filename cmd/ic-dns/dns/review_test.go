@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/lxc/incus-compose/ievent/iutil"
+	"github.com/lxc/incus-compose/shared"
 )
 
 // TestReviewSweepFromDisconnectedInterval: the REST sweep ends while the
@@ -266,6 +267,52 @@ func TestReviewNetworkAddedReadFailsForGood(t *testing.T) {
 	r.feed(t, warm(hubFleet()["pvlab1/django-1"].Event))
 	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.6", dns.RcodeServerFailure, "owed a read")
 	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.6", dns.RcodeNameError, "given up on after the grace")
+}
+
+// TestReviewPeeredServiceHealth: two replicas of api.shop on peered networks,
+// the local one starting and the remote one healthy. The querier is answered
+// from its own network and the peer at once, so the choice between replicas is
+// made over both: only the healthy one answers - from either side.
+func TestReviewPeeredServiceHealth(t *testing.T) {
+	makeReplica := func(name, network, ip, health string) *iutil.Event {
+		config := map[string]string{
+			userLabel(labelServiceCompose):  "api",
+			shared.HealthEnabledKey:         "true",
+			shared.HealthKeyPrefix + "test": healthTest,
+			shared.HealthStatusKey:          health,
+		}
+		return event(incusapi.EventLifecycleInstanceUpdated, "shop", name).
+			WithInstance(read("shop", true, config, netsOf(map[string]string{network: ip})), true)
+	}
+	p := fed(t, makeReplica("api-1", "a", "10.0.0.2", shared.HealthStatusStarting),
+		makeReplica("api-2", "b", "10.0.1.2", shared.HealthStatusHealthy))
+	p.state.setPeers(map[string][]string{onWire("a"): {onWire("b")}, onWire("b"): {onWire("a")}}, 0)
+	engine := engineOn(p.state.snapshot(), true)
+
+	for _, from := range []string{"10.0.0.2", "10.0.1.2"} {
+		_, got := resolve(engine, "api.shop.example.", dns.TypeA, from)
+		require.Equal(t, []string{"10.0.1.2"}, got, "asked from %s", from)
+	}
+}
+
+// TestReviewPeeredServiceFailsOpen: with neither replica ready, both answer
+// through the peering as on one network: readiness picks, it never takes the
+// service off the air.
+func TestReviewPeeredServiceFailsOpen(t *testing.T) {
+	makeReplica := func(name, network, ip string) *iutil.Event {
+		config := map[string]string{
+			userLabel(labelServiceCompose):  "api",
+			shared.HealthEnabledKey:         "true",
+			shared.HealthKeyPrefix + "test": healthTest,
+			shared.HealthStatusKey:          shared.HealthStatusStarting,
+		}
+		return event(incusapi.EventLifecycleInstanceUpdated, "shop", name).
+			WithInstance(read("shop", true, config, netsOf(map[string]string{network: ip})), true)
+	}
+	p := fed(t, makeReplica("api-1", "a", "10.0.0.2"), makeReplica("api-2", "b", "10.0.1.2"))
+	p.state.setPeers(map[string][]string{onWire("a"): {onWire("b")}, onWire("b"): {onWire("a")}}, 0)
+	_, got := resolve(engineOn(p.state.snapshot(), true), "api.shop.example.", dns.TypeA, "10.0.0.2")
+	require.ElementsMatch(t, []string{"10.0.0.2", "10.0.1.2"}, got)
 }
 
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
