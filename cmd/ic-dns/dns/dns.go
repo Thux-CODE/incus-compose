@@ -118,6 +118,18 @@ type Plugin struct {
 	next  iutil.Next
 	inbox chan *iutil.Event
 
+	// spill is what the replay could not put on a full inbox, and whatever
+	// followed it while it was there, in arrival order; spilled says Run has
+	// some to take. A restored event is never dropped: it is a name already
+	// on disk, and the enricher replays the whole store in one go before
+	// anything reads Incus, so nothing would put a dropped one back until the
+	// round. Bounded by the store, and by InboxSize for the live events
+	// behind it, which spillLive counts.
+	spillMu   sync.Mutex
+	spill     []*iutil.Event
+	spillLive int
+	spilled   chan struct{}
+
 	// commandOut puts an event in at the head of the chain, which is how readiness
 	// reaches every position rather than only what comes after this one.
 	commandOut chan<- iutil.Command
@@ -301,6 +313,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		cold:      newCold(logger, cfg),
 		state:     newState(map[string]zoneSerial{}),
 		inbox:     make(chan *iutil.Event, cfg.InboxSize),
+		spilled:   make(chan struct{}, 1),
 		peerAsk:   make(chan []string, 1),
 		peerIn:    make(chan peerRead),
 		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
@@ -388,13 +401,64 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 }
 
 // Handle puts the event on the inbox and returns. It runs on the previous
-// plugin's goroutine, so a full inbox is a marked drop rather than a wait.
+// plugin's goroutine, so a full inbox is a marked drop rather than a wait -
+// but for a restored event, which spills instead, and what follows one
+// spilled, which goes behind it so nothing overtakes it.
 func (p *Plugin) Handle(ev *iutil.Event) {
-	select {
-	case p.inbox <- ev:
-	default:
+	p.spillMu.Lock()
+
+	if len(p.spill) == 0 {
+		select {
+		case p.inbox <- ev:
+			p.spillMu.Unlock()
+
+			return
+		default:
+		}
+	}
+
+	if !ev.Restored() && (len(p.spill) == 0 || p.spillLive >= p.cfg.InboxSize) {
+		p.spillMu.Unlock()
+
 		p.next(ev.WithDropped(name))
 		p.roundLost(ev)
+
+		return
+	}
+
+	if !ev.Restored() {
+		p.spillLive++
+	}
+
+	p.spill = append(p.spill, ev)
+	p.spillMu.Unlock()
+
+	select {
+	case p.spilled <- struct{}{}:
+	default:
+	}
+}
+
+// foldSpilled folds what spilled, after everything on the inbox: what is
+// there arrived before the first of it.
+func (p *Plugin) foldSpilled() {
+drained:
+	for {
+		select {
+		case ev := <-p.inbox:
+			p.fold(ev)
+		default:
+			break drained
+		}
+	}
+
+	p.spillMu.Lock()
+	spill := p.spill
+	p.spill, p.spillLive = nil, 0
+	p.spillMu.Unlock()
+
+	for _, ev := range spill {
+		p.fold(ev)
 	}
 }
 
@@ -490,17 +554,10 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case cmd := <-p.commandIn:
-			// Everything already on the inbox. Nothing is still feeding it - the
-			// source stopped, and the enricher answered its own drain first.
-		drained:
-			for {
-				select {
-				case ev := <-p.inbox:
-					p.fold(ev)
-				default:
-					break drained
-				}
-			}
+			// Everything already on the inbox, and spilled behind it. Nothing
+			// is still feeding either - the source stopped, and the enricher
+			// answered its own drain first.
+			p.foldSpilled()
 
 			// Before the answer: what the drain collected reaches a snapshot
 			// here or nowhere, and nothing would say it was lost.
@@ -525,6 +582,13 @@ func (p *Plugin) Run(ctx context.Context) error {
 
 		case ev := <-p.inbox:
 			p.fold(ev)
+
+			if window == nil && len(p.state.pending) > 0 {
+				window = time.After(publishWindow)
+			}
+
+		case <-p.spilled:
+			p.foldSpilled()
 
 			if window == nil && len(p.state.pending) > 0 {
 				window = time.After(publishWindow)
