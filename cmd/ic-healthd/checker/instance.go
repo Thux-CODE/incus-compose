@@ -635,6 +635,14 @@ func cancelExec(ctx context.Context, logger *slog.Logger, conn *iclient.Connecti
 	}
 }
 
+// runningStatus says whether an instance state is a running one. Ready is
+// Running with the guest's own word that it is up, given through /dev/incus;
+// the enricher reads it the same way (ievent/enricher/state.go). Frozen and
+// the transitions are not running: there is nothing to exec into.
+func runningStatus(code incusApi.StatusCode) bool {
+	return code == incusApi.Running || code == incusApi.Ready
+}
+
 func instanceCheckAction(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, name string, cfg *instanceConfig) instanceResult {
 	res := instanceResult{kind: instanceResultChecked, name: name, project: project}
 
@@ -646,7 +654,7 @@ func instanceCheckAction(ctx context.Context, logger *slog.Logger, conn *iclient
 		return res
 	}
 
-	if inst.StatusCode != incusApi.Running {
+	if !runningStatus(inst.StatusCode) {
 		logger.Log(ctx, shared.LevelTrace, "Instance is not running", "instance", name, "status", inst.Status)
 
 		res.err = ErrNotRunning
