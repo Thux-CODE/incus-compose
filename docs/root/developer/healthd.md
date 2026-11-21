@@ -273,7 +273,10 @@ check at once, failure run cleared, start period re-armed. That is also what
 discards a restart the stop before it had queued - an instance somebody else
 already started has nothing left to restart, and firing it anyway would
 force-stop a running instance one backoff later. An instance with an action in
-flight is left alone; its result says what happens next.
+flight keeps it; a restart's result says what happens next. A check out when the
+start lands probed the run before, so the start opens the new run anyway
+(`newRun`: run number bumped, failures cleared, start period re-armed) and
+writes `starting`, leaving the action, its deadline and its context alone.
 
 ### Telling results apart
 
@@ -290,6 +293,14 @@ if res.ctx != inst.actionContext {
 This matters because cancelling an abandoned action unblocks both its send and
 the `ctx.Done()` arm of the same select, so roughly half of all abandoned
 actions still deliver a result. Identity is what makes those harmless.
+
+Identity says which action a result came from, not which run of the instance it
+judged. A check records the run number it was sent for (`actionRun`); a result
+or a watchdog timeout from a check sent before the latest start only frees the
+slot and makes the new run due a check at once. Its verdict - healthy, failed,
+not running - counts for nothing, so a probe of the old process can neither
+promote the new one to `healthy` nor spend its retries. A start event delivered
+late, after the new run's first check was sent, costs one check more.
 
 The watchdog itself lives in `runInstanceActions`: an action past its deadline
 is cancelled and its slot freed. A check that overran counts as a failed probe,

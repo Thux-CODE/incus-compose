@@ -95,6 +95,7 @@ func (s *scheduler) running(t *testing.T, inst *instance, state instanceState, d
 	inst.state = state
 	inst.actionDeadline = deadline
 	inst.actionContext, inst.actionCancel = context.WithCancel(s.ctx)
+	inst.actionRun = inst.run
 
 	t.Cleanup(inst.actionCancel)
 }
@@ -1408,4 +1409,165 @@ func TestARestartDuringACheckReportsStarting(t *testing.T) {
 
 	require.Equal(t, instanceChecking, inst.state, "the check in flight was taken off the instance")
 	require.Same(t, live, inst.actionContext)
+}
+
+// ----------------------------------------------------------------------------
+// runs: a verdict belongs to the run it probed
+// ----------------------------------------------------------------------------
+
+// TestARestartedRunEarnsItsOwnHealthy is the linear case the run number must
+// not get in the way of: a restart, starting written, the first check of the
+// new run passing, healthy written.
+func TestARestartedRunEarnsItsOwnHealthy(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.startPeriod = time.Minute
+	inst := s.add("web-1", cfg)
+	inst.status = shared.HealthStatusHealthy
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+
+	res := s.next(t)
+	require.Equal(t, instanceResultStatus, res.kind)
+	require.Equal(t, shared.HealthStatusHealthy, res.status)
+	require.False(t, inst.inRestart, "the first pass ends the start period")
+
+	s.result(landed(res))
+	s.silent(t)
+}
+
+// TestAPreviousRunCheckFreesTheSlotForTheNewRun pins what happens to the check
+// a start overtook: its verdict is dropped, pass or fail, and the new run is
+// due a check of its own at once rather than an interval later.
+func TestAPreviousRunCheckFreesTheSlotForTheNewRun(t *testing.T) {
+	t.Parallel()
+
+	for name, verdict := range map[string]error{
+		"passed":      nil,
+		"failed":      errors.New("the old process is going down"),
+		"not running": ErrNotRunning,
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newScheduler(t)
+
+			cfg := testConfig()
+			cfg.startPeriod = time.Minute
+			inst := s.add("web-1", cfg)
+			inst.status = shared.HealthStatusHealthy
+			inst.failures = 2
+
+			previous := s.checked(t, inst, verdict)
+			s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+			s.result(landed(s.next(t)))
+
+			before := time.Now()
+			s.result(previous)
+
+			require.Equal(t, shared.HealthStatusStarting, inst.status)
+			require.Equal(t, instanceIdle, inst.state, "the slot is free")
+			require.Nil(t, inst.actionContext)
+			require.Equal(t, instanceActionCheck, inst.action)
+			require.True(t, inst.config.running, "the old run's stop is not the new run's")
+			require.Zero(t, inst.failures, "the old run's failures are gone with it")
+			require.True(t, inst.inRestart, "the new run is still in its start period")
+			require.False(t, inst.due.After(time.Now()), "the new run is due a check now")
+			require.False(t, inst.due.Before(before))
+			s.silent(t)
+
+			// The new run's own first check decides.
+			s.result(s.checked(t, inst, nil))
+
+			res := s.next(t)
+			require.Equal(t, shared.HealthStatusHealthy, res.status)
+		})
+	}
+}
+
+// TestRepeatedStartsDuringACheckWriteStartingOnce: a start event delivered
+// twice - a resync replaying it, or a restart and a resume back to back - still
+// leaves one new run to judge, with one starting on the wire.
+func TestRepeatedStartsDuringACheckWriteStartingOnce(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.startPeriod = time.Minute
+	inst := s.add("web-1", cfg)
+	inst.status = shared.HealthStatusHealthy
+
+	previous := s.checked(t, inst, nil)
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+	s.silent(t)
+
+	s.result(previous)
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestAStartLateForItsCheckCostsOneMoreCheck is the start event delivered late,
+// after the check of the new run was already sent. That check is taken for the
+// previous run's and dropped: one check more, and the next one is judged.
+func TestAStartLateForItsCheckCostsOneMoreCheck(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+
+	early := s.checked(t, inst, nil)
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	s.result(early)
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestRunInstanceActionsWatchdogDoesNotCountAPreviousRunTimeout: the probe a
+// start overtook overruns. Its timeout is no failure of the new run, which is
+// due its first check at once.
+func TestRunInstanceActionsWatchdogDoesNotCountAPreviousRunTimeout(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.config.retries = 1
+	inst.status = shared.HealthStatusHealthy
+
+	s.checked(t, inst, context.Canceled)
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	inst.actionDeadline = time.Now().Add(-time.Second)
+	earliest := s.run()
+
+	require.Equal(t, instanceIdle, inst.state, "the watchdog frees the slot")
+	require.Zero(t, inst.failures, "a previous run's timeout is not counted")
+	require.Equal(t, instanceActionCheck, inst.action, "no restart for a run never checked")
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+	require.False(t, earliest.IsZero(), "the loop is woken for the new run's check")
+	require.False(t, earliest.After(time.Now()))
+	s.silent(t)
 }

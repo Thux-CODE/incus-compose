@@ -157,6 +157,12 @@ type instance struct {
 	inRestart   bool
 	restartDone time.Time
 
+	// run counts the starts seen, and actionRun is the run a check was sent
+	// for. A start can land while a check is out; that check probed the run
+	// before it, so its verdict says nothing about this one.
+	run       uint64
+	actionRun uint64
+
 	// failures counts consecutive failed checks since the last success.
 	// Failures inside the start period do not count, as in docker.
 	failures int
@@ -181,11 +187,20 @@ type instance struct {
 // instanceStarted puts an instance in the shape a fresh start leaves it in: due
 // for a check at once, its failure run cleared and its start period re-armed.
 func instanceStarted(inst *instance, now time.Time) {
-	inst.config.running = true
+	newRun(inst, now)
+
 	inst.state = instanceIdle
 	inst.action = instanceActionCheck
-	inst.failures = 0
 	inst.due = now
+}
+
+// newRun is what a start does to the run itself, whether or not an action is
+// in flight: a new run number, its failure run cleared and its start period
+// re-armed. The action and its schedule are the caller's.
+func newRun(inst *instance, now time.Time) {
+	inst.config.running = true
+	inst.run++
+	inst.failures = 0
 
 	// As in docker, a restarted instance gets its start period back.
 	inst.inRestart = inst.config.startPeriod > 0
@@ -418,9 +433,11 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 		// An action in flight owns the instance; its result says what comes
 		// next. A restart writes starting itself once it lands; a check does
 		// not, and whatever verdict was on the instance is the last run's, so
-		// starting goes now and the check's result follows it.
+		// the new run begins now and starting goes with it. The check out
+		// probed the run before, so its result only frees the slot.
 		if inst.state == instanceChecking || inst.state == instanceRestarting {
 			if inst.state == instanceChecking {
+				newRun(inst, time.Now())
 				reportStarting(ctx, logger, conn, ev.ProjectName(), results, inst)
 			}
 
@@ -768,7 +785,12 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 				inst.actionCancel = nil
 				inst.actionDeadline = time.Time{}
 
-				if checking {
+				if checking && inst.actionRun != inst.run {
+					// A probe of the run before: its timeout is not a failure
+					// of this one, which has had no check yet.
+					inst.due = now
+					keep(inst.due)
+				} else if checking {
 					// As in docker, a probe that exceeds its timeout is a
 					// failed probe.
 					reportStatus(ctx, logger, conn, inst.project, resultChan, inst, checkFailed(inst, now))
@@ -857,6 +879,7 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 			inst.state = instanceChecking
 			inst.actionDeadline = now.Add(inst.config.timeout)
 			inst.actionContext, inst.actionCancel = actionCtx, cancel
+			inst.actionRun = inst.run
 		}
 	}
 
@@ -906,6 +929,16 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 		inst.actionDeadline = time.Time{}
 
 		now := time.Now()
+
+		// Sent before a start that has landed since: the verdict, pass or
+		// fail, is the last run's. The new run gets its own check at once.
+		if inst.actionRun != inst.run {
+			logger.Debug("Dropping the verdict of a check on the previous run", "instance", res.name)
+			inst.due = now
+
+			return
+		}
+
 		if inst.inRestart && !now.Before(inst.restartDone) {
 			inst.inRestart = false
 		}
