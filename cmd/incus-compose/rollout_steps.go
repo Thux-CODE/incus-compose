@@ -95,6 +95,10 @@ type rolloutPlan struct {
 	Replicas int
 	Present  []replica
 
+	// Taken are the indexes whose names instances not the service's hold,
+	// which a new replica skips rather than adopt.
+	Taken []int
+
 	// Name returns the instance name of an index.
 	Name func(index int) string
 
@@ -290,7 +294,7 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 			return failed
 		}
 
-		index := rolloutFree(slots)
+		index := rolloutFree(slots, plan.Taken)
 
 		_, _ = fmt.Fprintf(plan.Out, "%s: creating\n", plan.Name(index))
 
@@ -414,10 +418,10 @@ func rolloutOld(slots map[int]*replica) []*replica {
 }
 
 // rolloutFree returns the lowest index no replica holds.
-func rolloutFree(slots map[int]*replica) int {
+func rolloutFree(slots map[int]*replica, taken []int) int {
 	for i := 1; ; i++ {
-		_, taken := slots[i]
-		if !taken {
+		_, held := slots[i]
+		if !held && !slices.Contains(taken, i) {
 			return i
 		}
 	}

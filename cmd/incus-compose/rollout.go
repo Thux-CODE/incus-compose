@@ -321,7 +321,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	// The replicas are the ones Incus has, whatever their indexes: an earlier
 	// rollout leaves them on others than 1 to N.
-	indexes, err := p.ReplicaIndexes(c, svcName)
+	indexes, taken, err := p.ReplicaIndexes(c, svcName)
 	if err != nil {
 		return nil, rolloutPlan{}, err
 	}
@@ -551,6 +551,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		Service:       svcName,
 		Replicas:      n,
 		Present:       present,
+		Taken:         taken,
 		Name:          name,
 		KeepFailed:    args.KeepFailed,
 		HealthTimeout: healthTimeout,

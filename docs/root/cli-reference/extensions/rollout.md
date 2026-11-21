@@ -188,7 +188,11 @@ since they were made, as it always does.
 
 A replica is one of the service's when it carries its
 `user.label.incus-compose.service` label (and the compose project's) and is
-named `<service>-<index>`. `exec`, `cp` and `port --index N` pick `<service>-N`;
+named `<service>-<index>`. An instance named so without those labels, made by
+hand or by another service, is never adopted: neither `up` nor `rollout`
+counts, deletes or reuses it, and a new replica takes the next free index. A
+replica's drain label and healthcheck are read from its expanded config,
+profiles included, as ic-dns reads them. `exec`, `cp` and `port --index N` pick `<service>-N`;
 without `--index`, the lowest that exists.
 
 An older incus-compose (up to 1.4.0) reconciles by index: on a service left at

@@ -108,7 +108,10 @@ form.
   kept, and a replica recreated for an outdated definition keeps its name.
   `logs` follows the replicas that exist. An instance named like a replica
   but without the service's and the compose project's labels, one made by
-  hand, is never one of them, and so never deleted as a surplus. (by
+  hand, is never one of them, and so never deleted as a surplus; nor is it
+  adopted: its index is skipped, by `up` and by `rollout`, and a new replica
+  takes the next free one. A replica's drain and healthcheck are read from
+  its expanded config, profiles included, as ic-dns reads them. (by
   @sandroden)
 
 - `exec`, `cp` and `port --index N` pick `<service>-N`, the replica's number, as

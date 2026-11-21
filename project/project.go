@@ -530,7 +530,7 @@ func (p *Project) InstanceNames(c *client.Client, services ...string) []string {
 				listed = true
 			}
 
-			existing = serviceReplicas(instances, p.Name, service.Name, "")
+			existing = ownedReplicas(serviceReplicas(instances, p.Name, service.Name, ""))
 		}
 
 		if len(existing) > 0 {

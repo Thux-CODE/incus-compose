@@ -31,8 +31,10 @@ func TestReviewForeignInstance(t *testing.T) {
 		t.Fatal("unlabelled, independently created web-99 selected for deletion")
 	}
 
-	require.Len(t, rs, 1)
-	assert.Equal(t, 1, rs[0].index)
+	// It only holds its name, which no new replica takes.
+	owned := ownedReplicas(rs)
+	require.Len(t, owned, 1)
+	assert.Equal(t, 1, owned[0].index)
 }
 
 // A service name long enough for its replicas' names to be a hash still has

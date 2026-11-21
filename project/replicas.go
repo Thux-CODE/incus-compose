@@ -2,6 +2,8 @@ package project
 
 import (
 	"cmp"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -74,8 +76,10 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 			continue
 		}
 
-		existing := serviceReplicas(instances, p.Name, service.Name, hash)
-		markImage(existing, serviceImageTarget(c, service))
+		all := serviceReplicas(instances, p.Name, service.Name, hash)
+		markImage(all, serviceImageTarget(c, service))
+
+		existing := ownedReplicas(all)
 
 		add := options.addReplica
 		if add != nil && add.service != service.Name {
@@ -138,7 +142,7 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 				plan.first = add.index
 			}
 		} else {
-			plan.indexes, plan.drop = reconcileReplicas(existing, desired)
+			plan.indexes, plan.drop = reconcileReplicas(all, desired)
 
 			for _, i := range plan.indexes {
 				if !plan.drop[i] {
@@ -182,19 +186,25 @@ func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
 }
 
 // ReplicaIndexes returns the indexes of the replicas of a service that exist,
-// ascending, whatever they are.
-func (p *Project) ReplicaIndexes(c *client.Client, service string) ([]int, error) {
+// ascending, whatever they are, and the indexes whose names instances that
+// are not the service's hold, which no new replica may take.
+func (p *Project) ReplicaIndexes(c *client.Client, service string) ([]int, []int, error) {
 	instances, err := c.Instances()
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	var out []int
+	var owned, taken []int
+
 	for _, r := range serviceReplicas(instances, p.Name, service, "") {
-		out = append(out, r.index)
+		if r.foreign {
+			taken = append(taken, r.index)
+		} else {
+			owned = append(owned, r.index)
+		}
 	}
 
-	return out, nil
+	return owned, taken, nil
 }
 
 // replica is an instance of a service that exists, as reconciling sees it.
@@ -218,6 +228,10 @@ type replica struct {
 	// healthy runs, is not drained and was called healthy, or has no
 	// healthcheck to call it anything.
 	healthy bool
+
+	// foreign is an instance that holds the replica's name without being one
+	// of the service's: its index is taken, and nothing else about it counts.
+	foreign bool
 }
 
 // markImage tells the replicas made from another image than target, the
@@ -268,12 +282,18 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 
 	for _, inst := range instances {
 		cfg := inst.Config
-		if util.IsTrue(cfg[OneOffKey]) {
-			continue
-		}
 
-		owned := cfg[ServiceLabelKey] == service && cfg[labelIncusComposePrefix+"project"] == project
-		if !owned && !util.IsTrue(cfg[recreatingKey]) {
+		owned := !util.IsTrue(cfg[OneOffKey]) && cfg[ServiceLabelKey] == service && cfg[labelIncusComposePrefix+"project"] == project
+		owned = owned || util.IsTrue(cfg[recreatingKey])
+
+		if !owned {
+			// Not the service's, but holding a replica's name: that index is
+			// taken, and never adopted.
+			index := replicaIndexByName(inst.Name, service)
+			if index >= 1 {
+				out = append(out, replica{index: index, foreign: true})
+			}
+
 			continue
 		}
 
@@ -282,15 +302,21 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 			continue
 		}
 
+		// What ic-dns and ic-healthd go by: the config the profiles add to.
+		expanded := inst.ExpandedConfig
+		if len(expanded) == 0 {
+			expanded = cfg
+		}
+
 		running := inst.StatusCode == incusApi.Running || inst.StatusCode == incusApi.Ready
-		drained := util.IsTrue(cfg[shared.DNSDrainKey])
-		status := cfg[shared.HealthStatusKey]
+		drained := util.IsTrue(expanded[shared.DNSDrainKey])
+		status := expanded[shared.HealthStatusKey]
 		instHash, hashed := cfg[client.ConfigHashKey]
 
 		// One with a check that has not reached a verdict yet, just started
 		// or made by a client killed before ic-healthd wrote one, does not
 		// serve: it covers the removal of no other.
-		verdict := status == shared.HealthStatusHealthy || status == "" && !healthWatched(cfg)
+		verdict := status == shared.HealthStatusHealthy || status == "" && !healthWatched(expanded)
 
 		out = append(out, replica{
 			index:     index,
@@ -310,37 +336,55 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 }
 
 // replicaHashedIndexes is how far replicaIndex looks for the index of a
-// replica whose name is a hash.
-const replicaHashedIndexes = 1024
+// replica whose name is a hash: far past any index a rollout reaches, and
+// still a search of milliseconds, made only for an instance with the labels.
+const replicaHashedIndexes = 1 << 16
 
 // replicaIndex returns the index of the replica of service named name, 0 when
 // it is not named as one. A name too long for Incus is a hash of it
 // (client.SanitizeIncusName), with no index to read, so the index is the one
 // whose name hashes to it.
 func replicaIndex(name, service string) int {
-	nameOf := func(index int) string {
-		return client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1)
+	index := replicaIndexByName(name, service)
+	if index >= 1 || len(name) != 32 {
+		return index
 	}
 
-	dash := strings.LastIndexByte(name, '-')
-	if dash >= 0 {
-		index, err := strconv.Atoi(name[dash+1:])
-		if err == nil && index >= 1 && nameOf(index) == name {
-			return index
-		}
-	}
-
-	if len(name) != 32 {
-		return 0
+	// The hash SanitizeIncusName falls back to, cheap enough to try every
+	// index; a match is confirmed through SanitizeIncusName itself.
+	hashOf := func(index int) string {
+		sum := sha256.Sum256(fmt.Appendf(nil, "%s-%d", service, index))
+		return hex.EncodeToString(sum[:16])
 	}
 
 	for index := 1; index <= replicaHashedIndexes; index++ {
-		if nameOf(index) == name {
+		if hashOf(index) == name && client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1) == name {
 			return index
 		}
 	}
 
 	return 0
+}
+
+// replicaIndexByName returns the index a replica name reads as, 0 for none:
+// the hash of a name too long is left to replicaIndex.
+func replicaIndexByName(name, service string) int {
+	dash := strings.LastIndexByte(name, '-')
+	if dash < 0 {
+		return 0
+	}
+
+	index, err := strconv.Atoi(name[dash+1:])
+	if err != nil || index < 1 || client.SanitizeIncusName(fmt.Sprintf("%s-%d", service, index), -1) != name {
+		return 0
+	}
+
+	return index
+}
+
+// ownedReplicas leaves out the names held by instances not the service's.
+func ownedReplicas(rs []replica) []replica {
+	return slices.DeleteFunc(slices.Clone(rs), func(r replica) bool { return r.foreign })
 }
 
 // reconcileReplicas decides the indexes a service is built with to have
@@ -354,8 +398,19 @@ func replicaIndex(name, service string) int {
 // healthy one.
 //
 // The indexes are ascending, and include the ones dropped, which have to be
-// built to be deleted.
-func reconcileReplicas(existing []replica, desired int) ([]int, map[int]bool) {
+// built to be deleted. A name held by an instance not the service's is
+// skipped: it is neither counted, nor dropped, nor taken by a new one.
+func reconcileReplicas(all []replica, desired int) ([]int, map[int]bool) {
+	var taken []int
+
+	for _, r := range all {
+		if r.foreign {
+			taken = append(taken, r.index)
+		}
+	}
+
+	existing := ownedReplicas(all)
+
 	indexes := make([]int, 0, max(len(existing), desired))
 	for _, r := range existing {
 		indexes = append(indexes, r.index)
@@ -363,7 +418,7 @@ func reconcileReplicas(existing []replica, desired int) ([]int, map[int]bool) {
 
 	if len(existing) <= desired {
 		for i := 1; len(indexes) < desired; i++ {
-			if !slices.Contains(indexes, i) {
+			if !slices.Contains(indexes, i) && !slices.Contains(taken, i) {
 				indexes = append(indexes, i)
 			}
 		}
