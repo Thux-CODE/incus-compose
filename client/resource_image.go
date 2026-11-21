@@ -331,9 +331,11 @@ func (r *Image) resolveArch(ctx context.Context) error {
 		return err
 	}
 
+	// A read that failed is that, not a failed create: a caller tells a
+	// missing image by ErrCreate.
 	server, _, err := conn.GetServer(ctx)
 	if err != nil {
-		return ErrCreate.WithText("getting Incus server info").Wrap(err)
+		return fmt.Errorf("getting Incus server info: %w", err)
 	}
 
 	if len(server.Environment.Architectures) == 0 {
@@ -1048,13 +1050,13 @@ func (r *Image) ensureBuild(ctx context.Context, args Options) error {
 		return r.client.hookAfter(ctx, ActionEnsure, r, args, nil)
 	}
 
-	if err != nil && args.Build.Mode == BuildNever {
-		return r.client.hookAfter(ctx, ActionEnsure, r, args, errors.New("image is missing and building is disabled"))
-	}
-
 	// A read that failed is not a missing image.
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return r.client.hookAfter(ctx, ActionEnsure, r, args, err)
+	}
+
+	if err != nil && args.Build.Mode == BuildNever {
+		return r.client.hookAfter(ctx, ActionEnsure, r, args, errors.New("image is missing and building is disabled"))
 	}
 
 	if err != nil && !args.Create {
