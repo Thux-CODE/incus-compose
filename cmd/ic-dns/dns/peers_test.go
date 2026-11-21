@@ -644,7 +644,7 @@ func TestPeerViewsOffWantsNothingNew(t *testing.T) {
 	}
 
 	// Asked, it does not ask: there is nobody to read.
-	off.askPeers()
+	off.askPeers(true)
 	assert.Empty(t, off.peerAsk)
 }
 

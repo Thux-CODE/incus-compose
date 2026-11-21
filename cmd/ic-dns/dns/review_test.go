@@ -198,6 +198,33 @@ func TestReviewOneSidedColdPeering(t *testing.T) {
 	}, peers)
 }
 
+// TestReviewPeerChangeDuringRead: the worker read the topology before a peer
+// was created; the create and the end of the round arrive before the read
+// lands. That read answers an ask older than the event, so it does not make
+// the peering known: a name seen only through the new peer stays SERVFAIL
+// until the read the event asked for lands - and then answers.
+func TestReviewPeerChangeDuringRead(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true))
+	for _, ev := range hubFleetEvents(false) {
+		c.p.fold(ev)
+	}
+	c.p.write()
+	keys := c.p.state.peerTargets()
+	stale := (<-c.p.peerAsk).gen
+	// The worker has read the old topology. A create arrives before delivery.
+	c.p.fold(event(incusapi.EventLifecycleNetworkPeerCreated, "pvlab1", "hub"))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.peered(peerRead{keys: keys, peers: map[string][]string{}, gen: stale})
+	code, _ := resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[code], "the read for the newer event has not landed")
+
+	fresh := <-c.p.peerAsk
+	c.p.peered(peerRead{keys: fresh.keys, peers: hubPeers(), gen: fresh.gen})
+	require.True(t, c.p.view.Ready(), "the read the event asked for landed")
+	code, _ = resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "NOERROR", dns.RcodeToString[code])
+}
+
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
 // ended and folded after it is stamped cold, and still changes a zone already
 // served whole. Its serial steps, or a secondary keeps the old address.

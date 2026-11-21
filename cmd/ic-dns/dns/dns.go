@@ -161,7 +161,14 @@ type Plugin struct {
 
 	// peerAsk asks readPeerLoop for a read of these networks; one slot, so asks
 	// coalesce into the newest.
-	peerAsk chan []string
+	peerAsk chan peerAsking
+
+	// peerGen numbers the asks; peerNeed is the number of the newest one an
+	// event that can move the peering made, and peerLanded that of the newest
+	// read that landed. A read asked for before such an event may have been
+	// taken before the change it announces, so it does not make the peering
+	// known. Run's goroutine alone.
+	peerGen, peerNeed, peerLanded uint64
 
 	// peerIn hands a finished read to Run's goroutine, which owns the state.
 	peerIn chan peerRead
@@ -314,7 +321,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		state:     newState(map[string]zoneSerial{}),
 		inbox:     make(chan *iutil.Event, cfg.InboxSize),
 		spilled:   make(chan struct{}, 1),
-		peerAsk:   make(chan []string, 1),
+		peerAsk:   make(chan peerAsking, 1),
 		peerIn:    make(chan peerRead),
 		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
 
@@ -527,7 +534,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 	if p.cfg.PeerViews && p.peerReader != nil {
 		wg.Go(func() { p.readPeerLoop(loopCtx) })
 
-		p.askPeers()
+		p.askPeers(false)
 	} else {
 		// No connection to read it over, so nothing a round could wait on.
 		p.peersRead.Store(true)
@@ -610,8 +617,9 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 	// The peering is read again on anything that can have moved it, and once a
 	// round, so an event lost with the stream is caught up on.
-	if peeringMoves(ev) || ev.Action() == iutil.ActionSweepEnd {
-		p.askPeers()
+	moves := peeringMoves(ev)
+	if moves || ev.Action() == iutil.ActionSweepEnd {
+		p.askPeers(moves)
 	}
 
 	// A peer is not an instance: what it moves arrives with the read.

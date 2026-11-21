@@ -180,29 +180,45 @@ func describePeers(peers map[string][]string) string {
 	return strings.Join(pairs, " ")
 }
 
-// peerRead is one read of the peering, and the networks it read.
+// peerRead is one read of the peering, the networks it read, and the ask it
+// answered.
 type peerRead struct {
 	peers map[string][]string
 	keys  []string
+	gen   uint64
+}
+
+// peerAsking is one ask for a read: the networks to read, and its number.
+type peerAsking struct {
+	keys []string
+	gen  uint64
 }
 
 // askPeers asks for the peering to be read again, of every network a name is
 // on now and every one the held peering names. One pending ask is enough, the
 // newest: it names every network the older one did that still matters.
-// Run's goroutine alone, since it reads the state.
-func (p *Plugin) askPeers() {
+// moved says an event that can have changed the peering is why, so only a
+// read asked for from here on makes it known. Run's goroutine alone, since it
+// reads the state.
+func (p *Plugin) askPeers(moved bool) {
 	if !p.cfg.PeerViews {
 		return
 	}
 
-	keys := p.state.peerTargets()
+	p.peerGen++
+
+	if moved {
+		p.peerNeed = p.peerGen
+	}
+
+	ask := peerAsking{keys: p.state.peerTargets(), gen: p.peerGen}
 
 	select {
 	case <-p.peerAsk:
 	default:
 	}
 
-	p.peerAsk <- keys
+	p.peerAsk <- ask
 }
 
 // askIfGrew asks for a read where a write put a name on a network nothing was
@@ -214,19 +230,20 @@ func (p *Plugin) askIfGrew() {
 
 	p.state.grew = false
 
-	p.askPeers()
+	p.askPeers(false)
 }
 
 // peeringKnown reports whether the peering held is one to turn warm on: one
 // restored from the cold store, which counts until a read corrects it, or a
-// read that landed and covered every network a name is on now. A slow or
-// failing read never keeps a replica that restored its peering cold.
+// read that landed and covered every network a name is on now, asked for
+// after the last event that could have moved it. A slow or failing read never
+// keeps a replica that restored its peering cold.
 func (p *Plugin) peeringKnown() bool {
 	if p.peersRestored {
 		return true
 	}
 
-	if p.peerCovered == nil {
+	if p.peerCovered == nil || p.peerLanded < p.peerNeed {
 		return false
 	}
 
@@ -268,7 +285,7 @@ func (p *Plugin) settlePeering() bool {
 func (p *Plugin) readPeerLoop(ctx context.Context) {
 	var (
 		retry <-chan time.Time
-		keys  []string
+		ask   peerAsking
 	)
 
 	backoff := p.peerRetry[0]
@@ -277,13 +294,15 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case keys = <-p.peerAsk:
+		case ask = <-p.peerAsk:
 		case <-retry:
 		}
 
 		retry = nil
 
 		start := time.Now()
+
+		keys := ask.keys
 
 		peers, err := readPeers(ctx, bounded{r: p.peerReader, timeout: p.peerCallTimeout}, keys)
 		if err != nil {
@@ -304,7 +323,7 @@ func (p *Plugin) readPeerLoop(ctx context.Context) {
 		p.logger.Debug("read the network peering", "networks", len(keys), "took", time.Since(start))
 
 		select {
-		case p.peerIn <- peerRead{peers: peers, keys: keys}:
+		case p.peerIn <- peerRead{peers: peers, keys: keys, gen: ask.gen}:
 		case <-ctx.Done():
 			return
 		}
@@ -328,6 +347,8 @@ func (p *Plugin) peered(read peerRead) {
 	for _, key := range read.keys {
 		p.peerCovered[key] = true
 	}
+
+	p.peerLanded = max(p.peerLanded, read.gen)
 
 	// A read covering every network is what a round that ended before it was
 	// waiting on, the same table as the one restored included.
