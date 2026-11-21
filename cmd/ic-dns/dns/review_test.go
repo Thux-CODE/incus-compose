@@ -359,6 +359,36 @@ func TestReviewLateColdStampChangesWarmZone(t *testing.T) {
 	require.NotEqual(t, before, c.p.state.serials["shop.incus."].Serial)
 }
 
+func TestReviewPeerCallerOnEmptyServedNetwork(t *testing.T) {
+	t.Skip("contested: a querier is placed by the subnets of the networks served instances sit " +
+		"on, and only those networks' peering is read (readPeers, --peer-views in the " +
+		"CHANGELOG). Placing one on a " +
+		"network nothing served sits on takes the enricher handing down the networks it reads " +
+		"each run - an event per network per run through every plugin, and a view kept alive by " +
+		"a network as well as by instances - and a peering read of every network in the " +
+		"inventory: on the default project that is every host interface as well (about ten on " +
+		"a node), each one more call answered 400 on every read, at start, each round and each " +
+		"peer event. What it buys is a querier on a network no served instance is on at all; " +
+		"the first one that is on it makes the name resolve")
+
+	f := hubIncus()
+	r := runPeered(t, f, Suffix("incus"))
+	defer r.stop(t)
+	h := hubFleet()
+	r.feed(t, h["pvlab1/django-1"].Event, warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Eventually(t, r.p.view.Ready, time.Second, time.Millisecond)
+	const external = "10.146.11.99"
+	ask := func() int {
+		code, _ := resolve(&adapter{chain: r.p.view}, "django-1.pvlab1.incus.", dns.TypeA, external)
+		return code
+	}
+	before := ask()
+	// Same client, peering and subnets; only an unrelated instance is started.
+	r.feed(t, warm(h["default/mgmt"].Event))
+	require.Eventually(t, func() bool { return ask() == dns.RcodeSuccess }, 2*time.Second, time.Millisecond)
+	require.Equal(t, "NOERROR", dns.RcodeToString[before])
+}
+
 func TestReviewFailedFirstReadIsNotACompleteRound(t *testing.T) {
 	t.Skip("contested: the round is the enricher's to close. It holds the end of a run " +
 		"until every instance it listed and nothing holds has been read " +
