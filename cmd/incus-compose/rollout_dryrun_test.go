@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
-	api "github.com/lxc/incus/v7/shared/api"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/lxc/incus-compose/shared"
@@ -15,25 +14,24 @@ import (
 func TestRolloutProfileHealth(t *testing.T) {
 	t.Parallel()
 
-	old := &api.Instance{
-		InstancePut: api.InstancePut{Config: map[string]string{shared.HealthStatusKey: shared.HealthStatusHealthy}},
-		ExpandedConfig: map[string]string{
-			shared.HealthStatusKey:          shared.HealthStatusHealthy,
-			shared.HealthEnabledKey:         "true",
-			shared.HealthKeyPrefix + "test": `["CMD","true"]`,
-			"user.other":                    "x",
-		},
+	probe := map[string]string{
+		shared.HealthEnabledKey:         "true",
+		shared.HealthKeyPrefix + "test": `["CMD","true"]`,
+		"user.other":                    "x",
 	}
 
 	assert.False(t, rolloutWatched(map[string]string{}))
 
-	health := rolloutProfileHealth(map[string]string{}, old)
+	health := rolloutProfileHealth(map[string]string{}, []map[string]string{{}, probe})
 	assert.True(t, rolloutWatched(health))
 	assert.NotContains(t, health, "user.other")
-	assert.NotContains(t, health, shared.HealthStatusKey, "the status is the replica's own")
 
-	// The compose file's own test wins.
-	health = rolloutProfileHealth(map[string]string{shared.HealthKeyPrefix + "test": `["NONE"]`}, old)
+	// A later profile wins over an earlier one, the compose file over both.
+	later := map[string]string{shared.HealthKeyPrefix + "test": `["CMD","later"]`}
+	health = rolloutProfileHealth(map[string]string{}, []map[string]string{probe, later})
+	assert.Equal(t, `["CMD","later"]`, health[shared.HealthKeyPrefix+"test"])
+
+	health = rolloutProfileHealth(map[string]string{shared.HealthKeyPrefix + "test": `["NONE"]`}, []map[string]string{probe})
 	assert.Equal(t, `["NONE"]`, health[shared.HealthKeyPrefix+"test"])
 }
 

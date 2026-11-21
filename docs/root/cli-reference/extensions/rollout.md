@@ -304,8 +304,8 @@ it is ready. Run `up` afterwards on such a project.
 where two of them cannot run at once, and says why. `restart` is the way to
 update those:
 
-- no healthcheck (from the service, its image, or a profile the replicas have):
-  there is nothing to wait for,
+- no healthcheck (from the service, its image, or a profile the compose file
+  gives the service now, read from Incus): there is nothing to wait for,
   and ic-dns serves a replica nothing checks as soon as it has an address;
 - `container_name`: one fixed name;
 - published `ports` or a `proxy` device: one host address;

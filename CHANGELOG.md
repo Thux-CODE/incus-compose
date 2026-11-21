@@ -171,9 +171,11 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
-- `rollout` takes a healthcheck a profile alone gives the replicas into
+- `rollout` takes a healthcheck a profile gives the new replicas into
   account, as ic-healthd runs it: such a service is no longer refused for
-  having none, and its health timeout follows it. (by @sandroden)
+  having none, and its health timeout follows it. The profiles are the ones
+  the compose file declares for the service, read from Incus at the
+  preflight, not the old replica's. (by @sandroden)
 
 - `rollout` begins a stop only within 10 seconds of the round of reads it goes
   by, and stops a victim once: one started again by ic-healthd, or a stop

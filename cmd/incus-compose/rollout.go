@@ -530,6 +530,9 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 		// drainDeclared is a new replica made drained, by a label or x-incus.
 		drainDeclared bool
+
+		// newProfiles are the profiles the compose file gives a new replica.
+		newProfiles []string
 	)
 
 	for _, r := range resources[svcName] {
@@ -556,6 +559,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 		declared = declaredDevices(inst, c.Config().DefaultStoragePool)
 		drainDeclared = shared.DNSDrained(inst.Config.Extensions[shared.DNSDrainKey])
+		newProfiles = inst.Config.Profiles
 
 		break
 	}
@@ -586,7 +590,24 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		}
 	}
 
-	health = rolloutProfileHealth(health, first)
+	// The healthcheck the declared profiles give a new replica, read now.
+	profiles := make([]map[string]string, 0, len(newProfiles))
+
+	for _, name := range newProfiles {
+		conn, err := c.Connection()
+		if err != nil {
+			return nil, rolloutPlan{}, err
+		}
+
+		profile, _, err := conn.GetProfile(ctx, c.IncusProject(), name)
+		if err != nil {
+			return nil, rolloutPlan{}, fmt.Errorf("reading profile %q: %w", name, err)
+		}
+
+		profiles = append(profiles, profile.Config)
+	}
+
+	health = rolloutProfileHealth(health, profiles)
 
 	blockers := rolloutBlockers(service, health, first.Config, []map[string]map[string]string{first.ExpandedDevices, declared}, pools, clustered)
 	if drainDeclared && !slices.Contains(blockers, rolloutDrainedBlocker) {
@@ -685,23 +706,24 @@ func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[s
 }
 
 // rolloutProfileHealth adds to the healthcheck the compose file and the image
-// give a new replica what a profile gives it: the keys the old replica has
-// from its profiles alone, which ic-healthd runs as well. What the compose
-// file or the image sets wins.
-func rolloutProfileHealth(health map[string]string, old *incusApi.Instance) map[string]string {
-	out := maps.Clone(health)
-	if out == nil {
-		out = map[string]string{}
-	}
+// give a new replica what the profiles it is declared with give it, in their
+// order, a later one winning as in Incus; what the compose file or the image
+// sets, the replica's own config, wins over all. The profiles are the ones
+// declared now, read now: not the old replica's, which a profile since
+// dropped, or a key of its own that hides a profile's, would misread.
+func rolloutProfileHealth(health map[string]string, profiles []map[string]string) map[string]string {
+	fromProfiles := map[string]string{}
 
-	for k, v := range old.ExpandedConfig {
-		_, local := old.Config[k]
-		_, declared := out[k]
-
-		if strings.HasPrefix(k, shared.HealthKeyPrefix) && !local && !declared {
-			out[k] = v
+	for _, profile := range profiles {
+		for k, v := range profile {
+			if strings.HasPrefix(k, shared.HealthKeyPrefix) {
+				fromProfiles[k] = v
+			}
 		}
 	}
+
+	out := fromProfiles
+	maps.Copy(out, health)
 
 	return out
 }
