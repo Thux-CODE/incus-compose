@@ -79,9 +79,13 @@ func TestSecondReviewBuiltTarget(t *testing.T) {
 
 	img := res.(*client.Image)
 	require.False(t, img.IsEnsured())
-	require.Empty(t, serviceImageTarget(c, s), "offline, no alias can be read")
+	offline, err := serviceImageTarget(c, s)
+	require.NoError(t, err)
+	require.Empty(t, offline, "offline, no alias can be read")
 
-	markImage(rs, imageTarget(img, func() (string, error) { return "B", nil }))
+	target, err := imageTarget(img, func() (string, error) { return "B", nil })
+	require.NoError(t, err)
+	markImage(rs, target)
 	_, drop := reconcileReplicas(rs, 1)
 	require.False(t, drop[2], "local alias points to B, drop=%v", drop)
 }

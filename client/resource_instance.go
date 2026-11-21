@@ -2366,7 +2366,24 @@ func (r *Instance) Replan(cfg *InstanceConfig) {
 	r.Config.Dependencies = cfg.Dependencies
 	r.Config.PreRun = cfg.PreRun
 	r.Config.PostRun = cfg.PostRun
+
+	// The DNS aliases go to one replica, which the plan may have moved too.
+	alias, ok := cfg.Extensions[dnsAliasesKey]
+
+	switch {
+	case ok:
+		if r.Config.Extensions == nil {
+			r.Config.Extensions = map[string]string{}
+		}
+
+		r.Config.Extensions[dnsAliasesKey] = alias
+	default:
+		delete(r.Config.Extensions, dnsAliasesKey)
+	}
 }
+
+// dnsAliasesKey holds the DNS aliases of the one replica that carries them.
+const dnsAliasesKey = "user.label.dns.aliases"
 
 // Delete removes the instance from Incus.
 func (r *Instance) Delete(ctx context.Context, opts ...Option) error {

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"strconv"
 	"strings"
@@ -110,7 +111,13 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 
 		// The image tells replicas apart only for a surplus to give up.
 		if add == nil && len(existing) > desired {
-			markImage(all, serviceImageTarget(c, service))
+			target, err := serviceImageTarget(c, service)
+			if err != nil {
+				errs = errors.Join(errs, fmt.Errorf("service %q: no surplus is given up on an alias that could not be read: %w", service.Name, err))
+				continue
+			}
+
+			markImage(all, target)
 		}
 
 		// A container_name is one name, or one per index when scaled: there is
@@ -167,24 +174,24 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 // serviceImageTarget returns the fingerprint the service's image points at:
 // as this client ensured it already, or else as the project's alias reads in
 // Incus, which a built image `up` does not pull has; "" when neither tells.
-func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
+func serviceImageTarget(c *client.Client, service types.ServiceConfig) (string, error) {
 	name := service.Image
 	if service.Build != nil && name == "" {
 		name = "localhost/" + service.Name
 	}
 
 	if name == "" {
-		return ""
+		return "", nil
 	}
 
 	res, err := c.Resource(client.KindImage, name, nil)
 	if err != nil {
-		return ""
+		return "", nil
 	}
 
 	img, ok := res.(*client.Image)
 	if !ok {
-		return ""
+		return "", nil
 	}
 
 	return imageTarget(img, func() (string, error) {
@@ -198,18 +205,25 @@ func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
 // imageTargetTimeout bounds the read of an alias a plan ranks replicas by.
 const imageTargetTimeout = 10 * time.Second
 
-// imageTarget is the fingerprint of an image ensured, or the one read reads.
-func imageTarget(img *client.Image, read func() (string, error)) string {
+// imageTarget is the fingerprint of an image ensured, or the one read reads:
+// "" when the project has no alias for it, or there is no Incus to ask. A
+// read that failed otherwise is an error, as the surplus ranked without it
+// could be the replica on the image the alias points at.
+func imageTarget(img *client.Image, read func() (string, error)) (string, error) {
 	if img.IsEnsured() {
-		return img.State().IncusAlias.Target
+		return img.State().IncusAlias.Target, nil
 	}
 
 	target, err := read()
-	if err != nil {
-		return ""
-	}
 
-	return target
+	switch {
+	case err == nil:
+		return target, nil
+	case incusApi.StatusErrorCheck(err, http.StatusNotFound), errors.Is(err, client.ErrDisconnected):
+		return "", nil
+	default:
+		return "", fmt.Errorf("reading the alias of image %s: %w", img.IncusName(), err)
+	}
 }
 
 // ReplicaIndexes returns the indexes of the replicas of a service that exist,
@@ -336,7 +350,7 @@ func serviceReplicas(instances []incusApi.InstanceFull, project, service, hash s
 		}
 
 		running := inst.StatusCode == incusApi.Running || inst.StatusCode == incusApi.Ready
-		drained := util.IsTrue(expanded[shared.DNSDrainKey])
+		drained := shared.DNSDrained(expanded[shared.DNSDrainKey])
 		status := expanded[shared.HealthStatusKey]
 		instHash, hashed := cfg[client.ConfigHashKey]
 

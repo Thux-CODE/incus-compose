@@ -440,6 +440,14 @@ func volumeDevicePath(devices []client.InstanceDevice, target string) string {
 // `down` takes with it.
 const OneOffKey = "user.incus-compose.oneoff"
 
+// noReplicaSuffix makes the name a required dependency with no replica is
+// waited for under: one Incus never has.
+const noReplicaSuffix = ".no-replica"
+
+// rolloutMarkPrefix holds the marks a rollout run writes on the instances it
+// makes and drains, which only it sets.
+const rolloutMarkPrefix = "user.incus-compose.rollout."
+
 // ServiceLabelKey holds the service an instance was made from.
 const ServiceLabelKey = labelIncusComposePrefix + "service"
 
@@ -620,6 +628,18 @@ func instanceConfig(c *client.Client, service types.ServiceConfig, projectName s
 
 	// After x-incus, so a service cannot drop what the caller marked it with.
 	maps.Copy(config, marks)
+
+	// Nor can it pass for another service or project, which ic-dns would
+	// publish it under and reconciling would not count it as, nor carry the
+	// marks a rollout run reads.
+	config[ServiceLabelKey] = service.Name
+	config[labelIncusComposePrefix+"project"] = projectName
+
+	for k := range config {
+		if strings.HasPrefix(k, rolloutMarkPrefix) {
+			delete(config, k)
+		}
+	}
 
 	return config, nil
 }
@@ -1391,10 +1411,14 @@ func instanceDependencyWaits(c *client.Client, p *types.Project, service types.S
 			}
 		}
 		// A required dependency scaled to 0 has no replica that can be healthy:
-		// its first name stands for it, which a wait or a check finds missing,
-		// rather than nothing to wait for at all.
-		if depScale < 1 && dep.Required {
-			depScale = 1
+		// a name no instance can hold (a dot is not allowed in one) stands for
+		// it, which a wait or a check never finds, rather than nothing to wait
+		// for at all, or the first replica's name, which another instance may
+		// hold.
+		if depScale < 1 && dep.Required && depSvc.ContainerName == "" {
+			deps[depName+noReplicaSuffix] = client.HealthStatusHealthy
+
+			continue
 		}
 
 		if depSvc.ContainerName != "" {
