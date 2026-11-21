@@ -327,6 +327,44 @@ form.
   (a label set right after a start, while the start waits for an address) gets a
   read of its own instead of the older answer. (by @sandroden)
 
+- `ic-dns` turns ready only on a round that read what it listed: the enricher
+  ends a round once every instance it listed and nothing held has been read,
+  deleted or left out of a listing, and an instance whose read keeps failing
+  holds it for a minute at most. A round that ended while the Incus event
+  stream was down no longer makes `/ready` 200 at the reconnection: the stream
+  comes back cold and `/ready` waits on the round the reconnection starts. The
+  `/ready` decision no longer races a dropped disconnect. (by @sandroden)
+
+- `ic-dns` refuses zone transfers (`SERVFAIL`) until the first round after a
+  start has ended, instead of handing a secondary the part of a zone replayed so
+  far under the serial the whole zone was published with. A change folded after
+  the round steps its zone's serial even when its read was stamped cold before
+  the round ended. (by @sandroden)
+
+- `ic-dns --peer-views`: a service's healthy replicas are picked over the
+  querier's networks and their peers at once, so a replica `starting` on the
+  querier's own network no longer answers beside a `healthy` one reached through
+  a peer. A peering read asked for before a `network-peer-*` event no longer
+  turns the server warm on the topology from before it. A peering read with
+  nothing peered survives a restart as known, so a slow peering read after it no
+  longer keeps `/ready` at 503; a pair stored one way round only in the cold
+  store is dropped. A network that gets its first instance after warm holds the
+  misses of queriers that may see it through a peer at `SERVFAIL` until its
+  peering is read, 45 seconds at most, instead of `NXDOMAIN`. (by @sandroden)
+
+- `ic-dns` keeps an instance's own name when its service, named after it, is
+  renamed; never drops a name replayed from the cold store on a full inbox;
+  answers a truncated `NXDOMAIN` from the forwarder under the suffix
+  `SERVFAIL` before warm, like an untruncated one; and takes an IPv4-mapped CIDR
+  in `--trusted-client`, `--allow-transfer` or `--claim-reverse` as the IPv4
+  prefix it names (one shorter than `/96` is refused). A query can no longer
+  pair the snapshot from before the end of the first round with the warm after
+  it. (by @sandroden)
+
+- The `ievent` enricher no longer deletes an instance made again under the same
+  name on the strength of a 404 read before it, nor lets a network read taken
+  before a network update, delete or rename undo it. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

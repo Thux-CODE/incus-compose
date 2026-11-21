@@ -232,11 +232,17 @@ been read yet. A name under the suffix outside every project zone read so far is
 still asked of the forwarders, and their `NOERROR` is passed on, with records or
 without, so hosts the upstream resolver knows under the same suffix - the
 cluster members' own names, say - keep resolving, the empty AAAA of an IPv4-only
-node included; their `NXDOMAIN` is `SERVFAIL` instead. Names outside the suffix
-are forwarded as usual throughout, and once warm nothing changes, a lost Incus
-event stream included. Only `/ready` follows a lost stream: it is 503 from the
-moment the stream goes until the next round has ended. A read that fails or
-times out, once ready, moves neither the answers nor `/ready`.
+node included; their `NXDOMAIN` is `SERVFAIL` instead, truncated or not. Names
+outside the suffix are forwarded as usual throughout, and once warm nothing
+changes, a lost Incus event stream included. Only `/ready` follows a lost
+stream: it is 503 from the moment the stream goes until the round the
+reconnection starts has ended - a round that ended while the stream was down
+does not count. A read that fails or times out, once ready, moves neither the
+answers nor `/ready`.
+
+The round is over once every instance it listed has been read. An instance
+whose read fails holds it, and is read again, for up to a minute: past that the
+round ends without it, and its name is unknown until a read lands.
 
 With two `ic-dns` in `dns.nameservers`, glibc, musl and Go resolvers move on to
 the other one on `SERVFAIL`, so a restarting server is skipped instead of
@@ -361,6 +367,12 @@ global DNS sidecar, individual projects can opt into transfers by specifying
 - **Incremental Transfers (IXFR)**: Requests are answered directly from the
   current in-memory zone snapshot. If the requesting secondary's serial is older
   than the current serial, the full zone is sent.
+- **Not before the first round**: After a start, a transfer is `SERVFAIL` until
+  the fleet has been read once. The zone is rebuilt from the cold store under
+  the serial it was last published with, and part of it would go over under a
+  serial that never moves for the rest. The secondary keeps what it holds and
+  tries again at its retry interval. A change found once the round has ended
+  steps the serial, whatever read found it.
 - **Apex queries only**: Transfers must target the exact zone apex (e.g.,
   `shop.example.org`). Requests for individual subdomains or invented shadowing
   zones (such as absolute external aliases) are refused.

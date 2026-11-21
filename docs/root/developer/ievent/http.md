@@ -38,8 +38,13 @@ truth before anything has been read.
 `ready` latches true on `ChainWarm` - from an event no plugin dropped, since a
 dropped one was folded by nobody and may have overtaken what it follows, and
 stamped after the stream was last lost, since one from before is a debounced
-leftover - and clears only on `ActionDisconnected`: a lost stream is not-ready
-until the chain warms back up. An event stamped `ChainCold` clears nothing. The
+leftover - and clears only on `ActionDisconnected` and `ActionConnected`: a
+lost stream is not-ready until the chain warms back up, and so is one that
+came back, until the round its reconnection starts has ended - one that ended
+while it was down missed what happened then. The decision is taken under a
+lock: `Handle` is called from more than one goroutine at once, since a plugin
+before this one hands on what it drops from its caller's goroutine while its
+fold hands on the rest. An event stamped `ChainCold` clears nothing. The
 stamp says what the chain was when the event was minted, and a read the
 enricher sent before a round ended - or one that failed - can walk past here
 after it still cold; clearing on it left `/ready` at 503 until the next round,

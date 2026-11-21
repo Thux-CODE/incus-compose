@@ -199,13 +199,18 @@ patch marks the zone it touched**, and publish steps every zone carrying a mark
   patch is what moves an instance between networks, so the mark lands whether or
   not any address changed.
 
-A serial is stepped only while the chain is warm. A step is a claim that the
-zone changed, and cold has confirmed nothing, so it has no standing to make one.
-Its first publish is a birth rather than a step, since a secondary reads zero as
-"no zone here".
+A serial is stepped only once a round has ended in this run (`state.complete`),
+whatever the stamp of the event that changed it: a read minted cold before the
+end of the round and folded after it changes a zone already served whole, and
+leaving the serial alone would keep a secondary on the old address. Before the
+round a step is a claim that the zone changed, and nothing has been confirmed,
+so it has no standing to make one. Its first publish is a birth rather than a
+step, since a secondary reads zero as "no zone here".
 
-What changes while cold is **owed** instead: the zone is marked, and the first
-publish once warm steps it once, however many changes it collected. Without it a
+What changes before the round is **owed** instead: the zone is marked, and the
+first publish once the round has ended steps it once, however many changes it
+collected. Only what is owed steps: a zone the replay marked moved and nothing
+else did is rendered under the serial it was stored with. Without it a
 secondary already holding the serial would keep what that serial described - an
 address the first round after a restart or a reconnect corrected - until a later
 change happened to step it. The replay of what the cold store restored, landing
@@ -231,6 +236,14 @@ Both answer from that snapshot rather than a journal - there is no delta to cut,
 so an IXFR asking for anything but the serial already served gets the whole zone
 anyway. UDP is refused outright; a transfer is a stream of messages and UDP
 carries one.
+
+Nothing goes over before the first round has ended (`xfr.SetComplete`, after
+the publish that ends it): until then a zone holds what the replay has reached
+under the serial a previous run published whole, and a secondary taking half of
+it would never see that serial move for the rest. A transfer then is `SERVFAIL`,
+so the secondary keeps what it holds and tries again; the flag is loaded before
+the snapshot, so a transfer reading it set answers from the round's publish or a
+later one.
 
 Two gates stand before the snapshot is even read: the peer's address against
 `--allow-transfer` (no prefixes allows nobody, so transfer is opt-in at both the
@@ -312,6 +325,13 @@ learns about the fleet entirely through the chain: instances, networks, and
 labels arrive as enriched events, and disappeared instances arrive as synthetic
 `instance-deleted` events emitted by the enricher's round prune.
 
+An event arriving on a full inbox is dropped, and marked so - but for a
+restored one, which spills instead: the enricher replays its whole store at
+once before anything reads Incus, and a stored name dropped there stayed
+`SERVFAIL` until the round read it. What arrives while something has spilled
+goes behind it, so nothing overtakes the replay; the live events among it are
+bounded by the inbox size, and dropped past it as before.
+
 Patches collect in a 150ms `publishWindow` before a snapshot is published, so an
 instance that moved and moved back inside one window compares equal and reaches
 the trees not at all. On `enricher/sweep-end`, any pending window is flushed and
@@ -320,9 +340,9 @@ published immediately.
 ## Warm Is Not This Plugin's To Set
 
 The enricher raises `ChainState: ChainWarm` on `enricher/sweep-end`, so warm has
-already been stamped by the time that event reaches here. `dns` only reads it -
-`step` takes it as whether a serial may move, since a step is a claim the zone
-changed and cold has confirmed nothing.
+already been stamped by the time that event reaches here. `dns` reads it to
+tell an ordered signal from a leftover (below); whether a serial may move is
+its own `state.complete`, set by the round.
 
 ## A Cold Server Fails Its Misses
 
@@ -352,11 +372,12 @@ that catches the reply. `NOERROR` goes out as the forwarder wrote it, not
 authoritative and not clamped, with records or without: `NODATA` says upstream
 holds the name, so no project builds it, and the AAAA of an IPv4-only node is
 exactly that - failing it would fail the node's whole lookup on musl, which
-sends A and AAAA together and gives up on either's `SERVFAIL`. A truncated reply
-goes out as it came too, whatever its rcode, so the client retries over TCP and
-the TCP reply is judged on its own. Anything else - `NXDOMAIN`, another rcode,
-an error, nothing written - is what an unread project looks like from upstream
-too, so it is the cold `SERVFAIL`. A forwarder that does not answer holds the
+sends A and AAAA together and gives up on either's `SERVFAIL`. A truncated
+`NOERROR` goes out as it came too, so the client retries over TCP and the TCP
+reply is judged on its own. Anything else - `NXDOMAIN`, another rcode, an error,
+nothing written - is what an unread project looks like from upstream too, so it
+is the cold `SERVFAIL`, truncated or not: a client that does not ask again over
+TCP takes a truncated `NXDOMAIN` as final. A forwarder that does not answer holds the
 query for `forward`'s own 5 s first, as it would warm. The cache sits in front
 of `forward`, so what it stores here is what upstream said and changes nothing
 once warm: a project's zone answers before the cache is reached.
@@ -398,16 +419,21 @@ the zones are forwarded either way, and once warm it changes nothing.
 
 ### What Warm Means
 
-Warm is the end of a round, not a complete read. A round reaches its end past a
-project whose instance listing failed (`continue` in `sweepInstances`) and past
-reads that timed out, so the view can turn warm with holes, and those names are
-`NXDOMAIN` until a later round fills them.
+Warm is the end of a round, and the enricher ends a round only once it has read
+what it listed: a project whose instance listing failed makes the round fail
+and be tried again, and an instance listed that nothing holds holds the end
+until a read of it lands, it goes, or a minute has passed. Past that minute the
+view turns warm with that hole, and the name is `NXDOMAIN` until a read lands.
 
 A round that fails outright - `GetProjectNames` timing out, say - raises no
-sweep-end, and today nothing runs again before `SweepInterval` (6 h by default):
-the view stays cold and every miss is `SERVFAIL` for that long, but those the
-forwarder answers `NOERROR`. A retry with backoff is being done separately
-(`ievent-sweep-retry`); this behaviour depends on it.
+sweep-end, and is tried again after a backoff of 1 s doubling up to 30 s: the
+view stays cold, every miss `SERVFAIL` but those the forwarder answers
+`NOERROR`, until one reaches its end.
+
+The query path loads warm before the snapshot. The fold publishes the snapshot
+that ends the round and only then turns warm, so a query reading warm answers
+from that snapshot or a later one; the other way round it could take a snapshot
+from before the last name and the warm after it.
 
 ### Turning Warm, In Order
 
@@ -438,9 +464,17 @@ stream the same holds for healthy: a dropped first sweep-end after the
 reconnect is asked for again too, or the view would stay unhealthy, and
 `/ready` down, until the next round.
 
+Neither signal counts while the stream is down, and a reconnection takes back
+what came while it was: the source takes commands during its backoff, so the
+end of a round started before the stream went can arrive then, stamped warm,
+having missed what happened since. The source stamps the stream cold again when
+it comes back, `dns` and `http` take `connected` as a loss of what is
+confirmed, and the enricher no longer listens to the run the reconnection
+abandoned: the round that counts is the one the reconnection starts.
+
 `/ready` follows the same signal, with the same rule. `http` turns ready on a
 warm event only when it was not dropped and was stamped after the last lost
-stream, and it sits after `dns`, so the event that makes it ready is one `dns`
+stream or reconnection, and it sits after `dns`, so the event that makes it ready is one `dns`
 has already folded: `/ready` is never up while misses still fail. Once up, only
 a lost stream takes it back - the moment `dns` marks the view unhealthy - and
 it comes back with the next round, as healthy does. Nothing else does: an

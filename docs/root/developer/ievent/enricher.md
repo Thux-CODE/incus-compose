@@ -373,7 +373,15 @@ So does a read that finds an instance it held gone: a 404, or one the `Instance`
 predicate no longer serves. A live delete may be on its way with the same news,
 but one that happened while the stream or the process was down is not, and a
 fan-out that reaches it before the listing leaves the listing nothing to prune.
-A second delete for one name changes nothing downstream.
+A second delete for one name changes nothing downstream. Unless a read of the
+same key was asked for while this one was out: its events are ahead in the line
+of where the delete would go, and an instance made again under the name in
+between would reach the chain and then be taken away by the older news. That
+read announces the delete instead, if it finds the instance gone too.
+
+A network read already out when its network is updated is followed by a read
+of its own, as an instance read is, and one out when the network is deleted or
+renamed away is abandoned: landing, it would put back the key just dropped.
 
 **A listing that failed prunes nothing.** An empty answer and a daemon that
 would not answer arrive the same way, and one of them means every name in the
@@ -384,6 +392,22 @@ on through the other projects, then ends as one that broke.
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
 has been all the way round; it never says what exists.
+
+**A round ends once what it listed has been read.** The end's command stamps
+the chain warm at once, so everything raised after it - a name whose read
+failed, retried later - reaches the chain behind a round already called whole,
+and a name nothing downstream has yet would read as absent for good. An
+instance the listing has and nothing holds, or one whose read failed and that
+nothing holds, is `unread`; the end waits until each has a read that landed (a
+404 and an unserved instance count), has been deleted, or a listing no longer
+has it. One that keeps failing holds the end for `roundGrace` (a minute) and no
+more: past it the round ends with a warning, and its name waits on the retry
+like any other. A held instance whose read fails waits on nothing: what it
+holds is already downstream.
+
+A reconnect abandons the run under way and its end with it, held or not.
+Messages carry the run they belong to, and those of an abandoned one - whose
+send races the cancel - are not listened to.
 
 ## A Start Replays What The Last One Held
 
