@@ -211,6 +211,26 @@ func TestSecondInstanceCreatedAfterListing(t *testing.T) {
 		"a listing after the read leaves it out")
 }
 
+type secondNetworkListFailure struct{ *fixture }
+
+func (f secondNetworkListFailure) GetNetworkNames(context.Context, string) ([]string, error) {
+	return nil, errors.New("network list unavailable")
+}
+
+// TestSecondFailedNetworkListEndsRound: the network listing fails and the
+// instance listing succeeds. The run is not whole, and fails - tried again
+// after the backoff rather than called done.
+func TestSecondFailedNetworkListEndsRound(t *testing.T) {
+	f := &fixture{fleet: testlib.NewProject("p", 0, 0)}
+	a := sweepArgs{conn: secondNetworkListFailure{f}, sweepOut: make(chan sweepMsg, 16), timeout: time.Second}
+	err := runSweep(t.Context(), slog.Default(), a)
+	require.Error(t, err, "runSweeper turns this nil into sweepActionDone")
+
+	// The instances were still swept, so the names held are confirmed or
+	// pruned; and once the listing answers the run ends.
+	require.NoError(t, runSweep(t.Context(), slog.Default(), sweepArgs{conn: f, readNet: f.answerNet, sweepOut: make(chan sweepMsg, 16), timeout: time.Second}))
+}
+
 // TestSecondRoundEndNamesItsSession: the run a connected restarts ends naming
 // that connected's session, which is what the source checks it against.
 func TestSecondRoundEndNamesItsSession(t *testing.T) {

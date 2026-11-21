@@ -140,7 +140,7 @@ func runSweep(ctx context.Context, logger *slog.Logger, a sweepArgs) error {
 		return err
 	}
 
-	err = sweepNetworks(ctx, logger, a, projects)
+	unlisted, err := sweepNetworks(ctx, logger, a, projects)
 	if err != nil {
 		return err
 	}
@@ -150,7 +150,7 @@ func runSweep(ctx context.Context, logger *slog.Logger, a sweepArgs) error {
 		return err
 	}
 
-	return sweepInstances(ctx, logger, a, served)
+	return errors.Join(unlisted, sweepInstances(ctx, logger, a, served))
 }
 
 // sweepProjects reads every project and answers two lists: served is where the
@@ -220,7 +220,15 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 //
 // Per project rather than one listing: a project with features.networks has
 // networks of its own, and asking one project answers with that project's alone.
-func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projects []string) error {
+//
+// A project whose networks could not be listed costs its own networks rather
+// than the fleet's, but the run is not whole without them: what is held there
+// has been neither confirmed nor pruned. The listing failures come back
+// joined, for runSweep to end the run in after the instances, as one that
+// broke. Anything else returned stops the run where it stands.
+func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projects []string) (failed, err error) {
+	var failures []error
+
 	for _, project := range projects {
 		listed := time.Now()
 
@@ -230,9 +238,10 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 		cancel()
 
 		if err != nil {
-			// One project failing costs its own networks rather than the fleet's.
 			logger.Warn("the networks of one project could not be listed, keeping what is held",
 				"plugin", name, "project", project, "err", err)
+
+			failures = append(failures, fmt.Errorf("listing the networks of %s: %w", project, err))
 
 			continue
 		}
@@ -244,7 +253,7 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 			at:      listed,
 		})
 		if err != nil {
-			return err
+			return nil, err
 		}
 
 		for _, netName := range names {
@@ -262,17 +271,17 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 
 			err = sweepSend(ctx, a, msg)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			err = sweepWait(ctx, a.delay)
 			if err != nil {
-				return err
+				return nil, err
 			}
 		}
 	}
 
-	return nil
+	return errors.Join(failures...), nil
 }
 
 // sweepInstances lists each served project's instances and trickles the names.
