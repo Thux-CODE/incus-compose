@@ -315,6 +315,30 @@ func TestReviewPeeredServiceFailsOpen(t *testing.T) {
 	require.ElementsMatch(t, []string{"10.0.0.2", "10.0.1.2"}, got)
 }
 
+// TestReviewInstanceKeepsNameAfterServiceRename: web's service is web, then
+// frontend. The old service answer goes, and web's own name - the same
+// records - stays.
+func TestReviewInstanceKeepsNameAfterServiceRename(t *testing.T) {
+	nets := map[string]string{"net-a": "10.0.0.5"}
+	p := fed(t, eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", map[string]string{metaService: "web"}, nets))
+	p.fold(eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", map[string]string{metaService: "frontend"}, nets))
+	p.write()
+	a := engineOn(p.state.snapshot(), false)
+	_, service := resolve(a, "frontend.shop.example.", dns.TypeA, "10.0.0.5")
+	require.Equal(t, []string{"10.0.0.5"}, service)
+	_, own := resolve(a, "web.shop.example.", dns.TypeA, "10.0.0.5")
+	require.Equal(t, []string{"10.0.0.5"}, own)
+
+	// And back: the service is web again, answered once.
+	p.fold(eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", map[string]string{metaService: "web"}, nets))
+	p.write()
+	a = engineOn(p.state.snapshot(), false)
+	_, own = resolve(a, "web.shop.example.", dns.TypeA, "10.0.0.5")
+	require.Equal(t, []string{"10.0.0.5"}, own)
+	code, _ := resolve(a, "frontend.shop.example.", dns.TypeA, "10.0.0.5")
+	require.Equal(t, "NXDOMAIN", dns.RcodeToString[code])
+}
+
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
 // ended and folded after it is stamped cold, and still changes a zone already
 // served whole. Its serial steps, or a secondary keeps the old address.

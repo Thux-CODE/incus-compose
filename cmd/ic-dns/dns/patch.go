@@ -235,6 +235,7 @@ func (s *state) refresh(ttl uint32) bool {
 		}
 
 		s.dropName(name, held)
+		s.ownBack(name, ttl)
 		delete(s.served, name)
 		s.dirty(s.servedZone[name], true)
 		delete(s.servedZone, name)
@@ -252,6 +253,7 @@ func (s *state) refresh(ttl uint32) bool {
 
 		if prev != nil {
 			s.dropName(name, prev)
+			s.ownBack(name, ttl)
 		}
 
 		s.addName(name, next)
@@ -269,6 +271,21 @@ func (s *state) refresh(ttl uint32) bool {
 	}
 
 	return changed
+}
+
+// ownBack writes one name again for every instance answering to it as its own.
+// A service answer is taken out record by record, and the records an
+// instance answers its own name with are the same ones: an instance whose
+// service was named after it, renamed, has just written its own name back as
+// the old service answer is dropped, and would lose it with it.
+func (s *state) ownBack(name string, ttl uint32) {
+	for _, inst := range s.held {
+		if name == inst.service || !slices.Contains(inst.names, name) {
+			continue
+		}
+
+		s.addName(name, s.records(inst, name, ttl))
+	}
 }
 
 // service is what one service name answers, view by view: in each view, the
