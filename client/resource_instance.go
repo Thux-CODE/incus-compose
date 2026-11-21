@@ -2334,14 +2334,18 @@ func (r *Instance) UnmarkDelete() {
 	r.deleteMarked = false
 }
 
-// SetDependencies replaces the instances this one waits for before it starts,
-// for a plan made again on the client that built it: the dependency's
-// replicas may have changed names in between.
-func (r *Instance) SetDependencies(deps map[string]string) {
+// Replan takes from cfg what a plan made again on the client that built this
+// instance decides afresh: the instances it waits for before it starts, whose
+// names a recreate in between may have moved, and its pre_start and
+// post_start hooks, which the service-wide ones may have moved to another
+// replica.
+func (r *Instance) Replan(cfg *InstanceConfig) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.Config.Dependencies = deps
+	r.Config.Dependencies = cfg.Dependencies
+	r.Config.PreRun = cfg.PreRun
+	r.Config.PostRun = cfg.PostRun
 }
 
 // Delete removes the instance from Incus.

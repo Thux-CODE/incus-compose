@@ -400,9 +400,9 @@ func serviceToInstance(c *client.Client, p *types.Project, serviceName string, o
 	}
 
 	// One an earlier plan on this client built is handed back as it was: the
-	// replicas it waits for are this plan's, which a recreate in between may
-	// have moved to other indexes.
-	instance.SetDependencies(instCfg.Dependencies)
+	// replicas it waits for and the hooks it runs are this plan's, which a
+	// recreate in between may have moved to other indexes.
+	instance.Replan(instCfg)
 
 	return instance, resources, nil
 }
@@ -1367,7 +1367,7 @@ func instanceDependencyWaits(c *client.Client, p *types.Project, service types.S
 		// The replicas Resources keeps for the dependency, whatever their
 		// indexes; the declared names when it was not planned with this one.
 		names, planned := options.replicaNames[depName]
-		if planned {
+		if planned && len(names) > 0 {
 			for _, name := range names {
 				deps[client.SanitizeIncusName(name, client.MaxIncusNameLen)] = client.HealthStatusHealthy
 			}
@@ -1390,6 +1390,13 @@ func instanceDependencyWaits(c *client.Client, p *types.Project, service types.S
 				}
 			}
 		}
+		// A required dependency scaled to 0 has no replica that can be healthy:
+		// its first name stands for it, which a wait or a check finds missing,
+		// rather than nothing to wait for at all.
+		if depScale < 1 && dep.Required {
+			depScale = 1
+		}
+
 		if depSvc.ContainerName != "" {
 			deps[client.SanitizeIncusName(depSvc.ContainerName, client.MaxIncusNameLen)] = client.HealthStatusHealthy
 		} else {

@@ -148,6 +148,13 @@ form.
   healthy replicas than declared, none at all with one, on a run that ended
   successfully. (by @sandroden)
 
+- A required `depends_on` with `condition: service_healthy` on a service
+  scaled to 0 is waited for (and checked by `rollout`) as its first replica,
+  which is missing, instead of not at all. A plan made again on the same
+  client (`up --recreate`) gives the service-wide `pre_start` hooks to the
+  one replica it picks, where the replica the first plan picked kept them too.
+  (by @sandroden)
+
 - `rollout --dry-run` writes nothing but a pull: it no longer adds to an
   existing project the config keys the compose file has gained, nor builds an
   image missing from the project or copies it from the cache. The plan says
