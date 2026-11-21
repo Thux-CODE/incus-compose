@@ -1,6 +1,7 @@
 package enricher
 
 import (
+	"errors"
 	"log/slog"
 	"maps"
 	"net/http"
@@ -82,6 +83,69 @@ func TestReviewOld404ThenGoneAgain(t *testing.T) {
 		}
 	}
 	require.Equal(t, incusapi.EventLifecycleInstanceDeleted, last)
+}
+
+// TestReviewSweepEndsDespiteReadError: a run whose listings succeed and whose
+// read of a listed instance fails is not one that read the fleet whole, so it
+// does not end - until the read is tried again and lands, which is what ends
+// it then.
+func TestReviewSweepEndsDespiteReadError(t *testing.T) {
+	h := newFixture(t)
+	h.mu.Lock()
+	h.err = errors.New("read timeout")
+	h.mu.Unlock()
+	fleet := testlib.NewProject("p", 1, 1)
+	fleet.Project.Config[iutil.FeaturesNetworks] = "true"
+	h.setFleet(fleet)
+	seen := h.collect(2)
+	require.Equal(t, iutil.ActionConnected, seen[0].Action())
+	require.Error(t, seen[1].Err())
+
+	select {
+	case ev := <-h.out:
+		require.NotEqual(t, iutil.ActionSweepEnd, ev.Action(), "first full read is still missing an instance")
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	h.mu.Lock()
+	h.err = nil
+	h.mu.Unlock()
+
+	untilSweepEnd(t, h, 10*time.Second)
+}
+
+// TestReviewSweepEndsAfterTheGrace: a read that keeps failing holds the end of
+// a run for the grace and no longer, or one instance would keep the chain cold
+// for good.
+func TestReviewSweepEndsAfterTheGrace(t *testing.T) {
+	h := newFixture(t, func(o *options) { o.roundGrace = 200 * time.Millisecond })
+	h.mu.Lock()
+	h.err = errors.New("read timeout")
+	h.mu.Unlock()
+	fleet := testlib.NewProject("p", 1, 1)
+	fleet.Project.Config[iutil.FeaturesNetworks] = "true"
+	h.setFleet(fleet)
+	start := time.Now()
+	untilSweepEnd(t, h, 5*time.Second)
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
+}
+
+// untilSweepEnd reads the chain until the end of a run.
+func untilSweepEnd(t *testing.T, h *fixture, within time.Duration) {
+	t.Helper()
+
+	deadline := time.After(within)
+
+	for {
+		select {
+		case ev := <-h.out:
+			if ev.Action() == iutil.ActionSweepEnd {
+				return
+			}
+		case <-deadline:
+			t.Fatal("the run never ended")
+		}
+	}
 }
 
 // TestReviewNetworkEventDuringRead: a network read taken before an update, a

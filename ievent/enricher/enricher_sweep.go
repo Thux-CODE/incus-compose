@@ -2,6 +2,7 @@ package enricher
 
 import (
 	"context"
+	"slices"
 	"time"
 
 	incusapi "github.com/lxc/incus/v7/shared/api"
@@ -52,6 +53,8 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 
 		p.state.pruneProjects(msg.names)
 
+		p.forgetUnread(ctx, p.unreadOutside(func(s subject) bool { return slices.Contains(msg.names, s.project) })...)
+
 		// The run lists, this plugin reads: a project's own configuration is
 		// what an instance event in it carries, and it goes through the pool
 		// like every other read this plugin makes.
@@ -79,6 +82,21 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
 
+		// What the listing has and nothing holds is a name nobody downstream
+		// has yet: the end of the run waits until its read lands, so a read
+		// that fails cannot leave the run whole without it. One whose read
+		// failed and that the listing no longer has went before anything held
+		// it, so there is no delete to make, only no wait.
+		for _, instance := range msg.names {
+			if p.state.instance(msg.project, instance) == nil {
+				p.unread[resourceKey(kindInstance, msg.project, instance)] = subject{project: msg.project, instance: instance}
+			}
+		}
+
+		p.forgetUnread(ctx, p.unreadOutside(func(s subject) bool {
+			return s.project != msg.project || slices.Contains(msg.names, s.instance)
+		})...)
+
 		for ev := range p.q.release() {
 			p.args.Next(ev)
 		}
@@ -94,14 +112,19 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 	case sweepActionDone:
 		// Held back while the run's own project reads are still out: warm says
 		// the fleet has been read whole, and it has not been until they land.
-		// A run over a project with no instances reaches here first.
-		if p.reads.owes() > 0 {
-			p.sweepEnding = true
+		// A run over a project with no instances reaches here first. So is one
+		// with an instance whose read failed and that nothing holds, for as
+		// long as the grace: its retry is what ends the run.
+		p.sweepEnding = true
 
-			return
+		if len(p.unread) > 0 && p.endGrace == nil && !p.graceOver {
+			p.endGrace = time.After(p.opts.roundGrace)
+
+			p.logger.Info("the run waits on instances whose read failed",
+				"plugin", name, "instances", len(p.unread), "grace", p.opts.roundGrace)
 		}
 
-		p.sweepEnd(ctx)
+		p.endIfRead(ctx)
 
 	case sweepActionFailed:
 		if p.opts.Metrics {
@@ -112,6 +135,20 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 	}
 }
 
+// unreadOutside is the keys of the instances whose read failed that keep does
+// not keep.
+func (p *Plugin) unreadOutside(keep func(subject) bool) []string {
+	var out []string
+
+	for key, s := range p.unread {
+		if !keep(s) {
+			out = append(out, key)
+		}
+	}
+
+	return out
+}
+
 // sweepEnd says a run has been all the way round.
 //
 // At the head rather than through next, so debounce sees the end of a run too.
@@ -119,6 +156,9 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 // and a run reaching its end is when that becomes true.
 func (p *Plugin) sweepEnd(ctx context.Context) {
 	p.sweepEnding = false
+	p.endGrace = nil
+	p.graceOver = false
+
 	if p.opts.Metrics {
 		sweepsTotal.WithLabelValues("success").Inc()
 	}

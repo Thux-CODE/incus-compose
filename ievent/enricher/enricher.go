@@ -43,6 +43,12 @@ const (
 	// defaultIPTimeout bounds how long a worker polls for an instance to acquire an
 	// IP address when interfaces are requested.
 	defaultIPTimeout = 10 * time.Second
+
+	// defaultRoundGrace is how long the end of a run waits on instances whose
+	// read failed: several retries at the default read timeout, so a daemon
+	// slow for a while is waited out, and one failing a read for good holds
+	// the chain cold for no longer than this.
+	defaultRoundGrace = time.Minute
 )
 
 // storeStopTimeout bounds the wait for the last write on the way down. A disk
@@ -107,8 +113,22 @@ type Plugin struct {
 	sweeperCancel context.CancelFunc
 	sweeps        chan sweepMsg
 	// sweepEnding says a run reached its end while its project reads were still
-	// out, so the last of them announces it instead.
+	// out, or instances it listed were unread, so whatever settles the last of
+	// them announces it instead.
 	sweepEnding bool
+
+	// unread is every instance a run listed, or whose read failed, that
+	// nothing holds and no read has landed for: a name nobody downstream has,
+	// so a run ending before it lands would make the chain warm - the end's
+	// command stamps everything after it warm at once - and the name's
+	// absence final. Keyed like a call.
+	unread map[string]subject
+
+	// endGrace is when a run held on unread ends anyway, and graceOver says it
+	// has come: an instance whose read fails for good holds a run up to this
+	// and no further.
+	endGrace  <-chan time.Time
+	graceOver bool
 
 	// storeWrite is where a clone of the state is put. A field rather than the
 	// path, so a test answers without a disk.
@@ -149,11 +169,16 @@ type options struct {
 	// Unexported: a test shortens them, nothing else has a reason to.
 	sweepRetry    time.Duration
 	sweepRetryMax time.Duration
-	TTL           time.Duration
-	Project       func(p *incusapi.Project) bool
-	Instance      func(i *incusapi.Instance) bool
-	StoreFile     string
-	Metrics       bool
+
+	// roundGrace is how long a run's end waits on failed instance reads.
+	// Unexported for the same reason.
+	roundGrace time.Duration
+
+	TTL       time.Duration
+	Project   func(p *incusapi.Project) bool
+	Instance  func(i *incusapi.Instance) bool
+	StoreFile string
+	Metrics   bool
 }
 
 // Option sets one of the options; New fills in defaults for whatever is left
@@ -234,6 +259,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		StoreInterval: defaultStoreInterval,
 		sweepRetry:    defaultSweepRetry,
 		sweepRetryMax: defaultSweepRetryMax,
+		roundGrace:    defaultRoundGrace,
 	}
 
 	for _, opt := range opts {
@@ -252,6 +278,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		sweeps: sweeps,
 
 		q:       &queue{},
+		unread:  map[string]subject{},
 		state:   loadState(logger, o.StoreFile, o.Project),
 		reads:   newDeferred(o.Workers, o.ReadTimeout),
 		retries: newRetries(),
@@ -479,6 +506,15 @@ func (p *Plugin) Run(ctx context.Context) error {
 		case <-p.storeTick:
 			p.storeClone()
 
+		case <-p.endGrace:
+			p.endGrace = nil
+			p.graceOver = true
+
+			p.logger.Warn("ending the run with instances whose read keeps failing",
+				"plugin", name, "instances", len(p.unread))
+
+			p.endIfRead(ctx)
+
 		case <-p.reads.timer.C:
 			p.reads.retry(ctx)
 		}
@@ -609,9 +645,7 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 
 		// A project that would not answer still counts: the run is over either
 		// way, and holding warm on it would leave the chain cold for ever.
-		if p.sweepEnding && p.reads.owes() == 0 {
-			p.sweepEnd(ctx)
-		}
+		p.endIfRead(ctx)
 
 		return
 	}
@@ -622,6 +656,17 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	inst, landed := p.patchState(ctx, c.project, c.name, res.instance, res.state, res.err)
 	if landed {
 		p.updateMetrics()
+	}
+
+	// A held instance whose read failed is still answered from what is held;
+	// one nothing holds is a name the run has not read yet. It is read again
+	// (patchState scheduled that), and the end of a run waits on it.
+	switch {
+	case landed:
+		delete(p.unread, c.key)
+		defer p.endIfRead(ctx)
+	case p.state.instance(c.project, c.name) == nil:
+		p.unread[c.key] = subject{project: c.project, instance: c.name}
 	}
 
 	// Before the event it made below, which is then compared against what they
@@ -752,6 +797,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.archive.forget(ev.ProjectName(), ev.Name())
 		p.updateMetrics()
 		p.q.push(ev, true)
+		p.forgetUnread(ctx, resourceKey(kindInstance, ev.ProjectName(), ev.Name()))
 
 		return
 	}
@@ -762,6 +808,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.state.deleteInstance(ev.ProjectName(), ev.OldName())
 		p.archive.forget(ev.ProjectName(), ev.OldName())
 		p.updateMetrics()
+		p.forgetUnread(ctx, resourceKey(kindInstance, ev.ProjectName(), ev.OldName()))
 	}
 
 	// Both have to be true: wanted for instance enrichment, and the action
@@ -791,6 +838,31 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 	}
 
 	p.reads.send(ctx, c)
+}
+
+// forgetUnread takes instances whose read failed off what the end of a run
+// waits on, because they went: deleted, renamed away, or no longer listed.
+func (p *Plugin) forgetUnread(ctx context.Context, keys ...string) {
+	for _, key := range keys {
+		delete(p.unread, key)
+	}
+
+	p.endIfRead(ctx)
+}
+
+// endIfRead announces the end of a run held at its end, once nothing it waits
+// on is left: its project reads, and the instances whose read failed unless
+// the grace for them is over.
+func (p *Plugin) endIfRead(ctx context.Context) {
+	if !p.sweepEnding || p.reads.owes() > 0 {
+		return
+	}
+
+	if len(p.unread) > 0 && !p.graceOver {
+		return
+	}
+
+	p.sweepEnd(ctx)
 }
 
 // fanOut re-reads a set of instances nothing named directly, each as an
