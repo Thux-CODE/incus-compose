@@ -170,6 +170,14 @@ type Plugin struct {
 	// known. Run's goroutine alone.
 	peerGen, peerNeed, peerLanded uint64
 
+	// peerOwed is every network a name landed on after warm whose peering has
+	// not been read since, by the ask that has to cover it; peerOwedBy is when
+	// those still owed are given up on, after peerOwedGrace. Run's goroutine
+	// alone.
+	peerOwed      map[string]uint64
+	peerOwedBy    <-chan time.Time
+	peerOwedGrace time.Duration
+
 	// peerIn hands a finished read to Run's goroutine, which owns the state.
 	peerIn chan peerRead
 
@@ -326,6 +334,9 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		peerRetry: [2]time.Duration{peerRetryFirst, peerRetryLongest},
 
 		peerCallTimeout: peerCallTimeout,
+
+		peerOwed:      map[string]uint64{},
+		peerOwedGrace: peerOwedGrace,
 	}
 
 	wants := p.Wants()
@@ -589,6 +600,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 		case read := <-p.peerIn:
 			p.peered(read)
 
+		case <-p.peerOwedBy:
+			p.peerOwedOver()
+
 		case ev := <-p.inbox:
 			p.fold(ev)
 
@@ -809,6 +823,7 @@ func (p *Plugin) publish() {
 	// Written twice, one pointer each: neither reads the other's, and the value
 	// itself is finished and shared.
 	snap := p.state.snapshot()
+	snap.PeersOwed = len(p.peerOwed) > 0
 
 	p.view.Replace(snap)
 	p.xfr.Replace(snap)

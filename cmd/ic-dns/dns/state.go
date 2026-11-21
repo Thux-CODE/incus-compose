@@ -66,9 +66,9 @@ type state struct {
 	// a serial steps on, and the first time it pays what it owes.
 	complete bool
 
-	// grew is a name having landed on a network nothing was on: its peering
-	// has not been read, since until now it could change no answer.
-	grew bool
+	// grown is every network a name has landed on that nothing was on: its
+	// peering has not been read, since until now it could change no answer.
+	grown []string
 }
 
 // peerTargets is every network a read of the peering has to cover: each one a
@@ -220,7 +220,7 @@ func (s *state) claim(keys []string, id ecs_view.ViewID) bool {
 		if over == nil {
 			over = map[ecs_view.ViewID]int{}
 			s.nets[key] = over
-			s.grew = true
+			s.grown = append(s.grown, key)
 		}
 
 		if over[id] == 0 {

@@ -216,9 +216,10 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		visible = false
 	}
 
-	// Unreachable reads exactly like missing.
+	// Unreachable reads exactly like missing - but where a peering is owed a
+	// read, the name may be one this querier reaches through it.
 	if !visible {
-		if cold {
+		if cold || (v.PeerViews && snap.PeersOwed) {
 			return v.notReady(w, r, opt)
 		}
 

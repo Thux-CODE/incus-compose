@@ -225,6 +225,49 @@ func TestReviewPeerChangeDuringRead(t *testing.T) {
 	require.Equal(t, "NOERROR", dns.RcodeToString[code])
 }
 
+// TestReviewNetworkAddedAfterFirstRound: warm with mgmt alone, then the first
+// name on a network nothing was on, while the peering cannot be read. The
+// name answers on its own network; to mgmt, which would reach it through a
+// peer nobody has read yet, it is SERVFAIL rather than NXDOMAIN. Once the read
+// lands it answers through the peer.
+func TestReviewNetworkAddedAfterFirstRound(t *testing.T) {
+	f := hubIncus()
+	r := runPeered(t, f, Suffix("incus"))
+	defer r.stop(t)
+	mgmt := hubFleet()["default/mgmt"].Event
+	r.feed(t, mgmt, warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Eventually(t, r.p.view.Ready, time.Second, time.Millisecond)
+	f.mu.Lock()
+	f.down = errors.New("read deadline exceeded")
+	f.mu.Unlock()
+	r.feed(t, warm(hubFleet()["pvlab1/django-1"].Event))
+	answersWithin(t, r, "django-1.pvlab1.incus.", "10.147.250.2", dns.RcodeSuccess, "new network published")
+	code, _ := resolve(&adapter{chain: r.p.view}, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[code], "new network's peering has never been read")
+
+	f.mu.Lock()
+	f.down = nil
+	f.mu.Unlock()
+	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.6", dns.RcodeSuccess, "the read landed")
+	require.True(t, r.p.view.Ready(), "nothing of this takes readiness back")
+}
+
+// TestReviewNetworkAddedReadFailsForGood: the same with a read that never
+// lands. The misses it holds at SERVFAIL go back to NXDOMAIN after the grace.
+func TestReviewNetworkAddedReadFailsForGood(t *testing.T) {
+	f := hubIncus()
+	r := runPeeredWith(t, f, func(p *Plugin) { p.peerOwedGrace = 200 * time.Millisecond }, Suffix("incus"))
+	defer r.stop(t)
+	r.feed(t, hubFleet()["default/mgmt"].Event, warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Eventually(t, r.p.view.Ready, time.Second, time.Millisecond)
+	f.mu.Lock()
+	f.down = errors.New("read deadline exceeded")
+	f.mu.Unlock()
+	r.feed(t, warm(hubFleet()["pvlab1/django-1"].Event))
+	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.6", dns.RcodeServerFailure, "owed a read")
+	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.6", dns.RcodeNameError, "given up on after the grace")
+}
+
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
 // ended and folded after it is stamped cold, and still changes a zone already
 // served whole. Its serial steps, or a secondary keeps the old address.

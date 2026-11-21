@@ -73,6 +73,6 @@ func TestPeerTargetsAreHeldNetworksAndThePeering(t *testing.T) {
 
 	held := hubFleet()
 	s.apply("pvlab2/django-1", held["pvlab2/django-1"], 5)
-	assert.True(t, s.grew, "a name on a network nothing was on")
+	assert.Equal(t, []string{app2}, s.grown, "a name on a network nothing was on")
 	assert.Equal(t, []string{hubNet, app1, app2}, s.peerTargets())
 }

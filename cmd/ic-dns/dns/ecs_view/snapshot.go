@@ -118,6 +118,13 @@ type Snapshot struct {
 	// 0a00:0100:... would match a stored 10.0.1.0/24 on the first 24 bits.
 	ByIPv4 critbit.Tree[ViewID]
 	ByIPv6 critbit.Tree[ViewID]
+
+	// PeersOwed says a network in it has a peering that has not been read
+	// yet, so a name a querier cannot see may be one it would see through a
+	// peer: that miss is not final, and is answered like one before warm. In
+	// the snapshot rather than beside it, so the names and what is owed on
+	// them are read together.
+	PeersOwed bool
 }
 
 // ViewOf canonicalises a set of network keys, sorted so any order names the same

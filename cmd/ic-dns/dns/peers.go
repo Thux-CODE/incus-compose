@@ -27,6 +27,11 @@ const (
 // still fails it and leaves the held peering in place.
 const peerCallTimeout = 30 * time.Second
 
+// peerOwedGrace is how long a network new since warm may wait on a read of its
+// peering with misses held at SERVFAIL. Past the longest backoff, so a read
+// failing for a while is retried at least once inside it.
+const peerOwedGrace = 45 * time.Second
+
 // peerReader is what reading the peering takes off the Incus connection: the
 // peers of one network, nothing else.
 type peerReader interface {
@@ -223,14 +228,33 @@ func (p *Plugin) askPeers(moved bool) {
 
 // askIfGrew asks for a read where a write put a name on a network nothing was
 // on: its peering was not read, since it could change no answer until now.
+//
+// Past the first read the view is warm, and a querier that sees a name on the
+// new network only through a peer would be told it does not exist until that
+// read lands: the network is owed a read, and a name a querier cannot see is
+// SERVFAIL rather than NXDOMAIN while one is owed - for peerOwedGrace at most,
+// so a read failing for good costs those queriers a while and no more.
 func (p *Plugin) askIfGrew() {
-	if !p.state.grew {
+	if len(p.state.grown) == 0 {
 		return
 	}
 
-	p.state.grew = false
+	grown := p.state.grown
+	p.state.grown = nil
 
 	p.askPeers(false)
+
+	if p.peerReader == nil || !p.peersRead.Load() {
+		return
+	}
+
+	for _, key := range grown {
+		p.peerOwed[key] = p.peerGen
+	}
+
+	if p.peerOwedBy == nil {
+		p.peerOwedBy = time.After(p.peerOwedGrace)
+	}
 }
 
 // peeringKnown reports whether the peering held is one to turn warm on: one
@@ -354,33 +378,66 @@ func (p *Plugin) peered(read peerRead) {
 	// waiting on, the same table as the one restored included.
 	defer p.warmOnPeering()
 
+	// A network owed a read is settled by one asked for after it grew, or by
+	// nothing being on it any more.
+	owed := len(p.peerOwed) > 0
+
+	for key, gen := range p.peerOwed {
+		if (read.gen >= gen && p.peerCovered[key]) || p.state.nets[key] == nil {
+			delete(p.peerOwed, key)
+		}
+	}
+
+	settled := owed && len(p.peerOwed) == 0
+	if settled {
+		p.peerOwedBy = nil
+	}
+
 	known := p.state.peers != nil
 
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
-	if !changed {
-		// The first read finding nothing peered is a peering known all the
-		// same, and the next start restores it as one.
-		if !known {
-			p.storeCold()
-		}
-
-		return
+	if changed {
+		p.logger.Info("network peering changed", "peers", describePeers(peers))
 	}
 
-	p.logger.Info("network peering changed", "peers", describePeers(peers))
+	switch {
+	case changed && touched && p.published:
+		// Whatever was pending goes out with it, so the snapshot is one fold.
+		p.state.write(p.cfg.TTL)
+		p.askIfGrew()
+		p.publish()
 
-	if !touched || !p.published {
+	case settled && p.published:
+		// Nothing moved, but misses are final again, which only a snapshot
+		// says.
+		p.publish()
+
+	case changed || !known:
 		// Nothing goes out, but the next start replays under this peering:
 		// the serials stored with it are the ones last published, unchanged.
+		// The first read finding nothing peered is a peering known all the
+		// same, and the next start restores it as one.
 		p.storeCold()
+	}
+}
 
+// peerOwedOver gives up on the networks still owed a read of their peering:
+// a name a querier cannot see is NXDOMAIN again, peer or no peer.
+func (p *Plugin) peerOwedOver() {
+	p.peerOwedBy = nil
+
+	if len(p.peerOwed) == 0 {
 		return
 	}
 
-	// Whatever was pending goes out with it, so the snapshot is one fold.
-	p.state.write(p.cfg.TTL)
-	p.askIfGrew()
-	p.publish()
+	p.logger.Warn("the peering of networks new since warm could not be read, answering without it",
+		"networks", len(p.peerOwed), "after", p.peerOwedGrace)
+
+	clear(p.peerOwed)
+
+	if p.published {
+		p.publish()
+	}
 }
 
 // warmOnPeering turns the view warm where a round ended while the peering had
