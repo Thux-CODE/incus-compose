@@ -179,6 +179,10 @@ type rolloutPlan struct {
 	Now           func() time.Time
 	Out           io.Writer
 
+	// GraceStep is how often the replicas are read during a grace, 0 for not
+	// at all (rolloutGrace).
+	GraceStep time.Duration
+
 	// Notes are what a dry run could not check, which its plan says.
 	Notes []string
 }
@@ -440,8 +444,6 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 		}
 
 		index := rolloutFree(slots, plan.Taken)
-
-		_, _ = fmt.Fprintf(plan.Out, "%s: creating\n", plan.Name(index))
 
 		slots[index] = &replica{index: index, created: plan.Now(), current: true, fresh: true, running: true, runID: plan.RunID}
 
@@ -880,8 +882,16 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 
 	_, _ = fmt.Fprintf(plan.Out, "%s: drained, waiting %s\n", name, plan.Grace)
 
-	err = ops.sleep(ctx, plan.Grace)
-	if err == nil {
+	graceReads, err := rolloutGrace(ctx, ops, plan, slots, victim)
+
+	switch {
+	case errors.Is(err, errRolloutShort):
+		// The others stopped serving during the grace: the old one goes back
+		// at once, not at its end.
+		return errors.Join(err, putBack(), rolloutTakeAwayLapsed(ctx, ops, plan, slots, graceReads, victim))
+	case errors.Is(err, errRolloutReplaced):
+		return fmt.Errorf("%s not retired: %w", name, err)
+	case err == nil:
 		err = ctx.Err()
 	}
 
@@ -927,6 +937,56 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	_, _ = fmt.Fprintf(plan.Out, "%s: removed\n", name)
 
 	return nil
+}
+
+// rolloutGrace waits the grace of a drained victim, reading the others every
+// GraceStep: the first round read with fewer than the declared count serving
+// without the victim ends it with errRolloutShort and that round's reads, so
+// the old replica is put back then, not at the end of the grace. A round that
+// cannot be read is no reason for a rollback, and authorizes nothing: the
+// check right before the stop has to pass still. With no step, or one as long
+// as the grace, it is a single wait.
+func rolloutGrace(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica, victim int) (map[int]replicaRead, error) {
+	if plan.GraceStep <= 0 || plan.GraceStep >= plan.Grace {
+		return nil, ops.sleep(ctx, plan.Grace)
+	}
+
+	start := plan.Now()
+
+	for {
+		left := plan.Grace - plan.Now().Sub(start)
+		if left <= 0 {
+			return nil, nil
+		}
+
+		err := ops.sleep(ctx, min(plan.GraceStep, left))
+		if err != nil {
+			return nil, err
+		}
+
+		// The last step ends in the check before the stop.
+		if plan.Now().Sub(start) >= plan.Grace {
+			return nil, nil
+		}
+
+		reads, err := rolloutScan(ctx, ops, plan, slots)
+
+		switch {
+		case ctx.Err() != nil:
+			return nil, ctx.Err()
+		case errors.Is(err, errRolloutReplaced):
+			return nil, err
+		case err != nil:
+			_, _ = fmt.Fprintf(plan.Out, "%s: the replicas could not be read during its grace, which goes on: %v\n", plan.Name(victim), err)
+
+			continue
+		}
+
+		err = rolloutEnough(plan, reads, victim)
+		if err != nil {
+			return reads, fmt.Errorf("during its grace: %w", err)
+		}
+	}
 }
 
 // rolloutTakeAwayLapsed takes away, in a rollback, the replicas this run took

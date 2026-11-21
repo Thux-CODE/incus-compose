@@ -171,6 +171,13 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` reads the other replicas every 5 seconds during the grace of a
+  drained one, and puts it back at the first round with fewer than the
+  declared count serving, taking away the new ones that no longer serve and
+  failing, instead of at the end of the grace; a round it cannot read lets the
+  grace go on and authorizes nothing. "creating" is printed once the
+  dependencies are checked. (by @sandroden)
+
 - `rollout` reads the drain label as ic-dns does, trimmed, in `up` and in its
   refusals too. It ends by reading its replicas and fails when one it made or
   kept no longer serves; keeps a failed new replica that is the only one

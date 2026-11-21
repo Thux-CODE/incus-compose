@@ -58,6 +58,10 @@ const (
 
 	rolloutPoll = 2 * time.Second
 
+	// rolloutGraceStep is how often the replicas that serve in place of a
+	// drained one are read during its grace.
+	rolloutGraceStep = 5 * time.Second
+
 	// rolloutStopSettle is how long a replica being stopped may take to read
 	// Stopped, after its graceful stop, before the rollout gives up on it; it
 	// is killed every rolloutKillEvery while it reads running.
@@ -634,6 +638,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		KeepFailed:    args.KeepFailed,
 		HealthTimeout: healthTimeout,
 		Grace:         args.Grace,
+		GraceStep:     rolloutGraceStep,
 		Poll:          rolloutPoll,
 		Now:           time.Now,
 		Out:           args.Writer,
@@ -914,6 +919,9 @@ func (r *rolloutRunner) createReplica(ctx context.Context, index int, first bool
 	if err != nil {
 		return err
 	}
+
+	// Said once what stands in its way is checked.
+	_, _ = fmt.Fprintf(r.writer, "%s: creating\n", r.name(index))
 
 	// What discard may delete is only what this run creates, so the name is
 	// checked free first: an Ensure would adopt an instance found there.

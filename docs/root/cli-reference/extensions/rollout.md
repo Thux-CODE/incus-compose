@@ -80,8 +80,15 @@ that no longer serve (a rollback), and exits with an error saying how many
 serve. A round whose reads take more than 10 seconds in all is not trusted,
 since a verdict read at its start may have changed by its end; one that fails
 or is that slow is made again, twice at most, after 2 and 4 seconds, and only
-then does the run stop with an error, retiring nothing. That narrows the window
-in which ic-healthd may change a verdict before the stop; it cannot close it. A
+then does the run stop with an error, retiring nothing. During the grace the
+other replicas are read every 5 seconds, with the same rules: the first round
+read with fewer than the declared count serving puts the old replica back at
+once, takes away the new ones that no longer serve, and fails the run; a round
+that cannot be read lets the grace go on, but authorizes nothing, as the check
+right before the stop still has to pass. That narrows the window in which the
+service may have fewer healthy replicas than declared to about one step plus
+the DNS TTL; it cannot close it, since ic-healthd may change a verdict at any
+time and clients hold a record for its TTL. A
 new replica that no longer serves when the replicas are read (ic-healthd
 restarted it, or it turned `unhealthy`) is old again: it is the one taken away,
 the old ones serve on, and `rollout` exits with an error.
@@ -144,12 +151,18 @@ index free for the next:
 
 - one replica: create `web-2`, retire `web-1`; the next rollout creates `web-1`
   and retires `web-2`;
-- two replicas: create `web-3`, retire `web-1`, create `web-1`, retire `web-2`,
-  leaving `web-1` and `web-3`.
+- two replicas made in that order: create `web-3`, retire `web-1`, create
+  `web-1`, retire `web-2`, leaving `web-1` and `web-3`.
 
-That is one create per replica, and at every moment the service has at least N
-healthy replicas serving. Incus cannot rename a running instance, so the names
-are not put back afterwards: `up` leaves the replicas where they are.
+Of the old replicas, the one to go first is a stopped, drained or unhealthy
+one, then one made from an older config or image, then the oldest by its
+creation, then the lowest index: with `web-1` made after `web-2` (by an earlier
+rollout), `web-2` goes first.
+
+That is one create per replica, and an old replica goes only while the declared
+count of healthy replicas serves without it, as read right before (see above
+for the window that leaves). Incus cannot rename a running instance, so the
+names are not put back afterwards: `up` leaves the replicas where they are.
 
 A new replica is placed where `up --scale <service>=N+1` would place a replica,
 on a member none of the others runs on when there is one, and takes an index
