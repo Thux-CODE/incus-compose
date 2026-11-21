@@ -749,6 +749,13 @@ func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connect
 // checkFailed applies one failed check and returns the status to report. The
 // watchdog goes through here too: as in docker, a timed-out probe is a failure.
 func checkFailed(inst *instance, now time.Time) string {
+	// Here and not only on the result path: a run whose probes all time out
+	// reaches its verdicts through the watchdog alone, and would otherwise
+	// stay inside its start period, starting for good, never restarted.
+	if inst.inRestart && !now.Before(inst.restartDone) {
+		inst.inRestart = false
+	}
+
 	if inst.inRestart {
 		// As in docker, failures inside the start period are not counted.
 		return shared.HealthStatusStarting

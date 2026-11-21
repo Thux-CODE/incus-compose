@@ -1806,3 +1806,64 @@ func TestADiscoveredInstanceIsNotForced(t *testing.T) {
 	s.result(s.checked(t, inst, nil))
 	s.silent(t)
 }
+
+// ----------------------------------------------------------------------------
+// the start period through the watchdog
+// ----------------------------------------------------------------------------
+
+// TestWatchdogTimeoutsInsideTheStartPeriodDoNotCount: the other half of
+// letting the watchdog end the start period. Timeouts before restartDone are
+// not counted, as failed checks are not.
+func TestWatchdogTimeoutsInsideTheStartPeriodDoNotCount(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.retries = 1
+	cfg.startPeriod = time.Minute
+	inst := s.add("web-1", cfg)
+	instanceStarted(inst, time.Now())
+	inst.status = shared.HealthStatusStarting
+
+	for range 3 {
+		s.running(t, inst, instanceChecking, time.Now().Add(-time.Second))
+		s.run()
+
+		require.True(t, inst.inRestart)
+		require.Zero(t, inst.failures)
+		require.Equal(t, instanceActionCheck, inst.action)
+	}
+
+	s.silent(t)
+}
+
+// TestWatchdogTimeoutsAfterTheStartPeriodRestart is the linear case: a run whose
+// probes all time out leaves its start period on the watchdog's clock, is
+// written unhealthy once its retries are spent, and goes to its restart policy.
+func TestWatchdogTimeoutsAfterTheStartPeriodRestart(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.retries = 2
+	cfg.startPeriod = time.Second
+	inst := s.add("web-1", cfg)
+	instanceStarted(inst, time.Now().Add(-time.Minute))
+	inst.status = shared.HealthStatusStarting
+
+	s.running(t, inst, instanceChecking, time.Now().Add(-time.Second))
+	s.run()
+	require.False(t, inst.inRestart, "the start period is over")
+	require.Equal(t, 1, inst.failures)
+	require.Equal(t, instanceActionCheck, inst.action)
+	s.silent(t)
+
+	s.running(t, inst, instanceChecking, time.Now().Add(-time.Second))
+	s.run()
+	require.Equal(t, instanceActionRestart, inst.action)
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusUnhealthy, res.status)
+}
