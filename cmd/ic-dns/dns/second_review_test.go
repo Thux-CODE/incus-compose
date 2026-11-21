@@ -387,6 +387,25 @@ func TestSecondDrainWhenReplicaHasTheServiceName(t *testing.T) {
 	require.ElementsMatch(t, []string{"10.0.0.2", "10.0.0.3"}, ips, "put back")
 }
 
+func TestSecondEmptyServedNetworkControl(t *testing.T) {
+	t.Skip("contested, as TestReviewPeerCallerOnEmptyServedNetwork: a querier is placed " +
+		"by the networks served instances bring, and the owed reads of this round track " +
+		"those networks only; placing a querier on a network no served instance is on " +
+		"still takes the enricher's network inventory down the chain and a peering read " +
+		"of every network in it")
+
+	r := runPeered(t, hubIncus(), Suffix("incus"))
+	defer r.stop(t)
+	f := hubFleet()
+	r.feed(t, f["pvlab1/django-1"].Event, warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Eventually(t, r.p.view.Ready, time.Second, time.Millisecond)
+	a := &adapter{chain: r.p.view}
+	code, _ := resolve(a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.99")
+	r.feed(t, warm(f["default/mgmt"].Event))
+	answersWithin(t, r, "django-1.pvlab1.incus.", "10.146.11.99", dns.RcodeSuccess, "same subnet and querier")
+	require.Equal(t, "NOERROR", dns.RcodeToString[code])
+}
+
 // in stamps an event with the stream session the source minted it in.
 func in(session uint64, ev *iutil.Event) *iutil.Event { return ev.WithSession(session) }
 
