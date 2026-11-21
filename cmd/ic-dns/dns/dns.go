@@ -644,28 +644,46 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// A lost stream drops no record, but nothing is confirming them any more,
 	// which is what unready says, until a round has ended again. The view stays
 	// warm: what it holds is as good as any other server's.
+	//
+	// Whether the stream is up is told by the sessions the events carry, not
+	// by which control arrived last: a control dropped on a full inbox goes on
+	// past this fold, out of order with what is queued, and one lost that way
+	// must not hold the view down for the whole session.
+	session := ev.Session()
+
 	if ev.Action() == iutil.ActionDisconnected {
+		// The end of a session older than the one already up: a leftover.
+		if session < p.state.upSession {
+			return
+		}
+
 		p.view.SetHealthy(false)
 		p.state.fresh = false
 		p.state.lost = ev.At()
 		p.state.down = true
+		p.state.downSession = session
 
 		return
 	}
 
 	// Back, after events nobody heard. What a round ended while it was down
-	// said is as old as the stream's loss - the source takes commands in its
-	// backoff - so the round that counts is the one the enricher starts now.
-	// A first connection follows no loss, and takes nothing back.
+	// said is as old as the stream's loss, so the round that counts is the one
+	// the enricher starts now. A first connection follows no loss, and takes
+	// nothing back.
 	if ev.Action() == iutil.ActionConnected {
-		if p.state.down {
-			p.view.SetHealthy(false)
-			p.state.fresh = false
-			p.state.lost = ev.At()
-			p.state.down = false
+		if session < p.state.upSession {
+			return
 		}
 
+		p.reconnected(ev)
+
 		return
+	}
+
+	// Any event of a session newer than the one that went says the stream is
+	// back, the connected that said so having been dropped on the way.
+	if p.state.down && session > p.state.downSession {
+		p.reconnected(ev)
 	}
 
 	// Only an end that came the whole way in order. One dropped on the way
@@ -686,11 +704,15 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 	// The same end arriving another way: anything stamped warm that was not
 	// dropped walked the chain behind it, so the round it closed is folded by
-	// now even if the sweep-end itself was lost. Stamped before the stream was
-	// lost, it is a debounced leftover and says nothing about the stream since.
-	// The rule http follows for /ready, so the two agree. Nothing else -
-	// a failed read, or a cold stamp after the round - takes it back.
-	if !p.state.fresh && !p.state.down && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
+	// now even if the sweep-end itself was lost. One from the session up now
+	// can only be stamped warm after that session's round (the source takes
+	// an end of round in its own session alone); one with no session is one
+	// stamped after the stream was last lost, or it is a debounced leftover
+	// and says nothing about the stream since. The rule http follows for
+	// /ready, so the two agree. Nothing else - a failed read, or a cold stamp
+	// after the round - takes it back.
+	if !p.state.fresh && !p.state.down && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm &&
+		((session > 0 && session == p.state.upSession) || (session == 0 && ev.At().After(p.state.lost))) {
 		p.rounded()
 	}
 
@@ -728,6 +750,19 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	}
 
 	p.state.pending[key] = inst
+}
+
+// reconnected takes a stream back up in ev's session: nothing confirms what
+// is served until that session's round has ended.
+func (p *Plugin) reconnected(ev *iutil.Event) {
+	if p.state.down {
+		p.view.SetHealthy(false)
+		p.state.fresh = false
+		p.state.lost = ev.At()
+		p.state.down = false
+	}
+
+	p.state.upSession = ev.Session()
 }
 
 // rounded takes the end of a round. Healthy is set here, and by the first read

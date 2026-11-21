@@ -57,8 +57,10 @@ type state struct {
 	fresh bool
 	lost  time.Time
 
-	// down is the stream having been lost and not come back yet.
-	down bool
+	// down is the stream having been lost and not come back yet; downSession
+	// is the session that went, upSession the newest one seen come up.
+	down                   bool
+	downSession, upSession uint64
 
 	// complete is a round having ended in this run: every zone holds the
 	// whole fleet from then on, so whatever changes in one is a change a

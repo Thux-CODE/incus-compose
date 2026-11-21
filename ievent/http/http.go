@@ -64,6 +64,11 @@ type Plugin struct {
 	// debounced leftover - is not taken for one since.
 	lost time.Time
 
+	// down is the stream having gone in downSession and not come back;
+	// upSession is the newest session seen come up. Under mu.
+	down                   bool
+	downSession, upSession uint64
+
 	// mu orders the decisions on ready against each other. Handle has more
 	// than one caller at once - a plugin before this one hands on what it
 	// drops from its own caller's goroutine while its fold hands on the rest -
@@ -142,26 +147,45 @@ func (p *Plugin) decide(ev *iutil.Event) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	// The order controls arrive in is not the order they were minted in: one
+	// a plugin before this dropped is handed on at once, ahead of what it
+	// still holds. The session each carries is what tells a leftover from
+	// news.
+	session := ev.Session()
+
 	switch ev.Action() {
 	case iutil.ActionConnected:
 		// A stream coming up is one whose events before it went to nobody,
 		// which is why the enricher reads the fleet again: nothing before it
 		// confirms what is served, a round that ended while it was down
-		// included - the source takes commands during its backoff too.
-		p.connected.Store(true)
-		p.ready.Store(false)
-		p.lost = ev.At()
+		// included.
+		if session >= p.upSession {
+			p.up(ev)
+		}
 
 		return
 
 	case iutil.ActionDisconnected:
 		// The one thing that takes readiness back: nothing confirms what is
-		// served until a round has been all the way round again.
+		// served until a round has been all the way round again. Unless it
+		// ends a session older than the one already up.
+		if session < p.upSession {
+			return
+		}
+
 		p.connected.Store(false)
 		p.ready.Store(false)
 		p.lost = ev.At()
+		p.down = true
+		p.downSession = session
 
 		return
+	}
+
+	// An event of a session newer than the one that went: the stream is back,
+	// whatever happened to the connected that said so.
+	if p.down && session > p.downSession {
+		p.up(ev)
 	}
 
 	// Cold says when an event was minted, not what is served now: a read that
@@ -169,10 +193,25 @@ func (p *Plugin) decide(ev *iutil.Event) {
 	// carries the stamp it was made with, and a round that has ended stays
 	// ended. Only a warm event turns readiness on - and only one nobody
 	// dropped, since a dropped one was folded by nobody before here and may
-	// have overtaken what it follows.
-	if ev.ChainState() == iutil.ChainWarm && ev.Err() == nil && ev.At().After(p.lost) {
+	// have overtaken what it follows. One of the session up now is warm only
+	// after that session's round; one with no session counts if it was
+	// stamped after the stream was last lost.
+	if p.down || ev.ChainState() != iutil.ChainWarm || ev.Err() != nil {
+		return
+	}
+
+	if (session > 0 && session == p.upSession) || (session == 0 && ev.At().After(p.lost)) {
 		p.ready.Store(true)
 	}
+}
+
+// up takes the stream as up in ev's session, not ready until its round ends.
+func (p *Plugin) up(ev *iutil.Event) {
+	p.connected.Store(true)
+	p.ready.Store(false)
+	p.lost = ev.At()
+	p.down = false
+	p.upSession = ev.Session()
 }
 
 // Run serves until ctx is canceled; it blocks, so main owns the goroutine.
