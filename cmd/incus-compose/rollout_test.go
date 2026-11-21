@@ -70,8 +70,10 @@ type fakeRollout struct {
 	onHealth func(status string)
 	onRetire func()
 
-	// retireErrs are returned by the retires in turn, before any acts.
-	retireErrs []error
+	// retireErrs are returned by the retires in turn, before any acts;
+	// killAfterStop is what each retire was asked, in turn.
+	retireErrs    []error
+	killAfterStop []bool
 
 	// fail makes the operation an event names fail; healthErrs fails that
 	// many reads of a new replica's health before it answers.
@@ -262,7 +264,9 @@ func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error 
 	return nil
 }
 
-func (f *fakeRollout) retire(ctx context.Context, index int, stopped bool, _ time.Time) error {
+func (f *fakeRollout) retire(ctx context.Context, index int, stopped bool, _ time.Time, killAfterStop bool) error {
+	f.killAfterStop = append(f.killAfterStop, killAfterStop)
+
 	if f.onRetire != nil {
 		f.onRetire()
 	}

@@ -98,7 +98,11 @@ A stop goes by the round of reads right before it: one that would be sent more
 than 10 seconds after that round began (checked inside the client, after the
 waits before the stop request), or a victim ic-healthd starts again after its
 stop, even right after a graceful stop that went through, takes a new round
-first, three times at most; no kill goes out on an old round. Whenever no stop
+first, three times at most; no kill goes out on an old round. On the try that
+follows such a round, a victim that reads running again after its graceful
+stop (as when the stop returns on a passing `Error` read) is killed every 5
+seconds while it reads running, up to 30, as one whose stop ran out, if the
+round is still fresh; else a new round decides. Whenever no stop
 went through, the third try included, the old replica is put back into the
 service name and its health checking resumed (`user.healthcheck.stopped`
 cleared), and what went wrong on each try is reported. An interrupt is seen up

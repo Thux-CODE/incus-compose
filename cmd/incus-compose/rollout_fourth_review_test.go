@@ -169,7 +169,8 @@ type fourthReviewStopDeadline struct {
 	notAfter time.Time
 }
 
-func (f *fourthReviewStopDeadline) retire(_ context.Context, _ int, _ bool, notAfter time.Time) error {
+// Adapted: retire also takes killAfterStop since a later change.
+func (f *fourthReviewStopDeadline) retire(_ context.Context, _ int, _ bool, notAfter time.Time, _ bool) error {
 	f.notAfter = notAfter
 	return io.EOF
 }

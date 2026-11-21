@@ -114,7 +114,12 @@ type rolloutOps interface {
 	// goes by is still fresh (errRolloutStale), and once: one that ic-healthd
 	// starts again after its stop is left for a new round
 	// (errRolloutRestarted).
-	retire(ctx context.Context, index int, stopped bool, notAfter time.Time) error
+	//
+	// With killAfterStop, the try follows one that found it started again
+	// after its stop, and the round it goes by was made since: a victim that
+	// reads running again after a graceful stop that went through is then
+	// killed, within notAfter, as one whose stop ran out is.
+	retire(ctx context.Context, index int, stopped bool, notAfter time.Time, killAfterStop bool) error
 
 	// discard deletes a new replica that did not become healthy, or with keep
 	// leaves it stopped.
@@ -888,7 +893,7 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 				undrain, rolloutTakeAwayLapsed(ctx, ops, plan, slots, reads, victim))
 		}
 
-		err = ops.retire(context.WithoutCancel(ctx), victim, true, time.Time{})
+		err = ops.retire(context.WithoutCancel(ctx), victim, true, time.Time{}, false)
 		if err != nil {
 			return fmt.Errorf("%s: retiring: %w", name, err)
 		}
@@ -956,10 +961,19 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	// A try put off is kept with whatever went wrong with it, the restart
 	// policy put back included, and the last one put off puts the victim
 	// back: no stop went through.
+	//
+	// Once a try found the victim started again after a graceful stop, the
+	// next round is the fresh decision a kill may go by: as when Stop returns
+	// on a passing Error read with the instance still running.
 	var putOff error
 
+	killAfterStop := false
+
 	for attempt := 1; ; attempt++ {
-		err = rolloutFinalRetire(ctx, ops, plan, slots, victim, byHand, putBack)
+		err = rolloutFinalRetireKill(ctx, ops, plan, slots, victim, byHand, putBack, killAfterStop)
+		if errors.Is(err, errRolloutRestarted) {
+			killAfterStop = true
+		}
 
 		again := errors.Is(err, errRolloutStale) || errors.Is(err, errRolloutRestarted)
 
@@ -983,6 +997,12 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 // rolloutFinalRetire is the last round of reads before a drained victim's
 // stop, and the stop if the round allows it.
 func rolloutFinalRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica, victim int, byHand bool, putBack func() error) error {
+	return rolloutFinalRetireKill(ctx, ops, plan, slots, victim, byHand, putBack, false)
+}
+
+// rolloutFinalRetireKill is rolloutFinalRetire, for a try that may kill a
+// victim read running again after a graceful stop (rolloutOps.retire).
+func rolloutFinalRetireKill(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica, victim int, byHand bool, putBack func() error, killAfterStop bool) error {
 	r := slots[victim]
 	name := plan.Name(victim)
 
@@ -1018,7 +1038,7 @@ func rolloutFinalRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, s
 
 	// The interrupt is seen up to the stop being sent, which the retire
 	// checks; an interrupt that stopped nothing puts the victim back.
-	err = ops.retire(ctx, victim, false, readAt.Add(rolloutScanFresh))
+	err = ops.retire(ctx, victim, false, readAt.Add(rolloutScanFresh), killAfterStop)
 	if err != nil && ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		return errors.Join(fmt.Errorf("interrupted before %s was stopped: %w", name, err), putBack())
 	}

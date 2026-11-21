@@ -1174,7 +1174,7 @@ func (r *rolloutRunner) sameInstance(ctx context.Context, index int) (*incusApi.
 	return &info.Instance, nil
 }
 
-func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, notAfter time.Time) error {
+func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, notAfter time.Time, killAfterStop bool) error {
 	readCtx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
 	info, err := r.sameInstance(readCtx, index)
 
@@ -1191,7 +1191,7 @@ func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, not
 	// Stopped once: started again by ic-healthd, it is the rollout's to read
 	// the others again before a second stop (errRolloutRestarted).
 	if !stopped {
-		return r.takeDown(ctx, index, true, false, 1, notAfter)
+		return r.takeDown(ctx, index, true, false, 1, notAfter, killAfterStop)
 	}
 
 	// One read stopped serves nothing and was not drained: it is deleted only
@@ -1281,7 +1281,7 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 	}
 
 	// One kept for a look is let shut down; one going away is killed.
-	return r.takeDown(ctx, index, keep, keep, rolloutTakeDownAttempts, time.Time{})
+	return r.takeDown(ctx, index, keep, keep, rolloutTakeDownAttempts, time.Time{}, false)
 }
 
 // takeDown stops a replica, gracefully within its grace period or not, and
@@ -1289,7 +1289,7 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 //
 // It is stopped up to attempts times when ic-healthd starts it again; past
 // notAfter, when not zero, it is not stopped at all (errRolloutStale).
-func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool, attempts int, notAfter time.Time) error {
+func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool, attempts int, notAfter time.Time, killAfterStop bool) error {
 	inst := r.instances[index]
 
 	// Each read is bounded, so a read that hangs does not hold up the stop's
@@ -1369,7 +1369,21 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 			return unmark(errRolloutStale)
 		}
 
-		err = rolloutStop(context.WithoutCancel(ctx), shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery)
+		// Read running right after a graceful stop that went through: killed
+		// only on a round made after the previous try saw that, and still
+		// fresh; else a new round decides.
+		afterStop := func() error {
+			switch {
+			case !killAfterStop:
+				return fmt.Errorf("%w after its stop", errRolloutRestarted)
+			case !notAfter.IsZero() && time.Now().After(notAfter):
+				return errRolloutStale
+			default:
+				return nil
+			}
+		}
+
+		err = rolloutStopAfter(context.WithoutCancel(ctx), shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery, afterStop)
 		if errors.Is(err, errRolloutStale) {
 			return unmark(err)
 		}
@@ -1476,6 +1490,16 @@ func rolloutRunning(s incusApi.StatusCode) bool {
 // So it is killed whenever it reads running, again every killEvery while it
 // does, and waited for in between, up to settle.
 func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) error, status func(ctx context.Context) (incusApi.StatusCode, error), graceful bool, settle, poll, killEvery time.Duration) error {
+	return rolloutStopAfter(ctx, shutdown, kill, status, graceful, settle, poll, killEvery, func() error {
+		return fmt.Errorf("%w after its stop", errRolloutRestarted)
+	})
+}
+
+// rolloutStopAfter is rolloutStop, with what to do when a graceful stop went
+// through and the instance reads running right after it: afterStop returns
+// the error that ends the stop there, or nil to kill it, every killEvery
+// while it reads running and up to settle, as for a stop that ran out.
+func rolloutStopAfter(ctx context.Context, shutdown, kill func(ctx context.Context) error, status func(ctx context.Context) (incusApi.StatusCode, error), graceful bool, settle, poll, killEvery time.Duration, afterStop func() error) error {
 	var errs []error
 
 	// A graceful stop that went through and an instance read running right
@@ -1512,7 +1536,12 @@ func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) e
 		}
 
 		if err == nil && rolloutRunning(s) && stoppedOK && lastKill.IsZero() {
-			return fmt.Errorf("%w after its stop", errRolloutRestarted)
+			afterErr := afterStop()
+			if afterErr != nil {
+				return afterErr
+			}
+
+			stoppedOK = false
 		}
 
 		if err == nil && rolloutRunning(s) && (lastKill.IsZero() || time.Since(lastKill) >= killEvery) {

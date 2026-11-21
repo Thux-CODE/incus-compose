@@ -177,8 +177,8 @@ form.
   replica it keeps is put back too, and the new ones that do not serve are
   taken away. The freshness of the round a stop goes by counts from when the
   round began, and is checked in the client right before the stop request; a
-  victim read running right after a graceful stop is not killed but read
-  again. An interrupt is seen up to the stop request. No delete goes out
+  victim read running right after a graceful stop is not killed on that
+  round, but on the next try's, still fresh, as one whose stop ran out. An interrupt is seen up to the stop request. No delete goes out
   without the instance's uuid known and read again right before it.
   (by @sandroden)
 
