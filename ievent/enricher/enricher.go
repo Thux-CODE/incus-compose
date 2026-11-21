@@ -684,10 +684,11 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	switch {
 	case landed:
 		delete(p.unread, c.key)
-		defer p.endIfRead(ctx)
 	case p.state.instance(c.project, c.name) == nil:
 		p.unread[c.key] = subject{project: c.project, instance: c.name}
 	}
+
+	defer p.endIfRead(ctx)
 
 	// Before the event it made below, which is then compared against what they
 	// filed.
@@ -885,12 +886,27 @@ func (p *Plugin) forgetUnread(ctx context.Context, keys ...string) {
 // endIfRead announces the end of a run held at its end, once nothing it waits
 // on is left: its project reads, and the instances whose read failed unless
 // the grace for them is over.
+//
+// The grace is armed here, the first time a run held at its end has anything
+// unread - at its end, or when a read fails after it - so no wait on unread
+// goes untimed.
 func (p *Plugin) endIfRead(ctx context.Context) {
-	if !p.sweepEnding || p.reads.owes() > 0 {
+	if !p.sweepEnding {
 		return
 	}
 
 	if len(p.unread) > 0 && !p.graceOver {
+		if p.endGrace == nil {
+			p.endGrace = time.After(p.opts.roundGrace)
+
+			p.logger.Info("the run waits on instances whose read failed",
+				"plugin", name, "instances", len(p.unread), "grace", p.opts.roundGrace)
+		}
+
+		return
+	}
+
+	if p.reads.owes() > 0 {
 		return
 	}
 

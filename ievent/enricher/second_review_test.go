@@ -3,6 +3,7 @@ package enricher
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"testing"
 	"time"
@@ -79,6 +80,50 @@ func TestSecondOwedDeleteByTheListing(t *testing.T) {
 
 	require.True(t, deleted, "a listing without the instance announced no delete")
 	require.Empty(t, p.owedDelete)
+}
+
+// TestSecondReadOutsideListingCannotHoldRound: the listings are done and one
+// project read is still out when a live read of an instance no listing named
+// fails. The run now waits on it - with the grace armed, so it ends anyway.
+func TestSecondReadOutsideListingCannotHoldRound(t *testing.T) {
+	p := New(slog.Default(), func(o *options) { o.roundGrace = 50 * time.Millisecond })
+	p.args.Next = func(*iutil.Event) {}
+	p.reads.readProject = func(_ context.Context, name string) (*api.Project, string, error) {
+		return &api.Project{Name: name}, "", nil
+	}
+	require.NoError(t, p.reads.start(3))
+	t.Cleanup(p.reads.stop)
+	raised := make(chan iutil.Command, 4)
+	p.args.CommandOut = raised
+	p.reads.flush(t.Context())
+	p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+		return nil, nil, errors.New("timeout")
+	}
+	// One listed project read is finished by the worker, and awaits settlement.
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionProjects, names: []string{"p", "q"}})
+	proj := <-p.reads.results
+	p.settleRead(t.Context(), proj)
+	other := <-p.reads.results
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: proj.call.project})
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: other.call.project})
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone})
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, proj.call.project, "live", ""))
+	p.settleRead(t.Context(), <-p.reads.results)
+	p.settleRead(t.Context(), other)
+	select {
+	case cmd := <-raised:
+		require.Equal(t, iutil.ActionSweepEnd, cmd.Action)
+	default:
+		require.NotNil(t, p.endGrace, "round waits, with no grace timer armed")
+	}
+
+	// And the grace is what ends it, the read failing for good.
+	<-p.endGrace
+	p.endGrace = nil
+	p.graceOver = true
+	p.endIfRead(t.Context())
+	require.Equal(t, iutil.ActionSweepEnd, (<-raised).Action)
 }
 
 // TestSecondRoundEndNamesItsSession: the run a connected restarts ends naming

@@ -147,13 +147,6 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// long as the grace: its retry is what ends the run.
 		p.sweepEnding = true
 
-		if len(p.unread) > 0 && p.endGrace == nil && !p.graceOver {
-			p.endGrace = time.After(p.opts.roundGrace)
-
-			p.logger.Info("the run waits on instances whose read failed",
-				"plugin", name, "instances", len(p.unread), "grace", p.opts.roundGrace)
-		}
-
 		p.endIfRead(ctx)
 
 	case sweepActionFailed:
