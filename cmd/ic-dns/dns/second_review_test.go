@@ -192,6 +192,28 @@ func TestSecondColdIXFRAndReplayConfirmation(t *testing.T) {
 	require.Equal(t, uint32(42), c.p.state.serials[zone].Serial, "an unchanged confirmation inside the replay window")
 }
 
+// TestSecondPeeringCompletesWhileDisconnected: the round ends with the stream
+// up, the stream goes, then the peering read covering every network lands.
+// The zones are whole: warm, answered clamped, not ready - and ready again
+// with the round after the reconnection.
+func TestSecondPeeringCompletesWhileDisconnected(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true), ColdAnswers(false))
+	c.p.fold(event(iutil.ActionConnected, "", ""))
+	c.p.fold(hubFleet()["default/mgmt"].Event)
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	ask := <-c.p.peerAsk
+	c.p.fold(event(iutil.ActionDisconnected, "", ""))
+	c.p.peered(peerRead{keys: ask.keys, gen: ask.gen, peers: map[string][]string{}})
+	require.True(t, c.p.state.complete && c.p.peeringKnown())
+	require.False(t, c.p.view.Ready())
+	code, _ := resolve(c.a, "mgmt.default.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "NOERROR", dns.RcodeToString[code], "completed fleet and peer read should allow a known name with reduced TTL")
+
+	c.p.fold(event(iutil.ActionConnected, "", ""))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.True(t, c.p.view.Ready(), "the reconnection's round ended")
+}
+
 // in stamps an event with the stream session the source minted it in.
 func in(session uint64, ev *iutil.Event) *iutil.Event { return ev.WithSession(session) }
 

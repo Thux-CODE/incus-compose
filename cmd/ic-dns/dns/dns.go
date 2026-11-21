@@ -801,7 +801,25 @@ func (p *Plugin) rounded() {
 		return
 	}
 
-	p.view.SetHealthy(true)
+	p.settle()
+}
+
+// settle turns the view warm and healthy as far as what is known allows. Warm
+// is a round having ended in this run with the peering known, and is never
+// taken back; healthy is that and, besides, a round having ended since the
+// stream was last lost. Apart, because the peering can become known while the
+// stream is down: the zones are whole then, and answered from - clamped,
+// healthy or not - rather than failed as cold for the whole outage.
+func (p *Plugin) settle() {
+	if !p.state.complete || !p.settlePeering() {
+		return
+	}
+
+	p.view.SetWarm()
+
+	if p.state.fresh {
+		p.view.SetHealthy(true)
+	}
 }
 
 // announce raises dns/ready or dns/not-ready where the view's readiness moved

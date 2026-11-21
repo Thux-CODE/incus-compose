@@ -444,10 +444,10 @@ func (p *Plugin) peerOwedOver() {
 // not been read yet, now that it has - after what the read moved was
 // published, so warm never answers from the table before it.
 func (p *Plugin) warmOnPeering() {
-	if p.peersRead.Load() || !p.state.fresh || !p.settlePeering() {
+	if p.peersRead.Load() {
 		return
 	}
 
-	p.view.SetHealthy(true)
+	p.settle()
 	p.announce()
 }

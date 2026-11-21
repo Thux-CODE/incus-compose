@@ -135,6 +135,11 @@ func (v *ECSView) SetHealthy(healthy bool) {
 	}
 }
 
+// SetWarm turns the view warm without saying the source is healthy: the zones
+// are whole, but nothing is confirming them right now - a stream that went
+// after they were - so answers stay clamped and Ready stays false.
+func (v *ECSView) SetWarm() { v.warm.Store(true) }
+
 // trusts says whether a query from addr is exempt from the filter. The address
 // is the one the packet arrived from: an ECS option is what a querier claims
 // about itself, and trust may not rest on a claim.
