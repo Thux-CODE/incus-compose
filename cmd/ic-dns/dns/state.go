@@ -368,6 +368,12 @@ func (s *state) peerKeys(id ecs_view.ViewID) []string {
 func (s *state) setPeers(next map[string][]string, ttl uint32) (changed, touched bool) {
 	keys := changedPeers(s.peers, next)
 	if len(keys) == 0 {
+		// The same answers, but a peering held where none was: nil is no
+		// peering read, which the cold store tells from one read empty.
+		if s.peers == nil {
+			s.peers = next
+		}
+
 		return false, false
 	}
 

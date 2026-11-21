@@ -497,7 +497,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 	// a round of reads per served project later. The read corrects it, and
 	// until it has landed what this answers through a peer is as good as the
 	// replayed records themselves.
-	if p.cfg.PeerViews && len(peers) > 0 {
+	// An empty one included: a fleet the previous run read with nothing peered
+	// is as known as one with peers, and a read failing now keeps it known.
+	if p.cfg.PeerViews && peers != nil {
 		p.state.setPeers(peers, p.cfg.TTL)
 		p.peersRestored = true
 		p.logger.Info("restored the network peering from the cold store", "peers", describePeers(peers))

@@ -333,8 +333,16 @@ func (p *Plugin) peered(read peerRead) {
 	// waiting on, the same table as the one restored included.
 	defer p.warmOnPeering()
 
+	known := p.state.peers != nil
+
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if !changed {
+		// The first read finding nothing peered is a peering known all the
+		// same, and the next start restores it as one.
+		if !known {
+			p.storeCold()
+		}
+
 		return
 	}
 

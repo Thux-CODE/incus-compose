@@ -134,6 +134,52 @@ func TestReviewReplaySpillKeepsOrder(t *testing.T) {
 	require.Equal(t, []string{fmt.Sprintf("10.0.0.%d", n)}, answered(t, snap, fmt.Sprintf("i%d.shop.incus.", n-1), "10.0.0.200"))
 }
 
+// TestReviewKnownEmptyPeeringSurvivesRestart: the previous run read the
+// peering and found nothing peered. Restored, that counts as known the way a
+// peering with pairs in it does, so a read failing now keeps nothing cold.
+func TestReviewKnownEmptyPeeringSurvivesRestart(t *testing.T) {
+	seed, err := encodeCold(map[string]zoneSerial{}, map[string][]string{})
+	require.NoError(t, err)
+	f := hubIncus()
+	f.down = errors.New("read deadline exceeded")
+	r := runPeered(t, f, Suffix("incus"), ColdMemory(seed))
+	defer r.stop(t)
+	r.feed(t, append(hubFleetEvents(true), warm(event(iutil.ActionSweepEnd, "", "")))...)
+	answersWithin(t, r, "mgmt.default.incus.", "10.146.11.6", dns.RcodeSuccess, "replay folded")
+	require.NoError(t, r.p.PeeringReady())
+}
+
+// TestReviewUnknownPeeringStaysUnknown: a file from before the peering was
+// stored, or one written before any read, holds no peering - and an empty
+// read is what makes one known for the next start.
+func TestReviewUnknownPeeringStaysUnknown(t *testing.T) {
+	for _, raw := range []string{
+		`{"version":1,"serials":{}}`,
+		`{"version":1,"serials":{},"peers":{}}`,
+	} {
+		_, peers, err := decodeCold([]byte(raw))
+		require.NoError(t, err)
+		require.Nil(t, peers, raw)
+	}
+
+	b, err := encodeCold(map[string]zoneSerial{}, nil)
+	require.NoError(t, err)
+	_, peers, err := decodeCold(b)
+	require.NoError(t, err)
+	require.Nil(t, peers)
+
+	c := newColdServer(t, Suffix("incus"), PeerViews(true), ColdMemory(nil))
+	c.p.fold(enriched(incusapi.EventLifecycleInstanceUpdated, "shop", "web", "10.0.0.2"))
+	c.p.write()
+	c.p.peered(peerRead{keys: c.p.state.peerTargets(), peers: map[string][]string{}})
+
+	encoded, err := encodeCold(c.p.state.serials, c.p.state.peers)
+	require.NoError(t, err)
+	_, peers, err = decodeCold(encoded)
+	require.NoError(t, err)
+	require.NotNil(t, peers, "a read finding nothing peered is a peering known")
+}
+
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
 // ended and folded after it is stamped cold, and still changes a zone already
 // served whole. Its serial steps, or a secondary keeps the old address.

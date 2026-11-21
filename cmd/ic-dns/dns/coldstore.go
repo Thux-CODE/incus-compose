@@ -38,6 +38,12 @@ type coldState struct {
 	// Peers is which network each network is peered with, as setPeers takes
 	// it. Absent or empty is no peering.
 	Peers map[string][]string `json:"peers,omitempty"`
+
+	// PeersKnown says Peers is a peering that was read, empty included: a
+	// fleet where nothing is peered is as known as one where something is,
+	// and has to count as known after a restart the same way. Absent, as in a
+	// file from before it, an empty Peers is a peering nobody read.
+	PeersKnown bool `json:"peers_known,omitempty"`
 }
 
 type coldStore struct {
@@ -215,13 +221,17 @@ func (c *coldStore) load() (map[string]zoneSerial, map[string][]string) {
 }
 
 // encodeCold renders the serials each zone was last published under, and the
-// peering it was published under; nil peers stores none.
+// peering it was published under; nil peers stores none, and an empty one a
+// peering read with nothing in it.
 func encodeCold(serials map[string]zoneSerial, peers map[string][]string) ([]byte, error) {
-	return json.Marshal(coldState{Version: coldVersion, Serials: serials, Peers: peers})
+	return json.Marshal(coldState{Version: coldVersion, Serials: serials, Peers: peers, PeersKnown: peers != nil})
 }
 
 // decodeCold reads a store back. A file of another version is not an error and
 // not a migration either: it is ignored, and the fleet is read again.
+//
+// The peering comes back nil where none was known, and empty where one was
+// read with nothing in it.
 func decodeCold(b []byte) (map[string]zoneSerial, map[string][]string, error) {
 	var state coldState
 
@@ -232,6 +242,14 @@ func decodeCold(b []byte) (map[string]zoneSerial, map[string][]string, error) {
 
 	if state.Version != coldVersion {
 		return nil, nil, nil
+	}
+
+	if !state.PeersKnown && len(state.Peers) == 0 {
+		return state.Serials, nil, nil
+	}
+
+	if state.Peers == nil {
+		state.Peers = map[string][]string{}
 	}
 
 	return state.Serials, state.Peers, nil
