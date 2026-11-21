@@ -117,6 +117,8 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		p.state.pruneNetworks(msg.project, listed)
 
 	case sweepActionInstances:
+		p.listed[msg.project] = true
+
 		// Through accept, which is where a delete drops the instance and its
 		// archive entry: a name Incus no longer lists is gone the same way one
 		// it announced is, and nothing downstream can tell them apart.
@@ -179,6 +181,7 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// with an instance whose read failed and that nothing holds, for as
 		// long as the grace: its retry is what ends the run.
 		p.sweepEnding = true
+		p.brokenSince = time.Time{}
 
 		p.endIfRead(ctx)
 
@@ -188,7 +191,58 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		}
 		p.logger.Warn("the run could not read part of the fleet, serving what is held",
 			"plugin", name, "err", msg.err)
+
+	case sweepActionBroken:
+		if p.opts.Metrics {
+			sweepsTotal.WithLabelValues("failed").Inc()
+		}
+		p.logger.Warn("the run could not read part of the fleet, serving what is held",
+			"plugin", name, "err", msg.err)
+
+		p.endBroken(ctx, msg.err)
 	}
+}
+
+// endBroken ends a run that broke on listings, where they have been breaking
+// for roundGrace since the first run that broke, and what they would have
+// listed is known otherwise. A listing that fails for good would otherwise
+// hold the chain cold, and every miss SERVFAIL, for good.
+//
+// Known is: a project's networks always, since a run lists them only to read
+// them again and the inventory held is what instances are placed by; a
+// project's instances, and the projects, only where a run in this process
+// listed them or the cold store put them back. A first start that has never
+// listed a project's instances has nothing to answer from but the forwarder,
+// and stays cold: SERVFAIL is the answer there.
+func (p *Plugin) endBroken(ctx context.Context, err error) {
+	if p.brokenSince.IsZero() {
+		p.brokenSince = time.Now()
+	}
+
+	failures, listings := listingFailures(err)
+	if !listings || time.Since(p.brokenSince) < p.opts.roundGrace {
+		return
+	}
+
+	for _, f := range failures {
+		known := f.what == listedNetworks ||
+			(f.what == listedInstances && p.listed[f.project]) ||
+			(f.what == listedProjects && len(p.listed) > 0)
+		if !known {
+			return
+		}
+	}
+
+	for _, f := range failures {
+		p.logger.Warn("ending the run with listings that keep failing",
+			"plugin", name, "listing", f.what, "project", f.project, "err", f.err, "after", p.opts.roundGrace)
+	}
+
+	// The next run that breaks waits a whole grace of its own.
+	p.brokenSince = time.Time{}
+	p.sweepEnding = true
+
+	p.endIfRead(ctx)
 }
 
 // unreadOutside is the keys of the instances whose read failed that keep does

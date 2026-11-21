@@ -432,7 +432,9 @@ view turns warm with that hole, and the name is `NXDOMAIN` until a read lands.
 A round that fails outright - `GetProjectNames` timing out, say - raises no
 sweep-end, and is tried again after a backoff of 1 s doubling up to 30 s: the
 view stays cold, every miss `SERVFAIL` but those the forwarder answers
-`NOERROR`, until one reaches its end.
+`NOERROR`, until one reaches its end. One that keeps breaking on a listing
+alone ends after a minute where there is an inventory to answer from (see
+[[developer/ievent/enricher|enricher]]); a first start with none stays cold.
 
 The query path loads warm before the snapshot. The fold publishes the snapshot
 that ends the round and only then turns warm, so a query reading warm answers

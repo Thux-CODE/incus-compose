@@ -114,6 +114,8 @@ func TestSecondReadOutsideListingCannotHoldRound(t *testing.T) {
 	select {
 	case cmd := <-raised:
 		require.Equal(t, iutil.ActionSweepEnd, cmd.Action)
+
+		return
 	default:
 		require.NotNil(t, p.endGrace, "round waits, with no grace timer armed")
 	}
@@ -209,6 +211,101 @@ func TestSecondInstanceCreatedAfterListing(t *testing.T) {
 	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: "p", at: time.Now()})
 	require.Equal(t, []string{api.EventLifecycleInstanceStarted, api.EventLifecycleInstanceDeleted}, events,
 		"a listing after the read leaves it out")
+}
+
+// withGrace sets the grace a run held on failures waits, failed reads and
+// listings alike.
+func withGrace(d time.Duration) Option { return func(o *options) { o.roundGrace = d } }
+
+// brokenFleet is one project with one instance, its networks of its own.
+func brokenFleet() *testlib.Project {
+	fleet := testlib.NewProject("p", 1, 1)
+	fleet.Project.Config[iutil.FeaturesNetworks] = "true"
+
+	return fleet
+}
+
+// TestBrokenNetworkListingEndsAfterTheGrace: a network listing that fails for
+// good breaks every run, and the run is retried; once a grace has passed since
+// the first that broke, the run ends with the inventory there is - and the
+// next one that breaks waits a whole grace of its own.
+func TestBrokenNetworkListingEndsAfterTheGrace(t *testing.T) {
+	h := newFixture(t, sweepRetry(20*time.Millisecond), withGrace(200*time.Millisecond))
+	h.mu.Lock()
+	h.networksErr = errors.New("network list unavailable")
+	h.mu.Unlock()
+
+	start := time.Now()
+	h.setFleet(brokenFleet())
+	untilSweepEnd(t, h, 5*time.Second)
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "ended before the grace")
+
+	first := time.Now()
+	untilSweepEnd(t, h, 5*time.Second)
+	require.GreaterOrEqual(t, time.Since(first), 200*time.Millisecond, "the next run's grace did not start again")
+}
+
+// TestBrokenNetworkListingThatRecoversEndsAtOnce: the listing fails once and
+// then answers. The retry that lists it ends the run, long before the grace.
+func TestBrokenNetworkListingThatRecoversEndsAtOnce(t *testing.T) {
+	h := newFixture(t, sweepRetry(20*time.Millisecond), withGrace(time.Minute))
+	h.mu.Lock()
+	h.networksErr = errors.New("network list unavailable")
+	h.mu.Unlock()
+
+	before := h.lists.Load()
+	h.setFleet(brokenFleet())
+	require.Eventually(t, func() bool { return h.lists.Load() >= before+2 }, 2*time.Second, time.Millisecond,
+		"no run broke on the listing")
+
+	h.mu.Lock()
+	h.networksErr = nil
+	h.mu.Unlock()
+
+	start := time.Now()
+	untilSweepEnd(t, h, 5*time.Second)
+	require.Less(t, time.Since(start), 5*time.Second)
+}
+
+// TestBrokenInstanceListingWithNothingListedStaysCold: a first start, no cold
+// store, and the instance listing fails for good. There is nothing to answer
+// from: the run does not end, grace or not.
+func TestBrokenInstanceListingWithNothingListedStaysCold(t *testing.T) {
+	h := newFixture(t, sweepRetry(20*time.Millisecond), withGrace(50*time.Millisecond))
+	h.mu.Lock()
+	h.instancesErr = errors.New("incusd said no")
+	h.mu.Unlock()
+
+	h.setFleet(brokenFleet())
+
+	deadline := time.After(500 * time.Millisecond)
+
+	for {
+		select {
+		case ev := <-h.out:
+			require.NotEqual(t, iutil.ActionSweepEnd, ev.Action(), "a run that never listed the instances ended")
+		case <-deadline:
+			return
+		}
+	}
+}
+
+// TestBrokenInstanceListingWithAnInventoryEnds: the instances were listed by a
+// run that ended; then their listing fails for good. The inventory held is
+// what is answered, and after the grace the run ends on it.
+func TestBrokenInstanceListingWithAnInventoryEnds(t *testing.T) {
+	h := newFixture(t, sweepRetry(20*time.Millisecond), withGrace(200*time.Millisecond))
+	h.setFleet(brokenFleet())
+	untilSweepEnd(t, h, 5*time.Second)
+
+	h.mu.Lock()
+	h.instancesErr = errors.New("incusd said no")
+	h.mu.Unlock()
+
+	start := time.Now()
+	h.send(iutil.ActionConnected, "", "")
+	untilSweepEnd(t, h, 5*time.Second)
+	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond, "ended before the grace")
 }
 
 type secondNetworkListFailure struct{ *fixture }

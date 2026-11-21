@@ -3,7 +3,6 @@ package enricher
 import (
 	"context"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -18,7 +17,11 @@ type sweepAction int
 
 const (
 	sweepActionDone sweepAction = iota
+
+	// sweepActionFailed is one read of the run that failed; sweepActionBroken
+	// is the run itself ending in an error, its err what broke it.
 	sweepActionFailed
+	sweepActionBroken
 
 	// The three listings, each the whole of one scope. What a listing does not
 	// have has gone, and the fold acts on that where the message arrives -
@@ -34,6 +37,59 @@ const (
 	// an instance read can place the NICs it finds.
 	sweepActionNetworksWarm
 )
+
+// What a listing that failed was of.
+const (
+	listedProjects  = "projects"
+	listedNetworks  = "networks"
+	listedInstances = "instances"
+)
+
+// listingError is a listing a run could not make, of what and in which
+// project: what the plugin weighs to decide whether a run that keeps breaking
+// on it may end all the same.
+type listingError struct {
+	what    string
+	project string
+	err     error
+}
+
+func (e *listingError) Error() string {
+	if e.project == "" {
+		return "listing " + e.what + ": " + e.err.Error()
+	}
+
+	return "listing the " + e.what + " of " + e.project + ": " + e.err.Error()
+}
+
+func (e *listingError) Unwrap() error { return e.err }
+
+// listingFailures is every listing an error from runSweep says failed, and
+// whether listings are all it says: anything else broke the run some other way.
+func listingFailures(err error) ([]*listingError, bool) {
+	leaf, isLeaf := err.(*listingError)
+	if isLeaf {
+		return []*listingError{leaf}, true
+	}
+
+	joined, ok := err.(interface{ Unwrap() []error })
+	if !ok {
+		return nil, false
+	}
+
+	var out []*listingError
+
+	for _, e := range joined.Unwrap() {
+		failures, ok := listingFailures(e)
+		if !ok {
+			return nil, false
+		}
+
+		out = append(out, failures...)
+	}
+
+	return out, true
+}
 
 // sweepMsg is one thing the sweeper says.
 type sweepMsg struct {
@@ -169,7 +225,7 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 	cancel()
 
 	if err != nil {
-		return nil, nil, fmt.Errorf("listing projects: %w", err)
+		return nil, nil, &listingError{what: listedProjects, err: err}
 	}
 
 	// Every bridge lives in the default project unless a project has networks of
@@ -241,7 +297,7 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 			logger.Warn("the networks of one project could not be listed, keeping what is held",
 				"plugin", name, "project", project, "err", err)
 
-			failures = append(failures, fmt.Errorf("listing the networks of %s: %w", project, err))
+			failures = append(failures, &listingError{what: listedNetworks, project: project, err: err})
 
 			continue
 		}
@@ -307,7 +363,7 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 			logger.Warn("the instances of one project could not be listed, keeping what is held",
 				"plugin", name, "project", project, "err", err)
 
-			failed = append(failed, fmt.Errorf("listing the instances of %s: %w", project, err))
+			failed = append(failed, &listingError{what: listedInstances, project: project, err: err})
 
 			continue
 		}
@@ -371,12 +427,12 @@ func runSweeper(ctx context.Context, logger *slog.Logger, a sweepArgs, interval 
 			// fleet has been read whole, and warm rides with it.
 			msg := sweepMsg{action: sweepActionDone}
 			if err != nil {
-				msg = sweepMsg{action: sweepActionFailed, err: err}
+				msg = sweepMsg{action: sweepActionBroken, err: err}
 			}
 
 			wait := interval
 
-			if msg.action == sweepActionFailed {
+			if msg.action == sweepActionBroken {
 				backoff = min(max(2*backoff, a.retry), a.retryMax, interval)
 				wait = backoff
 			} else {

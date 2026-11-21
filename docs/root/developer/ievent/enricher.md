@@ -398,6 +398,17 @@ project. A failed listing - of instances or of networks - also keeps the round
 from being done: what that project holds has been neither confirmed nor pruned,
 so the round goes on through the other projects, then ends as one that broke.
 
+A listing that fails for good would hold the chain cold for good, so it is
+bounded like a failed read (`endBroken`): once `roundGrace` has passed since the
+first run that broke, a run breaking on listings alone ends all the same, with
+a warning naming each listing and its error, and the next run that breaks
+waits a whole grace of its own. A failed network listing always counts: the
+inventory held is what instances are placed by. A failed listing of a
+project's instances, or of the projects, counts only where it has something to
+answer from - a run in this process listed them, or the cold store put them
+back. A first start that never listed them stays cold. The run ends at the
+first broken run past the grace, so up to one backoff (30 s) after it.
+
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
 has been all the way round; it never says what exists.

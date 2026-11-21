@@ -112,6 +112,9 @@ type fixture struct {
 	// them, failed or not.
 	instancesErr  error
 	instanceLists atomic.Int32
+
+	// networksErr fails the network listings alone.
+	networksErr error
 }
 
 // sweepRetry sets the backoff after a run that broke. The fixture's default is
@@ -154,6 +157,14 @@ func (h *fixture) GetNetworkNames(_ context.Context, project string) ([]string, 
 	fleet, err := h.listing()
 	if err != nil {
 		return nil, err
+	}
+
+	h.mu.Lock()
+	failWith := h.networksErr
+	h.mu.Unlock()
+
+	if failWith != nil {
+		return nil, failWith
 	}
 
 	var out []string

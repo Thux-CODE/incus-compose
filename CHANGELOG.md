@@ -332,7 +332,10 @@ form.
   deleted or left out of a listing, and an instance whose read keeps failing
   holds it for a minute at most, from the moment the run first waits on it. A
   run whose network or instance listing failed is not whole, and is tried again
-  after the backoff. Every event carries the event stream session it was
+  after the backoff; a listing that keeps failing for a minute ends the run all
+  the same, with a warning, where there is an inventory to answer from - always
+  for networks, for instances and projects only once a run or the cold store
+  has listed them, so a first start that never could stays `SERVFAIL`. Every event carries the event stream session it was
   minted in, and the end of a round is taken only within the session its run
   was started for, with the stream open: one read before the stream went, or
   with no stream ever open, no longer makes `/ready` 200 or the view warm.
