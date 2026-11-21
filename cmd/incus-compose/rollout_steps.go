@@ -255,6 +255,14 @@ func rolloutDescribe(plan rolloutPlan) {
 	_, _ = fmt.Fprintf(plan.Out, "%s: can be rolled out, %d %s, now %s; %d %s, each new replica healthy within %s, each old one kept %s after its drain\n",
 		plan.Service, plan.Replicas, noun, strings.Join(present, ", "), creates, createNoun, plan.HealthTimeout, plan.Grace)
 
+	// A stopped replica with a run's mark is a new one an earlier run left
+	// failed: the run takes it away first (rolloutVictim, rolloutRetire).
+	for _, r := range plan.Present {
+		if !r.running && r.runID != "" && !resumed[r.index] {
+			_, _ = fmt.Fprintf(plan.Out, "%s: stopped, left by an earlier run: removed first\n", plan.Name(r.index))
+		}
+	}
+
 	for _, note := range plan.Notes {
 		_, _ = fmt.Fprintf(plan.Out, "%s: not checked: %s\n", plan.Service, note)
 	}

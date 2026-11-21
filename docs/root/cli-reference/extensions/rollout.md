@@ -36,7 +36,10 @@ read the same variables as `up`.
 `--dry-run` goes through every check a rollout makes before it touches a replica
 (the refusals below, ic-healthd running, the replicas present) and prints one
 line per service with the replicas found, the creates and the timeouts it would
-use. It writes nothing to Incus: it pulls no image (a pull may delete the copy
+use. A stopped replica that carries a run's mark, a new one an earlier run left
+failed, follows on a line of its own (`web-1: stopped, left by an earlier run:
+removed first`): the run takes it away before anything else. It writes nothing
+to Incus: it pulls no image (a pull may delete the copy
 it replaces, and takes locks in a project of its own), neither builds one nor
 copies one from the cache, creates no project (the image cache's included),
 and does not add the project config keys a compose file has gained (`x-incus`

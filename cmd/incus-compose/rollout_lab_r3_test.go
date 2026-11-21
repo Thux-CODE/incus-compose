@@ -111,6 +111,8 @@ func TestRolloutFailedNewOfAnEarlierRunGoesFirst(t *testing.T) {
 	described.Out = &dry
 	rolloutDescribe(described)
 	assert.Contains(t, dry.String(), "; 1 create, ")
+	assert.Contains(t, dry.String(), "web-1: stopped, left by an earlier run: removed first\n")
+	assert.NotContains(t, dry.String(), "web-2: stopped, left by an earlier run")
 
 	err := rollout(t.Context(), f, plan)
 	require.NoError(t, err, "events=%v", f.events)
