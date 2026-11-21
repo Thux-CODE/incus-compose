@@ -57,9 +57,13 @@ func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
 // forgetNetwork drops one network and re-reads what was on it. Both halves matter:
 // dropping alone leaves addresses filed under a key nothing describes any
 // more, and re-reading alone leaves the network there to resolve against.
+//
+// A read of it still out was taken before it went, and landing it would put
+// the network back under the key just dropped: it is abandoned instead.
 func (p *Plugin) forgetNetwork(ctx context.Context, project, name string) {
 	on := p.state.networkInstances(project, name)
 
+	p.reads.cancel(resourceKey(kindNetwork, project, name))
 	p.state.deleteNetwork(project, name)
 	p.fanOut(ctx, on)
 }

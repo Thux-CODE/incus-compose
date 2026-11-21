@@ -419,11 +419,12 @@ func (d *deferred) send(ctx context.Context, c *call) {
 
 // follow folds c into the call already held for its key. One whose read is not
 // out yet answers c as well; one already out may have been read before the
-// change c announces, so an instance call waits behind it for a read of its
-// own.
+// change c announces, so an instance or a network call waits behind it for a
+// read of its own. A network read landing with the subnet it was sent for
+// would otherwise undo the update that arrived meanwhile.
 func (d *deferred) follow(out, c *call) {
 	_, inFlight := d.cancels[c.key]
-	if !inFlight || c.kind != kindInstance {
+	if !inFlight || c.kind == kindProject {
 		out.join(c)
 
 		return
