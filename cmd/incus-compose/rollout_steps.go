@@ -59,6 +59,11 @@ const (
 	// rolloutReadTimeout bounds each read of a replica, which the transport
 	// would let wait up to an hour.
 	rolloutReadTimeout = 30 * time.Second
+
+	// rolloutStopFresh is how long after the end of the round it goes by a
+	// stop may still be sent: the identity read and the stop request fit in
+	// it, the health-check marker being written before the round.
+	rolloutStopFresh = 15 * time.Second
 )
 
 // rolloutRead reads a replica, within rolloutReadTimeout.
@@ -128,6 +133,10 @@ type rolloutOps interface {
 	// unmark takes the marks of the run off a replica it made, once the
 	// rollout is over.
 	unmark(ctx context.Context, index int) error
+
+	// stopping sets or clears user.healthcheck.stopped on a replica about to
+	// be stopped, which keeps ic-healthd's checks and restart policy off it.
+	stopping(ctx context.Context, index int, on bool) error
 
 	// sleep waits for d, or until ctx is done.
 	sleep(ctx context.Context, d time.Duration) error
@@ -497,12 +506,23 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 				return err
 			}
 
+			// Its health checking stopped right at the verdict, before the
+			// reads and the take-down: else ic-healthd's restart policy acts
+			// on the same unhealthy verdict, and its restart holds the
+			// instance busy as it is to be deleted.
+			if started {
+				stopErr := ops.stopping(context.WithoutCancel(ctx), index, true)
+				if stopErr != nil {
+					err = errors.Join(err, fmt.Errorf("%s: stopping its health checks: %w", plan.Name(index), stopErr))
+				}
+			}
+
 			// Nor is one taken away that serves while the others do not:
 			// healthy too late, or interrupted, as the old ones stopped.
 			if started && rolloutNeeded(ctx, ops, plan, slots, index) {
 				_, _ = fmt.Fprintf(plan.Out, "%s: left as it is, it serves and the others do not serve the declared count without it\n", plan.Name(index))
 
-				return err
+				return errors.Join(err, ops.stopping(context.WithoutCancel(ctx), index, false))
 			}
 
 			discardErr := ops.discard(context.WithoutCancel(ctx), index, plan.KeepFailed)
@@ -636,8 +656,18 @@ func rolloutVictim(slots map[int]*replica, healthy map[int]bool) int {
 		}
 	}
 
+	// Of the ones not running, a failed new one of an earlier run, which
+	// carries its mark, goes before an old one.
+	failedNew := func(r *replica) int {
+		if !r.running && r.runID != "" {
+			return 0
+		}
+
+		return 1
+	}
+
 	victim := slices.MinFunc(rolloutOld(slots), func(a, b *replica) int {
-		return cmp.Or(rank(a)-rank(b), a.created.Compare(b.created), a.index-b.index)
+		return cmp.Or(rank(a)-rank(b), failedNew(a)-failedNew(b), a.created.Compare(b.created), a.index-b.index)
 	})
 
 	return victim.index
@@ -713,7 +743,8 @@ func rolloutScan(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots ma
 }
 
 // rolloutScanAt is rolloutScan, which also returns when the round it read
-// began: what it read is fresh from then on, not from when it was handed on.
+// ended, itself no longer than rolloutScanFresh: what it read is fresh from
+// then on, not from when it was handed on.
 func rolloutScanAt(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) (map[int]replicaRead, time.Time, error) {
 	var last error
 
@@ -762,9 +793,11 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 		reads[i] = read
 	}
 
-	took := plan.Now().Sub(start)
+	end := plan.Now()
+
+	took := end.Sub(start)
 	if took > rolloutScanFresh {
-		return nil, start, fmt.Errorf("the reads took %s, more than %s", took.Round(time.Second), rolloutScanFresh)
+		return nil, end, fmt.Errorf("the reads took %s, more than %s", took.Round(time.Second), rolloutScanFresh)
 	}
 
 	for i, read := range reads {
@@ -778,7 +811,7 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 		r.drainedBy = read.DrainedBy
 	}
 
-	return reads, start, nil
+	return reads, end, nil
 }
 
 // rolloutRunServes reports whether a replica this run made or kept serves on
@@ -883,7 +916,11 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 		// Kept, it is put back into the service name when a rollout drained
 		// it, to serve once restarted, and the new replicas that do not
 		// serve go, so a run again creates afresh: a rollback.
-		if rolloutEnough(plan, reads, victim) != nil && !rolloutRunServes(plan, slots, reads) {
+		//
+		// One that carries a run's mark is a new replica that failed in an
+		// earlier run, not an old one to keep: it goes as the new ones that
+		// fail do.
+		if r.runID == "" && rolloutEnough(plan, reads, victim) != nil && !rolloutRunServes(plan, slots, reads) {
 			var undrain error
 			if r.drained && r.drainedBy != "" {
 				undrain = rolloutUndrain(ctx, ops, plan, r)
@@ -908,8 +945,16 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	// over during the grace is theirs too.
 	byHand := r.drained && r.drainedBy == ""
 
+	// The undrain takes the health-check marker off too; with a drain that is
+	// not the rollout's, the marker alone is taken off.
+	stoppingSet := false
+
 	putBack := func() error {
 		if !r.drained || r.drainedBy == "" {
+			if stoppingSet {
+				return ops.stopping(context.WithoutCancel(ctx), victim, false)
+			}
+
 			return nil
 		}
 
@@ -952,6 +997,18 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	if err != nil {
 		return errors.Join(fmt.Errorf("interrupted before %s was stopped: %w", name, err), putBack())
 	}
+
+	// Its health checking stopped before the last round, not after it: the
+	// write takes seconds, which the stop's freshness has no room for, and it
+	// ends ic-healthd's execs on it, which the stop otherwise waits out. It
+	// is drained already, so this changes nothing it serves; every way back
+	// takes the marker off again.
+	err = ops.stopping(context.WithoutCancel(ctx), victim, true)
+	if err != nil {
+		return errors.Join(fmt.Errorf("%s not retired: stopping its health checks: %w", name, err), putBack())
+	}
+
+	stoppingSet = true
 
 	// The stop goes by the round right before it. A stop that would begin
 	// later than a round is fresh for (errRolloutStale), or a victim that
@@ -1038,7 +1095,7 @@ func rolloutFinalRetireKill(ctx context.Context, ops rolloutOps, plan rolloutPla
 
 	// The interrupt is seen up to the stop being sent, which the retire
 	// checks; an interrupt that stopped nothing puts the victim back.
-	err = ops.retire(ctx, victim, false, readAt.Add(rolloutScanFresh), killAfterStop)
+	err = ops.retire(ctx, victim, false, readAt.Add(rolloutStopFresh), killAfterStop)
 	if err != nil && ctx.Err() != nil && errors.Is(err, context.Canceled) {
 		return errors.Join(fmt.Errorf("interrupted before %s was stopped: %w", name, err), putBack())
 	}

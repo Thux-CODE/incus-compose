@@ -171,6 +171,15 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` stops the old replica's health checking before the last round of
+  reads, and gives the stop 15 seconds from the end of that round, where 10
+  from its start did not fit the reads, the config write and the waits on a
+  real cluster. A new replica's health checking is stopped at its verdict, and
+  a delete that finds a replica busy is made again after the operation. A
+  stopped replica with a run's mark, a failed new one of an earlier run, is
+  taken away first instead of kept as an old one, which left a service with
+  two stopped replicas unable to roll out. (by @sandroden)
+
 - `rollout` puts the old replica back into the service name, and its health
   checking back on, whenever no stop went through, the last of three tries
   put off included, and reports what went wrong on each try; a stopped old

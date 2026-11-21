@@ -642,6 +642,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		name:        name,
 		instances:   instances,
 		uuids:       uuids,
+		stopMarked:  map[int]bool{},
 		runID:       runID,
 		target:      target,
 		order:       args.Order,
@@ -923,6 +924,10 @@ type rolloutRunner struct {
 	// deleted or taken away is checked to be still that instance.
 	uuids map[int]string
 
+	// stopMarked are the replicas the rollout set user.healthcheck.stopped
+	// on ahead of their stop (stopping).
+	stopMarked map[int]bool
+
 	// runID marks what this run makes and drains (rolloutIDKey).
 	runID string
 
@@ -1142,11 +1147,75 @@ func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) erro
 		keys = map[string]string{shared.DNSDrainKey: "true", rolloutDrainKey: r.runID}
 	}
 
-	return r.instances[index].SetConfigKeys(ctx, keys)
+	err := r.instances[index].SetConfigKeys(ctx, keys)
+	if err == nil && !drained {
+		r.stopMarked[index] = false
+	}
+
+	return err
 }
 
 func (r *rolloutRunner) unmark(ctx context.Context, index int) error {
 	return r.instances[index].SetConfigKeys(ctx, map[string]string{rolloutIDKey: "", rolloutPreStartKey: ""})
+}
+
+// rolloutBusyAttempts is how many times a delete that finds the instance
+// busy, with an operation ic-healthd or Incus holds it with, is made.
+const rolloutBusyAttempts = 3
+
+// deleteRetryingBusy deletes the replica, and makes the delete again, after
+// the busy operation, when Incus refuses it as busy: the client retries for a
+// moment only, and a restart or a config update holds it longer. Before each
+// new try it is read again, by uuid.
+func (r *rolloutRunner) deleteRetryingBusy(ctx context.Context, index int, inst *client.Instance) error {
+	var err error
+
+	for attempt := 1; ; attempt++ {
+		err = inst.Delete(ctx)
+		if err == nil || !errors.Is(err, iclient.ErrInstanceBusy) || attempt >= rolloutBusyAttempts {
+			return err
+		}
+
+		sleepErr := r.sleep(ctx, rolloutKillEvery)
+		if sleepErr != nil {
+			return errors.Join(err, sleepErr)
+		}
+
+		// A failed delete forgets the instance's state; it is read again.
+		readCtx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
+		info, readErr := r.sameInstance(readCtx, index)
+
+		if readErr == nil && info != nil {
+			readErr = inst.Ensure(readCtx)
+		}
+
+		cancel()
+
+		switch {
+		case readErr != nil:
+			return errors.Join(err, readErr)
+		case info == nil:
+			// Gone meanwhile: deleted.
+			return nil
+		}
+	}
+}
+
+func (r *rolloutRunner) stopping(ctx context.Context, index int, on bool) error {
+	inst := r.instances[index]
+	if inst == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
+	defer cancel()
+
+	err := inst.SetHealthCheckingStopped(ctx, on)
+	if err == nil {
+		r.stopMarked[index] = on
+	}
+
+	return err
 }
 
 // sameInstance reads the replica and checks it is still the instance first
@@ -1234,7 +1303,7 @@ func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, not
 		return restore(err)
 	}
 
-	err = inst.Delete(context.WithoutCancel(ctx))
+	err = r.deleteRetryingBusy(context.WithoutCancel(ctx), index, inst)
 	if err != nil {
 		return err
 	}
@@ -1347,13 +1416,24 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 
 	stop := func(ctx context.Context) error {
 		// The marker keeps ic-healthd's restart policy off it from here on.
-		err := bounded(ctx, func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, true) })
-		if err != nil {
-			return err
+		// Set by the rollout before its last round already, it is not written
+		// again, which would eat into the stop's freshness, and the rollout
+		// takes it back off on its way back.
+		marked := r.stopMarked[index]
+
+		if !marked {
+			err := bounded(ctx, func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, true) })
+			if err != nil {
+				return err
+			}
 		}
 
 		// Put back the restart policy, on a stop not sent after all.
 		unmark := func(cause error) error {
+			if marked {
+				return cause
+			}
+
 			return errors.Join(cause, bounded(context.WithoutCancel(ctx), func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, false) }))
 		}
 
@@ -1383,7 +1463,7 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 			}
 		}
 
-		err = rolloutStopAfter(context.WithoutCancel(ctx), shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery, afterStop)
+		err := rolloutStopAfter(context.WithoutCancel(ctx), shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery, afterStop)
 		if errors.Is(err, errRolloutStale) {
 			return unmark(err)
 		}
@@ -1415,7 +1495,7 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 		}
 
 		if info != nil {
-			err = inst.Delete(ctx)
+			err = r.deleteRetryingBusy(ctx, index, inst)
 		}
 
 		if err == nil {

@@ -43,6 +43,9 @@ type fakeReplica struct {
 	drainBy  string
 	preStart string
 	born     int64
+
+	// stopping is user.healthcheck.stopped.
+	stopping bool
 }
 
 // fakeRollout stands in for a service's replicas. It is not a fake Incus: it
@@ -74,6 +77,9 @@ type fakeRollout struct {
 	// killAfterStop is what each retire was asked, in turn.
 	retireErrs    []error
 	killAfterStop []bool
+
+	// stoppings are the health-check markers set and cleared, in turn.
+	stoppings []string
 
 	// fail makes the operation an event names fail; healthErrs fails that
 	// many reads of a new replica's health before it answers.
@@ -232,6 +238,18 @@ func fakeID(r *fakeReplica) string {
 	return fmt.Sprintf("%p", r)
 }
 
+// stopping keeps the marker on the fake replica, and the calls in turn.
+func (f *fakeRollout) stopping(_ context.Context, index int, on bool) error {
+	f.stoppings = append(f.stoppings, fmt.Sprintf("web-%d %t", index, on))
+
+	r, ok := f.replicas[index]
+	if ok {
+		r.stopping = on
+	}
+
+	return nil
+}
+
 func (f *fakeRollout) unmark(_ context.Context, index int) error {
 	r, ok := f.replicas[index]
 	if ok {
@@ -257,6 +275,9 @@ func (f *fakeRollout) drain(ctx context.Context, index int, drained bool) error 
 	f.replicas[index].drainBy = ""
 	if drained {
 		f.replicas[index].drainBy = f.runID
+	} else {
+		// As the runner's undrain, it takes the health-check marker off.
+		f.replicas[index].stopping = false
 	}
 
 	f.record("%s", event)

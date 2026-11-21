@@ -199,5 +199,8 @@ func TestFourthReviewFreshnessStartsAtRead(t *testing.T) {
 	f.replicas[1].drainBy = plan.RunID
 	err := rolloutFinalRetire(t.Context(), ops, plan, slots, 1, false, func() error { return nil })
 	require.ErrorIs(t, err, io.EOF)
-	require.LessOrEqual(t, ops.notAfter.Sub(readAt), rolloutScanFresh)
+	// Adapted: the stop's freshness counts from the end of the round, with a
+	// budget of its own (rolloutStopFresh), since the health-check marker is
+	// written before the round; still never from when the round was handed on.
+	require.LessOrEqual(t, ops.notAfter.Sub(readAt), rolloutStopFresh)
 }

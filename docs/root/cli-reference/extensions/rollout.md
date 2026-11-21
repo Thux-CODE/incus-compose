@@ -94,9 +94,12 @@ new replica that no longer serves when the replicas are read (ic-healthd
 restarted it, or it turned `unhealthy`) is old again: it is the one taken away,
 the old ones serve on, and `rollout` exits with an error.
 
-A stop goes by the round of reads right before it: one that would be sent more
-than 10 seconds after that round began (checked inside the client, after the
-waits before the stop request), or a victim ic-healthd starts again after its
+After the grace, before the last round of reads, the old replica's health
+checking is stopped (`user.healthcheck.stopped=true`): it is drained already,
+and it ends ic-healthd's execs on it, which a stop waits out. A stop goes by the
+round of reads right before it: one that would be sent more than 15 seconds
+after that round ended (checked inside the client, after the waits before the
+stop request; a client suspended for longer is still caught), or a victim ic-healthd starts again after its
 stop, even right after a graceful stop that went through, takes a new round
 first, three times at most; no kill goes out on an old round. On the try that
 follows such a round, a victim that reads running again after its graceful
@@ -128,6 +131,11 @@ service name by something else during its grace is not stopped.
 A new replica that reports `unhealthy`, stops, fails to be created or started,
 or is not `healthy` within the health timeout is deleted (or, with
 `--keep-failed`, left stopped), and `rollout` exits with an error naming it.
+Its health checking is stopped right at the verdict, so ic-healthd does not
+restart it in the meantime; a delete that finds a replica busy with an
+operation is made again after it, three times at most. A stopped replica that
+carries a run's mark, a new one an earlier run left failed, is taken away
+first, as failed new ones are, and is not kept as an old one.
 One whose health cannot be read three times in a row is left as it is, since it
 may be the one that serves, and `rollout` exits with an error. The old replica
 was never drained, so it serves throughout.
