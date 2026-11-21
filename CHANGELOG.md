@@ -171,6 +171,13 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout --dry-run` pulls no image: a pull may delete the copy it replaces
+  (an architecture change) and creates the global project and its locks
+  volume. The plan reads the image as the project has it. A healthcheck test
+  of `NONE` is refused like `disable: true` with the image not there. An
+  image's alias read that fails (an EOF) is an error, no longer taken for a
+  missing image that a build or a pull then replaces. (by @sandroden)
+
 - `rollout` retires a stopped old replica, with fewer than the declared count
   serving without it, only when a replica of the run serves in the same round
   of reads; else it keeps it, restart policy included, and fails.

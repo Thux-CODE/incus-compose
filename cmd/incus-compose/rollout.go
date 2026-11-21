@@ -250,7 +250,7 @@ func newRolloutCommand() *cli.Command {
 			var pullNote string
 			if dryRun && pullMode == client.PullAlways {
 				pullMode = client.PullMissing
-				pullNote = "with --pull always a rollout refreshes the image first, which --dry-run does not: the plan goes by the image the project has"
+				pullNote = "with --pull always a rollout refreshes the image first: the plan goes by the image the project has"
 			}
 
 			args := rolloutArgs{
@@ -425,18 +425,22 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 	pc := c.Clone()
 
 	// The sidecars are not ours to touch, nor are their images in the global
-	// project.
-	err = pull(ctx, p, pc, pullArgs{
-		Services:        []string{svcName},
-		IgnoreBuildable: true,
-		NoTools:         true,
-		Pull:            args.Pull,
-		Workers:         args.Workers,
-		Debug:           args.Debug,
-		Writer:          args.Writer,
-	})
-	if err != nil {
-		return nil, rolloutPlan{}, err
+	// project. A dry run pulls nothing: a pull may delete a copy it replaces
+	// and creates the global project and its locks, and the plan reads the
+	// image as the project has it.
+	if !args.DryRun {
+		err = pull(ctx, p, pc, pullArgs{
+			Services:        []string{svcName},
+			IgnoreBuildable: true,
+			NoTools:         true,
+			Pull:            args.Pull,
+			Workers:         args.Workers,
+			Debug:           args.Debug,
+			Writer:          args.Writer,
+		})
+		if err != nil {
+			return nil, rolloutPlan{}, err
+		}
 	}
 
 	// At n+1, so a cluster without shared storage refuses the replica that
@@ -589,8 +593,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	// The image a dry run did not get may declare the healthcheck, unless the
 	// compose file disables it, which a create honours.
-	disabled := service.HealthCheck != nil && service.HealthCheck.Disable
-	if unbuilt && !disabled && slices.Contains(blockers, rolloutUnwatchedBlocker) {
+	if unbuilt && !rolloutHealthDisabled(service) && slices.Contains(blockers, rolloutUnwatchedBlocker) {
 		blockers = slices.DeleteFunc(blockers, func(b string) bool { return b == rolloutUnwatchedBlocker })
 		notes = append(notes, "the compose file declares no healthcheck, and a rollout refuses the service unless its image does")
 	}
@@ -677,6 +680,14 @@ func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[s
 	maps.Copy(out, inst.Config.ExtraDevices)
 
 	return out
+}
+
+// rolloutHealthDisabled reports a compose file that turns the healthcheck off,
+// the image's included: disable, or a test of NONE.
+func rolloutHealthDisabled(service types.ServiceConfig) bool {
+	h := service.HealthCheck
+
+	return h != nil && (h.Disable || len(h.Test) > 0 && h.Test[0] == "NONE")
 }
 
 // rolloutUnwatchedBlocker refuses a service nothing checks.

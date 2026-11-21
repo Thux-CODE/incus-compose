@@ -36,13 +36,14 @@ read the same variables as `up`.
 `--dry-run` goes through every check a rollout makes before it touches a replica
 (the refusals below, ic-healthd running, the replicas present) and prints one
 line per service with the replicas found, the creates and the timeouts it would
-use. It still pulls an image that is missing from the project, since the
-healthcheck an image declares is part of the check. It writes nothing else: it
-neither builds an image nor copies one from the cache, creates no project (the
-image cache's included), does not refresh an image with `--pull always` (it
-pulls only what is missing, and says so), and does not add the project config
-keys a compose file has gained (`x-incus` at the top level). A compose file
-that disables the healthcheck is refused even with the image not built yet. What
+use. It writes nothing to Incus: it pulls no image (a pull may delete the copy
+it replaces, and takes locks in a project of its own), neither builds one nor
+copies one from the cache, creates no project (the image cache's included),
+and does not add the project config keys a compose file has gained (`x-incus`
+at the top level). The plan reads the image as the project has it; one that is
+not there is named on a `not checked:` line, with the healthcheck it may
+declare. A compose file that turns the healthcheck off (`disable: true` or a
+test of `NONE`) is refused even with the image not there. What
 it could not check for that reason follows the plan, on lines that read `not
 checked:`, and the keys a rollout would add on a line of their own.
 

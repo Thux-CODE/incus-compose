@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"slices"
 	"strings"
@@ -702,6 +703,12 @@ func (r *Image) get(ctx context.Context) error {
 	alias, eTag, err := conn.GetImageAlias(ctx, r.client.incusProject, r.incusName, nil)
 	if err != nil {
 		r.clearState()
+
+		// Only Incus saying so makes it missing: an EOF says nothing.
+		if !incusApi.StatusErrorCheck(err, http.StatusNotFound) {
+			return fmt.Errorf("reading image alias %s: %w", r.incusName, err)
+		}
+
 		return ErrNotFound.Wrap(err)
 	}
 
@@ -1043,6 +1050,11 @@ func (r *Image) ensureBuild(ctx context.Context, args Options) error {
 
 	if err != nil && args.Build.Mode == BuildNever {
 		return r.client.hookAfter(ctx, ActionEnsure, r, args, errors.New("image is missing and building is disabled"))
+	}
+
+	// A read that failed is not a missing image.
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return r.client.hookAfter(ctx, ActionEnsure, r, args, err)
 	}
 
 	if err != nil && !args.Create {
