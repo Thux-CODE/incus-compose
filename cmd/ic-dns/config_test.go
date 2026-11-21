@@ -301,6 +301,26 @@ func TestConfigTrustedClientsRefusesABadPrefix(t *testing.T) {
 	assert.ErrorContains(t, err, `allow-transfer "10.0.0.1"`)
 }
 
+// TestConfigMappedPrefixes: a querier arriving over IPv6 as ::ffff:a.b.c.d is
+// matched as the IPv4 address, so an IPv4-mapped CIDR is taken as the IPv4 one
+// it names, and one wide enough to span IPv6 as well is refused.
+func TestConfigMappedPrefixes(t *testing.T) {
+	cfg := parse(t, "--trusted-client", "::ffff:10.99.0.1/128", "--allow-transfer", "::ffff:192.0.2.0/120")
+
+	require.Len(t, cfg.TrustedClients, 1)
+	assert.Equal(t, "10.99.0.1/32", cfg.TrustedClients[0].String())
+	require.Len(t, cfg.AllowTransfer, 1)
+	assert.Equal(t, "192.0.2.0/24", cfg.AllowTransfer[0].String())
+
+	app := command()
+	app.Writer = io.Discard
+	app.ErrWriter = io.Discard
+
+	err := app.Run(t.Context(), []string{"ic-dns", "run", "--trusted-client", "::ffff:0:0/80"})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, `trusted-client "::ffff:0:0/80"`)
+}
+
 // TestConfigClaimReverse pins the flag that claims the reverse zones of a list
 // of prefixes before warm: none by default, masked like every other CIDR flag,
 // settable from either environment name, and a malformed one stops the start.

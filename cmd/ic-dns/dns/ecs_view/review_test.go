@@ -10,6 +10,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// TestReviewMappedTrustedClient: the router is 10.99.0.1, trusted once as
+// 10.99.0.1/32 and once as its IPv4-mapped spelling. The source is matched as
+// IPv4 however it arrived, and so is the prefix: both are the union.
+func TestReviewMappedTrustedClient(t *testing.T) {
+	plain := trustedEngine(t, "10.99.0.1/32")
+	_, control := askFrom(t, plain, "user-api.shop.incus.", dns.TypeA, router)
+	require.Equal(t, "NOERROR", dns.RcodeToString[control.Rcode])
+	v := trustedEngine(t, "::ffff:10.99.0.1/128")
+	_, m := askFrom(t, v, "user-api.shop.incus.", dns.TypeA, router)
+	require.Equal(t, "NOERROR", dns.RcodeToString[m.Rcode])
+	require.ElementsMatch(t, addrsOf(t, control), addrsOf(t, m))
+}
+
 // TestReviewTruncatedNegativeInsideClaim: before warm, a name under the
 // suffix in no zone yet is asked of the forwarder, which answers NXDOMAIN with
 // TC set. SERVFAIL, as for the same NXDOMAIN untruncated.

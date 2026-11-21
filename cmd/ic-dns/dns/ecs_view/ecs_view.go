@@ -138,14 +138,34 @@ func (v *ECSView) SetHealthy(healthy bool) {
 // trusts says whether a query from addr is exempt from the filter. The address
 // is the one the packet arrived from: an ECS option is what a querier claims
 // about itself, and trust may not rest on a claim.
+//
+// The address is IPv4 for an IPv4 querier however it arrived, so a prefix
+// written IPv4-mapped is matched as the IPv4 one it names.
 func (v *ECSView) trusts(addr netip.Addr) bool {
 	for _, prefix := range v.Trusted {
-		if prefix.Contains(addr) {
+		unmapped, ok := UnmapPrefix(prefix)
+		if ok && unmapped.Contains(addr) {
 			return true
 		}
 	}
 
 	return false
+}
+
+// UnmapPrefix is an IPv4-mapped prefix (::ffff:10.0.0.0/104) as the IPv4 one
+// it names (10.0.0.0/8), and any other prefix as it is. One that is mapped
+// but shorter than the ::ffff:0:0/96 it sits under spans IPv6 addresses as
+// well, and names no IPv4 prefix: ok is false for it.
+func UnmapPrefix(prefix netip.Prefix) (netip.Prefix, bool) {
+	if !prefix.Addr().Is4In6() {
+		return prefix, true
+	}
+
+	if prefix.Bits() < 96 {
+		return prefix, false
+	}
+
+	return netip.PrefixFrom(prefix.Addr().Unmap(), prefix.Bits()-96).Masked(), true
 }
 
 // Ready turns true once a snapshot has been published and the source reports

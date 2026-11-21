@@ -23,6 +23,7 @@ import (
 	// Set the AUTOMEMLIMIT environment variable to a ratio in (0.0, 1.0], or "off".
 	_ "github.com/KimMachineGun/automemlimit"
 
+	"github.com/lxc/incus-compose/cmd/ic-dns/dns/ecs_view"
 	"github.com/lxc/incus-compose/iclient"
 	ievlog "github.com/lxc/incus-compose/ievent/log"
 	"github.com/lxc/incus-compose/ievent/source"
@@ -527,6 +528,10 @@ func drainContext(ctx context.Context) context.Context {
 // prefixes parses the CIDRs a flag carries, named so a bad one says which flag
 // it was in. Refused here rather than dropped, or an allow-list would silently
 // be narrower than it reads.
+//
+// An IPv4-mapped one is taken as the IPv4 prefix it names: every address it is
+// matched against has been unmapped, so as written it would match nothing. One
+// shorter than ::ffff:0:0/96 spans IPv6 addresses too, and is refused.
 func prefixes(flag string, list []string) ([]netip.Prefix, error) {
 	if len(list) == 0 {
 		return nil, nil
@@ -540,7 +545,12 @@ func prefixes(flag string, list []string) ([]netip.Prefix, error) {
 			return nil, fmt.Errorf("%s %q: %w", flag, text, err)
 		}
 
-		out = append(out, prefix.Masked())
+		unmapped, ok := ecs_view.UnmapPrefix(prefix)
+		if !ok {
+			return nil, fmt.Errorf("%s %q: an IPv4-mapped prefix shorter than /96 is not an IPv4 one", flag, text)
+		}
+
+		out = append(out, unmapped.Masked())
 	}
 
 	return out, nil
