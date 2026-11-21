@@ -542,10 +542,6 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 	defer p.next(ev)
 
-	if ev.ChainState() != p.state.chain {
-		p.state.chain = ev.ChainState()
-	}
-
 	// The peering is read again on anything that can have moved it, and once a
 	// round, so an event lost with the stream is caught up on.
 	if peeringMoves(ev) || ev.Action() == iutil.ActionSweepEnd {
@@ -659,6 +655,8 @@ func (p *Plugin) fold(ev *iutil.Event) {
 // The window is flushed rather than published beside, or the end of a round
 // publishes twice.
 func (p *Plugin) rounded() {
+	p.state.complete = true
+
 	p.state.write(p.cfg.TTL)
 	p.askIfGrew()
 	p.publish()
@@ -726,8 +724,12 @@ func (p *Plugin) write() {
 
 // publish hands the working copy over as current, and stores what it was
 // published under.
+//
+// A serial steps once a round has ended, not on the stamp of the last event:
+// a read minted cold before the end and landing after it still changes a zone
+// a secondary already holds whole.
 func (p *Plugin) publish() {
-	p.state.step(p.state.chain == iutil.ChainWarm, p.cfg.TTL)
+	p.state.step(p.state.complete, p.cfg.TTL)
 
 	// Written twice, one pointer each: neither reads the other's, and the value
 	// itself is finished and shared.

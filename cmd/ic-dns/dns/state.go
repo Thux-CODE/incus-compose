@@ -10,7 +10,6 @@ import (
 	"github.com/koji-hirono/go-critbit"
 
 	"github.com/lxc/incus-compose/cmd/ic-dns/dns/ecs_view"
-	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
 // state is what folding owns. Run's goroutine alone, so nothing here locks.
@@ -52,9 +51,6 @@ type state struct {
 	// copy rather than these.
 	v4, v6 critbit.Tree[ecs_view.ViewID]
 
-	// chain is what the last event carried.
-	chain iutil.ChainState
-
 	// fresh is a round having ended here since the stream was last lost: what
 	// turns the view healthy, and the first time warm for good. lost is when
 	// the stream last went, so a warm stamp older than that is not taken for one.
@@ -63,6 +59,12 @@ type state struct {
 
 	// down is the stream having been lost and not come back yet.
 	down bool
+
+	// complete is a round having ended in this run: every zone holds the
+	// whole fleet from then on, so whatever changes in one is a change a
+	// secondary has to see, however the event that made it was stamped. What
+	// a serial steps on, and the first time it pays what it owes.
+	complete bool
 
 	// grew is a name having landed on a network nothing was on: its peering
 	// has not been read, since until now it could change no answer.

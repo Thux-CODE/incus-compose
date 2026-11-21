@@ -32,6 +32,26 @@ func TestReviewSweepFromDisconnectedInterval(t *testing.T) {
 	require.True(t, c.p.view.Ready())
 }
 
+// TestReviewLateColdStampChangesWarmZone: an update read before the round
+// ended and folded after it is stamped cold, and still changes a zone already
+// served whole. Its serial steps, or a secondary keeps the old address.
+func TestReviewLateColdStampChangesWarmZone(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"))
+	ev := func(ip string) *iutil.Event {
+		return enriched(incusapi.EventLifecycleInstanceUpdated, "shop", "web", ip)
+	}
+	c.p.fold(ev("10.0.0.2"))
+	late := ev("10.0.0.3")
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	before := c.p.state.serials["shop.incus."].Serial
+	c.p.fold(late)
+	c.p.write()
+	require.True(t, c.p.view.Ready())
+	_, got := resolve(c.a, "web.shop.incus.", dns.TypeA, "10.0.0.3")
+	require.Equal(t, []string{"10.0.0.3"}, got)
+	require.NotEqual(t, before, c.p.state.serials["shop.incus."].Serial)
+}
+
 func TestReviewFailedFirstReadIsNotACompleteRound(t *testing.T) {
 	t.Skip("contested: the round is the enricher's to close. It holds the end of a run " +
 		"until every instance it listed and nothing holds has been read " +

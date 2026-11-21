@@ -140,6 +140,9 @@ func (s *state) step(warm bool, ttl uint32) {
 
 		held.dirty = false
 
+		// Only what is owed steps: a change the replay made is one the stored
+		// serial already describes, rendered and claimed nothing about however
+		// it lands against the first round's publish.
 		switch {
 		case held.Serial == 0:
 			// Its first publish is a birth rather than a step, and a secondary
@@ -147,7 +150,7 @@ func (s *state) step(warm bool, ttl uint32) {
 			// nothing is owed.
 			held.Serial = 1
 			held.Owed = false
-		case warm:
+		case warm && held.Owed:
 			held.Serial++
 			held.Owed = false
 		}

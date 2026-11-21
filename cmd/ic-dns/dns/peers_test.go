@@ -801,9 +801,12 @@ func TestColdPeeringKeepsTheSerials(t *testing.T) {
 	// everything.
 	time.Sleep(50 * time.Millisecond)
 
+	// The replay, marked as the enricher marks it: a live read at that point
+	// would be a change the stored serial does not describe, owed and paid by
+	// the end of the round.
 	r.feed(t,
 		eventOn(incusapi.EventLifecycleInstanceStarted, "shop", "web", nil,
-			map[string]string{"net-a": "10.0.0.5"}),
+			map[string]string{"net-a": "10.0.0.5"}).WithRestored(),
 		event(iutil.ActionSweepEnd, "", ""))
 
 	r.feed(t,
