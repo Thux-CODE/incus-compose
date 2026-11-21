@@ -94,9 +94,15 @@ new replica that no longer serves when the replicas are read (ic-healthd
 restarted it, or it turned `unhealthy`) is old again: it is the one taken away,
 the old ones serve on, and `rollout` exits with an error.
 
-A stop goes by the round of reads right before it: one that would begin more
-than 10 seconds after that round, or a victim ic-healthd starts again after
-its stop, takes a new round first, three times at most. Each replica is
+A stop goes by the round of reads right before it: one that would be sent more
+than 10 seconds after that round began (checked inside the client, after the
+waits before the stop request), or a victim ic-healthd starts again after its
+stop, even right after a graceful stop that went through, takes a new round
+first, three times at most; no kill goes out on an old round. Whenever no stop
+went through, the third try included, the old replica is put back into the
+service name and its health checking resumed (`user.healthcheck.stopped`
+cleared), and what went wrong on each try is reported. An interrupt is seen up
+to the stop request, and a replica read stopped up to its delete. Each replica is
 checked to be the instance first read under its name (`volatile.uuid`) before
 it is stopped, deleted (again right before the delete, after the stop) or
 taken away: one whose name
@@ -105,8 +111,12 @@ read stopped is deleted only while it is stopped, with no drain; one that
 started again in between is left, and the run fails. With fewer than the
 declared count serving without it, a stopped old replica goes only when a
 replica of this run serves in the same round of reads (which repairs a service
-that is all down); else it is kept, with ic-healthd's restart policy, and the
-run fails. A drain set by hand
+that is all down); else it is kept, with ic-healthd's restart policy, put back
+into the service name if a rollout drained it, the new replicas of the run
+that do not serve are taken away, and the run fails, so a run again creates
+afresh. No delete or take-down goes out without the instance's uuid known and
+read again right before it; a replica gone meanwhile is not deleted by name.
+An operator recreating the same name in the window left is not caught. A drain set by hand
 (without the rollout's mark, below) is never taken off: such a replica does not
 count as serving, and is replaced like any old one. One put back into the
 service name by something else during its grace is not stopped.

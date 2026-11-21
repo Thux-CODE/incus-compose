@@ -702,48 +702,56 @@ func rolloutShown(read replicaRead) string {
 // may call a replica unhealthy at any time, and a stop that follows a round
 // shortens that window, it cannot close it.
 func rolloutScan(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) (map[int]replicaRead, error) {
+	reads, _, err := rolloutScanAt(ctx, ops, plan, slots)
+
+	return reads, err
+}
+
+// rolloutScanAt is rolloutScan, which also returns when the round it read
+// began: what it read is fresh from then on, not from when it was handed on.
+func rolloutScanAt(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) (map[int]replicaRead, time.Time, error) {
 	var last error
 
 	for attempt := 1; ; attempt++ {
-		reads, err := rolloutScanOnce(ctx, ops, plan, slots)
+		reads, start, err := rolloutScanOnce(ctx, ops, plan, slots)
 		if err == nil {
-			return reads, nil
+			return reads, start, nil
 		}
 
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("interrupted: %w", ctx.Err())
+			return nil, time.Time{}, fmt.Errorf("interrupted: %w", ctx.Err())
 		}
 
 		if errors.Is(err, errRolloutReplaced) {
-			return nil, err
+			return nil, time.Time{}, err
 		}
 
 		last = err
 
 		if attempt >= rolloutScanAttempts {
-			return nil, fmt.Errorf("%w after %d rounds: %w", errRolloutUnread, attempt, last)
+			return nil, time.Time{}, fmt.Errorf("%w after %d rounds: %w", errRolloutUnread, attempt, last)
 		}
 
 		err = ops.sleep(ctx, plan.Poll<<(attempt-1))
 		if err != nil {
-			return nil, fmt.Errorf("interrupted: %w", err)
+			return nil, time.Time{}, fmt.Errorf("interrupted: %w", err)
 		}
 	}
 }
 
-func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) (map[int]replicaRead, error) {
+func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) (map[int]replicaRead, time.Time, error) {
 	start := plan.Now()
 	reads := map[int]replicaRead{}
 
 	for _, i := range slices.Sorted(maps.Keys(slots)) {
 		read, err := rolloutRead(ctx, ops, i)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", plan.Name(i), err)
+			return nil, start, fmt.Errorf("%s: %w", plan.Name(i), err)
 		}
 
 		id := slots[i].id
 		if id != "" && read.ID != "" && read.ID != id {
-			return nil, fmt.Errorf("%s: %w", plan.Name(i), errRolloutReplaced)
+			return nil, start, fmt.Errorf("%s: %w", plan.Name(i), errRolloutReplaced)
 		}
 
 		reads[i] = read
@@ -751,7 +759,7 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 
 	took := plan.Now().Sub(start)
 	if took > rolloutScanFresh {
-		return nil, fmt.Errorf("the reads took %s, more than %s", took.Round(time.Second), rolloutScanFresh)
+		return nil, start, fmt.Errorf("the reads took %s, more than %s", took.Round(time.Second), rolloutScanFresh)
 	}
 
 	for i, read := range reads {
@@ -765,7 +773,7 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 		r.drainedBy = read.DrainedBy
 	}
 
-	return reads, nil
+	return reads, start, nil
 }
 
 // rolloutRunServes reports whether a replica this run made or kept serves on
@@ -785,7 +793,7 @@ func rolloutRunServes(plan rolloutPlan, slots map[int]*replica, reads map[int]re
 // away: it serves, and without it fewer than the declared count would. A
 // round that cannot be read keeps it too.
 func rolloutNeeded(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica, index int) bool {
-	reads, err := rolloutScanOnce(context.WithoutCancel(ctx), ops, plan, slots)
+	reads, _, err := rolloutScanOnce(context.WithoutCancel(ctx), ops, plan, slots)
 	if err != nil {
 		return true
 	}
@@ -867,8 +875,17 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 		// than declared serving without it, it goes only for a replica of
 		// this run that serves in the same round, which a service all down
 		// is repaired with. Else it is kept as it is, restart policy and all.
+		// Kept, it is put back into the service name when a rollout drained
+		// it, to serve once restarted, and the new replicas that do not
+		// serve go, so a run again creates afresh: a rollback.
 		if rolloutEnough(plan, reads, victim) != nil && !rolloutRunServes(plan, slots, reads) {
-			return fmt.Errorf("%s not retired: it is stopped, fewer than %d serve, and no replica of this run serves in its place", name, plan.Replicas)
+			var undrain error
+			if r.drained && r.drainedBy != "" {
+				undrain = rolloutUndrain(ctx, ops, plan, r)
+			}
+
+			return errors.Join(fmt.Errorf("%s not retired: it is stopped, fewer than %d serve, and no replica of this run serves in its place", name, plan.Replicas),
+				undrain, rolloutTakeAwayLapsed(ctx, ops, plan, slots, reads, victim))
 		}
 
 		err = ops.retire(context.WithoutCancel(ctx), victim, true, time.Time{})
@@ -935,15 +952,31 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	// later than a round is fresh for (errRolloutStale), or a victim that
 	// ic-healthd started again after its stop (errRolloutRestarted), takes a
 	// new round before another try.
+	//
+	// A try put off is kept with whatever went wrong with it, the restart
+	// policy put back included, and the last one put off puts the victim
+	// back: no stop went through.
+	var putOff error
+
 	for attempt := 1; ; attempt++ {
 		err = rolloutFinalRetire(ctx, ops, plan, slots, victim, byHand, putBack)
-		if (errors.Is(err, errRolloutStale) || errors.Is(err, errRolloutRestarted)) && attempt < rolloutScanAttempts {
-			_, _ = fmt.Fprintf(plan.Out, "%s: read again before its stop: %v\n", name, err)
 
-			continue
+		again := errors.Is(err, errRolloutStale) || errors.Is(err, errRolloutRestarted)
+
+		switch {
+		case err == nil:
+			return nil
+		case !again:
+			return errors.Join(putOff, err)
 		}
 
-		return err
+		putOff = errors.Join(putOff, err)
+
+		if attempt >= rolloutScanAttempts {
+			return errors.Join(fmt.Errorf("%s not retired after %d tries", name, attempt), putOff, putBack())
+		}
+
+		_, _ = fmt.Fprintf(plan.Out, "%s: read again before its stop: %v\n", name, err)
 	}
 }
 
@@ -953,7 +986,7 @@ func rolloutFinalRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, s
 	r := slots[victim]
 	name := plan.Name(victim)
 
-	reads, err := rolloutScan(ctx, ops, plan, slots)
+	reads, readAt, err := rolloutScanAt(ctx, ops, plan, slots)
 
 	switch {
 	case errors.Is(err, errRolloutReplaced):
@@ -983,7 +1016,13 @@ func rolloutFinalRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, s
 		return errors.Join(err, putBack(), rolloutTakeAwayLapsed(ctx, ops, plan, slots, reads, victim))
 	}
 
-	err = ops.retire(context.WithoutCancel(ctx), victim, false, plan.Now().Add(rolloutScanFresh))
+	// The interrupt is seen up to the stop being sent, which the retire
+	// checks; an interrupt that stopped nothing puts the victim back.
+	err = ops.retire(ctx, victim, false, readAt.Add(rolloutScanFresh))
+	if err != nil && ctx.Err() != nil && errors.Is(err, context.Canceled) {
+		return errors.Join(fmt.Errorf("interrupted before %s was stopped: %w", name, err), putBack())
+	}
+
 	if err != nil {
 		return fmt.Errorf("%s: retiring: %w", name, err)
 	}

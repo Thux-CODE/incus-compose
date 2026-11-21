@@ -790,7 +790,7 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 		assert.Equal(t, []string{"web-1 old", "web-2 new"}, f.final())
 	})
 
-	t.Run("once the stop has begun, which is seen through", func(t *testing.T) {
+	t.Run("as the retire is sent, before its stop", func(t *testing.T) {
 		t.Parallel()
 
 		f := newFakeRollout(t, map[int]*fakeReplica{1: old()}, slowStart)
@@ -798,14 +798,16 @@ func TestRolloutInterruptedBetweenSteps(t *testing.T) {
 		ctx, cancel := context.WithCancel(t.Context())
 		defer cancel()
 
-		// The interrupt lands as the retire is sent.
+		// The interrupt lands as the retire is sent: the retire checks it
+		// right before the stop, so nothing is stopped and the old one goes
+		// back. (Once the stop is sent it is seen through, in the runner.)
 		f.onRetire = cancel
 
 		err := rollout(ctx, f, f.plan(1))
-		require.NoError(t, err)
+		require.ErrorIs(t, err, context.Canceled)
 
-		assert.Equal(t, []string{"create web-2", "drain web-1", "retire web-1"}, f.events)
-		assert.Equal(t, []string{"web-2 new"}, f.final())
+		assert.Equal(t, []string{"create web-2", "drain web-1", "retire web-1 canceled", "undrain web-1"}, f.events)
+		assert.Equal(t, []string{"web-1 old", "web-2 new"}, f.final())
 	})
 }
 
@@ -1329,14 +1331,15 @@ func TestRolloutStop(t *testing.T) {
 		assert.Zero(t, kills)
 	})
 
-	t.Run("a stop that returned on a passing Error read is checked and killed", func(t *testing.T) {
+	t.Run("a stop that went through and reads running is not killed", func(t *testing.T) {
 		t.Parallel()
 
-		// The client's Stop takes a moment in Error for "not running" and
-		// returns nil without stopping anything.
+		// Either ic-healthd started it again, or the client's Stop took a
+		// moment in Error for "not running": either way no kill goes out on
+		// the round the stop was decided on, and the rollout reads again.
 		_, kills, err := run(true, world{reads: []incusApi.StatusCode{incusApi.Running}})
-		require.NoError(t, err)
-		assert.Equal(t, 1, kills)
+		require.ErrorIs(t, err, errRolloutRestarted)
+		assert.Zero(t, kills)
 	})
 
 	t.Run("a kill that does not take is sent again", func(t *testing.T) {

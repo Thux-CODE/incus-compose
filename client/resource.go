@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
@@ -33,6 +34,10 @@ type Options struct {
 	// NoAdopt makes an Ensure of an instance that finds one by its name fail
 	// instead of taking it as its own (for ActionEnsure).
 	NoAdopt bool
+
+	// NotAfter, when not zero, is the latest an instance's stop is sent: past
+	// it, after the waits before it, the stop fails with ErrStopTooLate.
+	NotAfter time.Time
 
 	// Force deletion/stop even if resource is in use.
 	Force bool
@@ -100,6 +105,16 @@ func OptionCreate() Option {
 func OptionNoAdopt() Option {
 	return func(o *Options) {
 		o.NoAdopt = true
+	}
+}
+
+// ErrStopTooLate is a stop not sent, as it would have been past NotAfter.
+var ErrStopTooLate = errors.New("the stop would be sent too late")
+
+// OptionNotAfter sets the latest a stop is sent (Options.NotAfter).
+func OptionNotAfter(t time.Time) Option {
+	return func(o *Options) {
+		o.NotAfter = t
 	}
 }
 

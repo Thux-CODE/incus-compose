@@ -2054,6 +2054,11 @@ func (r *Instance) stop(ctx context.Context, options Options) error {
 		return nil
 	}
 
+	// The last moment a caller's decision to stop may be checked against.
+	if !options.NotAfter.IsZero() && time.Now().After(options.NotAfter) {
+		return ErrStopTooLate
+	}
+
 	err = r.requestStop(ctx, options, options.Force)
 	if err == nil {
 		return r.fetch(ctx, nil)

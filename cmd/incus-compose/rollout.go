@@ -1135,7 +1135,9 @@ func rolloutExpanded(info *incusApi.Instance) map[string]string {
 }
 
 func (r *rolloutRunner) drain(ctx context.Context, index int, drained bool) error {
-	keys := map[string]string{shared.DNSDrainKey: "", rolloutDrainKey: ""}
+	// Put back, it is checked again too: a stop that did not go through, or
+	// that ic-healthd undid, may have left health checking stopped.
+	keys := map[string]string{shared.DNSDrainKey: "", rolloutDrainKey: "", shared.HealthStoppedKey: ""}
 	if drained {
 		keys = map[string]string{shared.DNSDrainKey: "true", rolloutDrainKey: r.runID}
 	}
@@ -1200,17 +1202,45 @@ func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, not
 
 	inst := r.instances[index]
 
-	err = inst.SetHealthCheckingStopped(ctx, true)
+	markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rolloutReadTimeout)
+	err = inst.SetHealthCheckingStopped(markCtx, true)
+
+	cancel()
+
 	if err != nil {
 		return err
 	}
 
-	err = inst.Delete(ctx)
+	// The delete is the step there is no way back from: an interrupt up to
+	// it, or a name that changed hands, leaves the replica, its restart
+	// policy put back.
+	restore := func(cause error) error {
+		markCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), rolloutReadTimeout)
+		defer cancel()
+
+		return errors.Join(cause, inst.SetHealthCheckingStopped(markCtx, false))
+	}
+
+	if ctx.Err() != nil {
+		return restore(fmt.Errorf("interrupted before the delete: %w", ctx.Err()))
+	}
+
+	readCtx, cancelRead := context.WithTimeout(context.WithoutCancel(ctx), rolloutReadTimeout)
+	info, err = r.sameInstance(readCtx, index)
+
+	cancelRead()
+
+	if err != nil || info == nil {
+		return restore(err)
+	}
+
+	err = inst.Delete(context.WithoutCancel(ctx))
 	if err != nil {
 		return err
 	}
 
 	delete(r.instances, index)
+	delete(r.uuids, index)
 
 	return nil
 }
@@ -1230,9 +1260,17 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 	// what carries its mark, made by the run picked up again. The name was
 	// free when it was checked, but another process may have created an
 	// instance by it in between, which the create then conflicted with.
-	ours := inst.Created() || r.runID != "" && info.Config[rolloutIDKey] == r.runID
-	if !ours {
+	// A create with no uuid read is not enough: the instance has to carry the
+	// run's mark, which then tells its uuid.
+	marked := r.runID != "" && info.Config[rolloutIDKey] == r.runID
+	known := r.uuids[index] != ""
+
+	if !marked && !(inst.Created() && known) {
 		return fmt.Errorf("%s exists but was not created by this run: left as it is", r.name(index))
+	}
+
+	if !known {
+		r.uuids[index] = info.Config["volatile.uuid"]
 	}
 
 	if !inst.IsEnsured() {
@@ -1269,8 +1307,15 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 		return rolloutRunning(s), err
 	}
 
+	// The stop is sent only within notAfter, after the waits Stop makes
+	// before it; one that would come later is not sent.
 	shutdown := func(ctx context.Context) error {
-		return inst.Stop(ctx, client.OptionTimeout(r.stopTimeout))
+		err := inst.Stop(ctx, client.OptionTimeout(r.stopTimeout), client.OptionNotAfter(notAfter))
+		if errors.Is(err, client.ErrStopTooLate) {
+			return errRolloutStale
+		}
+
+		return err
 	}
 
 	kill := func(ctx context.Context) error {
@@ -1307,28 +1352,61 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 			return err
 		}
 
-		// The decision to stop it is good only for so long after the round
-		// it was made on: past that, nothing is stopped, and it is made again.
-		if !notAfter.IsZero() && time.Now().After(notAfter) {
-			return errors.Join(errRolloutStale, bounded(ctx, func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, false) }))
+		// Put back the restart policy, on a stop not sent after all.
+		unmark := func(cause error) error {
+			return errors.Join(cause, bounded(context.WithoutCancel(ctx), func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, false) }))
 		}
 
-		return rolloutStop(ctx, shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery)
+		// The decision to stop it is good only for so long after the round
+		// it was made on: past that, nothing is stopped, and it is made again.
+		// An interrupt up to here stops nothing either; from here on the stop
+		// is seen through.
+		if ctx.Err() != nil {
+			return unmark(fmt.Errorf("interrupted before the stop: %w", ctx.Err()))
+		}
+
+		if !notAfter.IsZero() && time.Now().After(notAfter) {
+			return unmark(errRolloutStale)
+		}
+
+		err = rolloutStop(context.WithoutCancel(ctx), shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery)
+		if errors.Is(err, errRolloutStale) {
+			return unmark(err)
+		}
+
+		return err
 	}
 
 	remove := func(ctx context.Context) error {
-		// Deleted by name, so only while the name is the instance's still.
+		// After the stop, seen through.
+		ctx = context.WithoutCancel(ctx)
+
+		// Deleted by name, so only while the name is the instance's still,
+		// by a uuid known: gone already, it is not deleted by name again.
+		if r.uuids[index] == "" {
+			return fmt.Errorf("%s not deleted: its uuid is not known", r.name(index))
+		}
+
+		var info *incusApi.Instance
+
 		err := bounded(ctx, func(ctx context.Context) error {
-			_, err := r.sameInstance(ctx, index)
+			var err error
+
+			info, err = r.sameInstance(ctx, index)
+
 			return err
 		})
 		if err != nil {
 			return err
 		}
 
-		err = inst.Delete(ctx)
+		if info != nil {
+			err = inst.Delete(ctx)
+		}
+
 		if err == nil {
 			delete(r.instances, index)
+			delete(r.uuids, index)
 		}
 
 		return err
@@ -1400,11 +1478,22 @@ func rolloutRunning(s incusApi.StatusCode) bool {
 func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) error, status func(ctx context.Context) (incusApi.StatusCode, error), graceful bool, settle, poll, killEvery time.Duration) error {
 	var errs []error
 
+	// A graceful stop that went through and an instance read running right
+	// after it: ic-healthd started it again, and no kill goes out on the
+	// round the stop was decided on.
+	stoppedOK := false
+
 	if graceful {
 		err := shutdown(ctx)
+		if errors.Is(err, errRolloutStale) {
+			return err
+		}
+
 		if err != nil && !errors.Is(err, client.ErrNotRunning) {
 			errs = append(errs, err)
 		}
+
+		stoppedOK = err == nil
 	}
 
 	deadline := time.Now().Add(settle)
@@ -1420,6 +1509,10 @@ func rolloutStop(ctx context.Context, shutdown, kill func(ctx context.Context) e
 		s, err := status(ctx)
 		if err == nil && s == incusApi.Stopped {
 			return nil
+		}
+
+		if err == nil && rolloutRunning(s) && stoppedOK && lastKill.IsZero() {
+			return fmt.Errorf("%w after its stop", errRolloutRestarted)
 		}
 
 		if err == nil && rolloutRunning(s) && (lastKill.IsZero() || time.Since(lastKill) >= killEvery) {

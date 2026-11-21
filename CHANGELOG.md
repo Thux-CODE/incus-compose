@@ -171,6 +171,17 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` puts the old replica back into the service name, and its health
+  checking back on, whenever no stop went through, the last of three tries
+  put off included, and reports what went wrong on each try; a stopped old
+  replica it keeps is put back too, and the new ones that do not serve are
+  taken away. The freshness of the round a stop goes by counts from when the
+  round began, and is checked in the client right before the stop request; a
+  victim read running right after a graceful stop is not killed but read
+  again. An interrupt is seen up to the stop request. No delete goes out
+  without the instance's uuid known and read again right before it.
+  (by @sandroden)
+
 - `rollout` takes a healthcheck a profile gives the new replicas into
   account, as ic-healthd runs it: such a service is no longer refused for
   having none, and its health timeout follows it. The profiles are the ones
