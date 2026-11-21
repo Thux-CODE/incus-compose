@@ -41,7 +41,17 @@ type xfr struct {
 	allow []netip.Prefix
 
 	current atomic.Pointer[ecs_view.Snapshot]
+
+	// complete is the first round of this run having ended. Before it a zone
+	// is whatever the replay has reached, under the serial a previous run
+	// published whole: a secondary transferring it then would hold half a
+	// zone under a serial that never moves for it, so nothing goes over.
+	complete atomic.Bool
 }
+
+// SetComplete says the zones hold the whole fleet from now on. Called after
+// the publish that made them so, and never taken back.
+func (x *xfr) SetComplete() { x.complete.Store(true) }
 
 // newXFR returns a handler already holding an empty snapshot, so a transfer
 // arriving before the first publish is refused rather than answered from nil.
@@ -91,6 +101,13 @@ func (x *xfr) transfer(state request.Request) (int, error) {
 	err := w.TsigStatus()
 	if err != nil {
 		return dns.RcodeRefused, err
+	}
+
+	// SERVFAIL rather than REFUSED: a secondary tries again after its retry
+	// interval, and keeps what it holds meanwhile. Loaded before the snapshot,
+	// so one read complete is at least as new as the publish that made it.
+	if !x.complete.Load() {
+		return dns.RcodeServerFailure, nil
 	}
 
 	snap := x.current.Load()

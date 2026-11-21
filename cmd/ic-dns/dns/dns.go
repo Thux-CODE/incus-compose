@@ -660,6 +660,7 @@ func (p *Plugin) rounded() {
 	p.state.write(p.cfg.TTL)
 	p.askIfGrew()
 	p.publish()
+	p.xfr.SetComplete()
 
 	p.state.fresh = true
 

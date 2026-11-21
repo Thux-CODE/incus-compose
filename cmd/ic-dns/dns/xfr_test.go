@@ -101,6 +101,7 @@ func xfrServed(t *testing.T, allow []netip.Prefix, held map[string]*instance) *x
 
 	x := newXFR(slog.Default(), allow)
 	x.Replace(s.snapshot())
+	x.SetComplete()
 
 	return x
 }

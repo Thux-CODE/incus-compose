@@ -2,6 +2,8 @@ package dns
 
 import (
 	"errors"
+	"log/slog"
+	"net/netip"
 	"testing"
 
 	incusapi "github.com/lxc/incus/v7/shared/api"
@@ -30,6 +32,51 @@ func TestReviewSweepFromDisconnectedInterval(t *testing.T) {
 	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
 	require.Equal(t, 200, status(), "the reconnection's own run ended")
 	require.True(t, c.p.view.Ready())
+}
+
+// TestReviewIncompleteColdAXFR: the disk says two names at serial 42, and the
+// publish window closes after the replay of the first. A transfer then would
+// hand a secondary one name under 42, and the zone completed later under the
+// same 42 would never reach it. So nothing goes over before the round: the
+// secondary keeps what it holds - 42 from the previous run, whole - and the
+// first transfer after it carries both names.
+//
+// The review asked for the first transfer to succeed and for the serial to
+// move; refusing it keeps every transfer under 42 whole instead, and a
+// restart that found nothing changed costs secondaries no transfer at all.
+func TestReviewIncompleteColdAXFR(t *testing.T) {
+	const zone = "shop.example."
+	p := New(slog.Default(), Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
+	p.next = func(*iutil.Event) {}
+	p.state = newState(map[string]zoneSerial{zone: {Serial: 42}})
+	ev := func(name, ip string) *iutil.Event {
+		return eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", name, nil, map[string]string{"a": ip}).
+			WithProject(iutil.NewProject(optedIn()))
+	}
+	one, two := ev("one", "10.0.0.1"), ev("two", "10.0.0.2")
+	p.fold(one.WithRestored())
+	p.write() // first publish window expires during replay
+	first := xfrPeer(true)
+	require.Equal(t, dns.RcodeServerFailure, serve(t, p.xfr, first, xfrQuery(zone, 0)), "half a zone under 42")
+	require.Empty(t, first.records())
+	p.fold(two.WithRestored())
+	p.write()
+	p.fold(one)
+	p.fold(two)
+	p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	full := xfrPeer(true)
+	require.Equal(t, dns.RcodeSuccess, serve(t, p.xfr, full, xfrQuery(zone, 0)))
+
+	var names []string
+
+	for _, rr := range full.records() {
+		if a, ok := rr.(*dns.A); ok {
+			names = append(names, a.Hdr.Name)
+		}
+	}
+
+	require.ElementsMatch(t, []string{"one." + zone, "two." + zone}, names)
+	require.Equal(t, uint32(42), full.records()[0].(*dns.SOA).Serial, "nothing changed since the previous run")
 }
 
 // TestReviewLateColdStampChangesWarmZone: an update read before the round
