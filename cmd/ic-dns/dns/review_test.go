@@ -11,6 +11,27 @@ import (
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
+// TestReviewSweepFromDisconnectedInterval: the REST sweep ends while the
+// WebSocket is down, and the source takes its end during its backoff. Neither
+// that end nor the reconnection is a round: /ready stays 503 until the run the
+// reconnection starts has ended, and then turns 200.
+func TestReviewSweepFromDisconnectedInterval(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"))
+	status := readyAfter(t, c.p)
+	c.p.fold(event(iutil.ActionConnected, "", ""))
+	c.p.fold(event(iutil.ActionDisconnected, "", ""))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Equal(t, 503, status())
+	require.False(t, c.p.view.Ready(), "a round while the stream is down")
+	c.p.fold(warm(event(iutil.ActionConnected, "", "")))
+	require.Equal(t, 503, status(), "the sweep started by this reconnection is still outstanding")
+	require.False(t, c.p.view.Ready())
+
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Equal(t, 200, status(), "the reconnection's own run ended")
+	require.True(t, c.p.view.Ready())
+}
+
 func TestReviewFailedFirstReadIsNotACompleteRound(t *testing.T) {
 	t.Skip("contested: the round is the enricher's to close. It holds the end of a run " +
 		"until every instance it listed and nothing holds has been read " +

@@ -130,6 +130,24 @@ func TestReviewSweepEndsAfterTheGrace(t *testing.T) {
 	require.GreaterOrEqual(t, time.Since(start), 200*time.Millisecond)
 }
 
+// TestAnAbandonedRunEndsNothing: a reconnect abandons the run under way. What
+// it still gets through - its end above all, held on a project read or not -
+// says nothing about the fleet since the stream came back, and is not taken.
+func TestAnAbandonedRunEndsNothing(t *testing.T) {
+	p := bare(t)
+	raised := make(chan iutil.Command, 4)
+	p.args.CommandOut = raised
+
+	stale := p.sweepArgs().run
+	p.sweepRun++
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone, run: stale})
+	require.Empty(t, raised, "the end of an abandoned run was announced")
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone, run: p.sweepRun})
+	require.Equal(t, iutil.ActionSweepEnd, (<-raised).Action)
+}
+
 // untilSweepEnd reads the chain until the end of a run.
 func untilSweepEnd(t *testing.T, h *fixture, within time.Duration) {
 	t.Helper()

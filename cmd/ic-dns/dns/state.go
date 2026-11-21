@@ -61,6 +61,9 @@ type state struct {
 	fresh bool
 	lost  time.Time
 
+	// down is the stream having been lost and not come back yet.
+	down bool
+
 	// grew is a name having landed on a network nothing was on: its peering
 	// has not been read, since until now it could change no answer.
 	grew bool

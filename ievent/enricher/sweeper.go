@@ -49,6 +49,10 @@ type sweepMsg struct {
 	network *incusapi.Network
 
 	err error
+
+	// run is which run said it. A run abandoned for a newer one may still get
+	// a message through: its send races the cancel.
+	run uint64
 }
 
 // sweeperConn is what the sweeper lists. An interface rather than the connection, so
@@ -60,9 +64,12 @@ type sweeperConn interface {
 	GetInstanceNames(ctx context.Context, project string, args *iclient.GetInstancesArgs) ([]string, error)
 }
 
-func sweepSend(ctx context.Context, out chan<- sweepMsg, msg sweepMsg) error {
+// sweepSend hands one message over, marked with the run it belongs to.
+func sweepSend(ctx context.Context, a sweepArgs, msg sweepMsg) error {
+	msg.run = a.run
+
 	select {
-	case out <- msg:
+	case a.sweepOut <- msg:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -115,6 +122,9 @@ type sweepArgs struct {
 	// for that long.
 	retry    time.Duration
 	retryMax time.Duration
+
+	// run marks every message this sweeper sends.
+	run uint64
 }
 
 // runSweep reads the fleet once: the projects, then every network of every
@@ -131,7 +141,7 @@ func runSweep(ctx context.Context, logger *slog.Logger, a sweepArgs) error {
 		return err
 	}
 
-	err = sweepSend(ctx, a.sweepOut, sweepMsg{action: sweepActionNetworksWarm})
+	err = sweepSend(ctx, a, sweepMsg{action: sweepActionNetworksWarm})
 	if err != nil {
 		return err
 	}
@@ -192,7 +202,7 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 		}
 	}
 
-	err = sweepSend(ctx, a.sweepOut, sweepMsg{action: sweepActionProjects, names: served})
+	err = sweepSend(ctx, a, sweepMsg{action: sweepActionProjects, names: served})
 	if err != nil {
 		return nil, nil, err
 	}
@@ -219,7 +229,7 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 			continue
 		}
 
-		err = sweepSend(ctx, a.sweepOut, sweepMsg{
+		err = sweepSend(ctx, a, sweepMsg{
 			action:  sweepActionNetworks,
 			project: project,
 			names:   names,
@@ -239,7 +249,7 @@ func sweepNetworks(ctx context.Context, logger *slog.Logger, a sweepArgs, projec
 				msg = sweepMsg{action: sweepActionFailed, err: err}
 			}
 
-			err = sweepSend(ctx, a.sweepOut, msg)
+			err = sweepSend(ctx, a, msg)
 			if err != nil {
 				return err
 			}
@@ -280,7 +290,7 @@ func sweepInstances(ctx context.Context, logger *slog.Logger, a sweepArgs, serve
 			continue
 		}
 
-		err = sweepSend(ctx, a.sweepOut, sweepMsg{
+		err = sweepSend(ctx, a, sweepMsg{
 			action:  sweepActionInstances,
 			project: project,
 			names:   names,
@@ -350,7 +360,7 @@ func runSweeper(ctx context.Context, logger *slog.Logger, a sweepArgs, interval 
 				backoff = 0
 			}
 
-			err = sweepSend(ctx, a.sweepOut, msg)
+			err = sweepSend(ctx, a, msg)
 			if err != nil {
 				return
 			}

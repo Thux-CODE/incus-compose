@@ -112,6 +112,11 @@ type Plugin struct {
 	// it shares with this one, and sweeperCancel is how a run is abandoned.
 	sweeperCancel context.CancelFunc
 	sweeps        chan sweepMsg
+
+	// sweepRun is the run the sweeper now running was started as; what an
+	// abandoned one still says is not listened to.
+	sweepRun uint64
+
 	// sweepEnding says a run reached its end while its project reads were still
 	// out, or instances it listed were unread, so whatever settles the last of
 	// them announces it instead.

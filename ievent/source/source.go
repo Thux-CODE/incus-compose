@@ -218,7 +218,11 @@ func (s *Source) session(ctx context.Context) bool {
 	}
 
 	// Connected the moment Incus accepts the listener; the enricher reads a
-	// whole fleet off it.
+	// whole fleet off it. Cold until that read ends: a command taken during
+	// the backoff - the end of a run started before the stream went - may
+	// have stamped the chain warm, and that run missed what happened since.
+	s.chain = iutil.ChainCold
+
 	s.hand(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", ""))
 
 	// Paired on every way out, including a canceled context, and cold with it.

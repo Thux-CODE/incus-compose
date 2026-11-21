@@ -301,7 +301,7 @@ func TestReconnectClaimsNothingAboutAFleetThatDidNotMove(t *testing.T) {
 	assert.False(t, r.p.view.Ready(), "nothing is confirming what is served")
 
 	// Reconnected: the enricher replays cold, and the fleet has not moved.
-	r.feed(t, updated("10.0.0.9"), event(iutil.ActionSweepEnd, "", ""))
+	r.feed(t, event(iutil.ActionConnected, "", ""), updated("10.0.0.9"), event(iutil.ActionSweepEnd, "", ""))
 	assert.True(t, r.p.view.Ready(), "a round finished again")
 
 	// And warm again, still with nothing having changed.

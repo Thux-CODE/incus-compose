@@ -564,20 +564,39 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		p.view.SetHealthy(false)
 		p.state.fresh = false
 		p.state.lost = ev.At()
+		p.state.down = true
+
+		return
+	}
+
+	// Back, after events nobody heard. What a round ended while it was down
+	// said is as old as the stream's loss - the source takes commands in its
+	// backoff - so the round that counts is the one the enricher starts now.
+	// A first connection follows no loss, and takes nothing back.
+	if ev.Action() == iutil.ActionConnected {
+		if p.state.down {
+			p.view.SetHealthy(false)
+			p.state.fresh = false
+			p.state.lost = ev.At()
+			p.state.down = false
+		}
 
 		return
 	}
 
 	// Only an end that came the whole way in order. One dropped on the way
 	// overtook the reads still in flight before it, and rounding on it would
-	// turn the view warm over names nobody has read yet.
+	// turn the view warm over names nobody has read yet. Nor one while the
+	// stream is down: the fleet is read again from the top once it is back.
 	if ev.Action() == iutil.ActionSweepEnd && ev.Err() == nil {
-		p.rounded()
+		if !p.state.down {
+			p.rounded()
+		}
 
 		return
 	}
 
-	if ev.Err() != nil && !p.state.fresh {
+	if ev.Err() != nil && !p.state.fresh && !p.state.down {
 		p.roundLost(ev)
 	}
 
@@ -587,7 +606,7 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// lost, it is a debounced leftover and says nothing about the stream since.
 	// The rule http follows for /ready, so the two agree. Nothing else -
 	// a failed read, or a cold stamp after the round - takes it back.
-	if !p.state.fresh && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
+	if !p.state.fresh && !p.state.down && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm && ev.At().After(p.state.lost) {
 		p.rounded()
 	}
 

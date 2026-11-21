@@ -144,7 +144,13 @@ func (p *Plugin) decide(ev *iutil.Event) {
 
 	switch ev.Action() {
 	case iutil.ActionConnected:
+		// A stream coming up is one whose events before it went to nobody,
+		// which is why the enricher reads the fleet again: nothing before it
+		// confirms what is served, a round that ended while it was down
+		// included - the source takes commands during its backoff too.
 		p.connected.Store(true)
+		p.ready.Store(false)
+		p.lost = ev.At()
 
 		return
 

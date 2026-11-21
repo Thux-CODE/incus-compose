@@ -23,15 +23,25 @@ func (p *Plugin) sweepArgs() sweepArgs {
 		delay:    p.opts.ReadDelay,
 		retry:    p.opts.sweepRetry,
 		retryMax: p.opts.sweepRetryMax,
+		run:      p.sweepRun,
 	}
 }
 
 // restartSweep abandons the run where it stands and starts a fast one. What a
 // reconnect asks for: everything held is as old as the stream was down.
+//
+// The abandoned run's end is abandoned with it, held or not: it was read
+// before the stream came back, and announcing it would turn the chain warm on
+// a fleet nobody has read since.
 func (p *Plugin) restartSweep(ctx context.Context) {
 	if p.sweeperCancel != nil {
 		p.sweeperCancel()
 	}
+
+	p.sweepRun++
+	p.sweepEnding = false
+	p.endGrace = nil
+	p.graceOver = false
 
 	sweepCtx, stopSweeping := context.WithCancel(ctx)
 	p.sweeperCancel = stopSweeping
@@ -39,8 +49,13 @@ func (p *Plugin) restartSweep(ctx context.Context) {
 	runSweeper(sweepCtx, p.logger, p.sweepArgs(), p.opts.SweepInterval)
 }
 
-// acceptSweep takes one message from the sweeper.
+// acceptSweep takes one message from the sweeper, unless it is from a run
+// already abandoned.
 func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
+	if msg.run != p.sweepRun {
+		return
+	}
+
 	switch msg.action {
 	case sweepActionProjects:
 		// Announced before the prune, the way a listing of instances is: a
