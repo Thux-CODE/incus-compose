@@ -401,12 +401,36 @@ form.
   An update read taken while `starting` was being written could carry the
   previous run's `healthy` and suppress that write, leaving the replica
   `starting`, and out of its service in `ic-dns`, until a later transition.
-  Reads no longer override a status write in flight. (by @sandroden)
+  Reads no longer override a status write in flight, and `healthy` is rewritten
+  on every passing check until one of that run's `healthy` writes lands, so a
+  failed first write followed by a stale read no longer leaves the replica
+  `starting` either. (by @sandroden)
+
+- `ic-healthd` releases a status writer only with the result of its own write.
+  The result of a write for a deleted instance could free the writer of the
+  instance re-created under the same name, letting its `starting` and
+  `healthy` PATCHes race. (by @sandroden)
 
 - `ic-healthd` wakes for the watchdog deadline of every check or restart in
   flight, and for the next check or restart the watchdog schedules. With a
   single watched instance, a check that never returned was reaped only when an
   unrelated event woke the loop, up to an hour later. Already present in
+  v1.4.0. (by @sandroden)
+
+- `ic-healthd` ends an expired start period on a probe timeout too, as on a
+  failed check. An instance whose probes all timed out stayed `starting` and
+  was never restarted. Already present in v1.4.0. (by @sandroden)
+
+- `ic-healthd` logs an event for an instance it does not watch (no
+  healthcheck, not enabled, a config that does not parse) in place. The loop
+  used to send it on its own results channel, and with that channel full it
+  blocked every check, status write and watchdog of the project. Already
+  present in v1.4.0. (by @sandroden)
+
+- `ic-healthd` counts an instance in Incus state `Ready` (running, with its
+  readiness reported through `/dev/incus`) as running, as `ic-dns` already
+  does. It used to fail every check as not running, write `stopped` and, with
+  a restart policy, force-restart an instance that worked. Already present in
   v1.4.0. (by @sandroden)
 
 ## [v1.4.0] - 2026-11-11
