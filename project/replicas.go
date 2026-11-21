@@ -198,8 +198,14 @@ func serviceImageTarget(c *client.Client, service types.ServiceConfig) (string, 
 		ctx, cancel := context.WithTimeout(context.Background(), imageTargetTimeout)
 		defer cancel()
 
-		return img.ProjectAliasTarget(ctx)
+		return readAliasTarget(ctx, img)
 	})
+}
+
+// readAliasTarget reads what the image's alias points at in the project; a
+// test stands in for Incus here.
+var readAliasTarget = func(ctx context.Context, img *client.Image) (string, error) {
+	return img.ProjectAliasTarget(ctx)
 }
 
 // imageTargetTimeout bounds the read of an alias a plan ranks replicas by.
