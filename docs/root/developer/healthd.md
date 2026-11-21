@@ -318,7 +318,10 @@ its idle hour. A parked instance contributes nothing.
 
 `status` is the value last known to be on the instance, and a write goes out
 only on a transition. Writes are serialised per instance: one in flight, and the
-value asked for meanwhile queued behind it. Every event read refreshes `status`,
+value asked for meanwhile queued behind it. Only that write's own result
+releases the slot: each write carries an identity (`statusWrite`), as an action
+carries its context, so the result of a write sent for an instance deleted since
+does not free the writer of the one created under the same name. Every event read refreshes `status`,
 since anyone may write the key, except while a write is out: such a read may
 predate it, and adopting the old value would make the write behind look landed.
 

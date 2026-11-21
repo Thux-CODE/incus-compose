@@ -52,6 +52,20 @@ func TestSecondHealthyAfterFailedPatchAndStaleRead(t *testing.T) {
 	}
 }
 
+func TestSecondPreviousStatusAckReleasesNewWriter(t *testing.T) {
+	s := newScheduler(t)
+	s.event(api.EventLifecycleInstanceStarted, "web")
+	old := landed(s.next(t))
+	s.event(api.EventLifecycleInstanceDeleted, "web")
+	s.event(api.EventLifecycleInstanceStarted, "web")
+	newWrite := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, newWrite.status)
+	s.result(old)
+	inst := s.instances[s.key("web")]
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, inst.queued, "healthy must wait for the replacement instance's outstanding starting write")
+}
+
 func TestSecondFullResultsBlocksScheduler(t *testing.T) {
 	s := newScheduler(t)
 	keys := healthKeys(map[string]string{"test": "invalid JSON"})

@@ -1914,6 +1914,45 @@ func TestAPreviousRunHealthyDoesNotProveTheNewRun(t *testing.T) {
 	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
 }
 
+// TestAReplacementGetsOnlyItsOwnWriteResults is the linear case of a delete and
+// a create under the same name with a write out for each: the predecessor's
+// result changes nothing, the replacement's own releases its writer, and the
+// healthy queued behind it goes once and lands for good.
+func TestAReplacementGetsOnlyItsOwnWriteResults(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	old := s.next(t)
+
+	s.event(incusApi.EventLifecycleInstanceDeleted, "web-1")
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	starting := s.next(t)
+	inst := s.instances[s.key("web-1")]
+
+	s.result(s.checked(t, inst, nil))
+
+	// Delivered twice, as a failed and as a landed write: neither counts.
+	s.result(old)
+	s.result(landed(old))
+	require.True(t, inst.writing, "the replacement's starting is still out")
+	require.Equal(t, shared.HealthStatusHealthy, inst.queued)
+	require.True(t, inst.unproven)
+	s.silent(t)
+
+	s.result(landed(starting))
+
+	healthy := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, healthy.status)
+	s.result(landed(healthy))
+	require.False(t, inst.writing)
+	require.False(t, inst.unproven)
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
 // ----------------------------------------------------------------------------
 // the start period through the watchdog
 // ----------------------------------------------------------------------------

@@ -128,7 +128,18 @@ type instanceResult struct {
 	status string
 	run    uint64
 
+	// write identifies a status write, as ctx does an action: the key is the
+	// project and the name, and an instance deleted and created again under
+	// them gets the result of the write its predecessor sent.
+	write *statusWrite
+
 	err error
+}
+
+// statusWrite is one status write's identity. Never zero-sized: pointers to
+// distinct zero-size values may compare equal.
+type statusWrite struct {
+	status string
 }
 
 // reportUnwatched says why an event's read is not watched. It runs on the loop
@@ -197,6 +208,9 @@ type instance struct {
 	// two racing writes land in any order, and the one that loses would stay
 	// on the instance while status says the other.
 	writing bool
+
+	// write is the write in flight, which only its own result releases.
+	write *statusWrite
 
 	// queued is the status asked for while a write was in flight, written
 	// once it lands.
@@ -748,9 +762,13 @@ func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connect
 	inst.writing = true
 	run := inst.run
 
+	write := &statusWrite{status: status}
+	inst.write = write
+
 	go func(name string) {
 		res := instanceStatusAction(ctx, logger, conn, project, name, status)
 		res.run = run
+		res.write = write
 
 		select {
 		case <-ctx.Done():
@@ -1094,7 +1112,17 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 			return
 		}
 
+		// Sent for an instance deleted since, and held now by the one created
+		// under its name: releasing this one's writer would let two of its
+		// writes race. Its own result is still to come.
+		if res.write != inst.write {
+			logger.Debug("Dropping the result of a status write for a deleted instance", "instance", res.name, "status", res.status)
+
+			return
+		}
+
 		inst.writing = false
+		inst.write = nil
 
 		queued := inst.queued
 		inst.queued = ""
