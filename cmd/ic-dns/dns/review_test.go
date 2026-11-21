@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/netip"
 	"testing"
 	"time"
@@ -387,6 +388,63 @@ func TestReviewPeerCallerOnEmptyServedNetwork(t *testing.T) {
 	r.feed(t, warm(h["default/mgmt"].Event))
 	require.Eventually(t, func() bool { return ask() == dns.RcodeSuccess }, 2*time.Second, time.Millisecond)
 	require.Equal(t, "NOERROR", dns.RcodeToString[before])
+}
+
+// TestReviewTruncatedNegativeThroughTheChain: the truncated NXDOMAIN of the
+// engine's own test, through the whole chain a cold server answers with.
+func TestReviewTruncatedNegativeThroughTheChain(t *testing.T) {
+	p := newColdServer(t, Suffix("incus"))
+	p.p.view.Next = &fakeChain{fn: func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetRcode(r, dns.RcodeNameError)
+		m.Truncated = true
+		require.NoError(t, w.WriteMsg(m))
+	}}
+	code, _ := resolve(p.a, "new.shop.incus.", dns.TypeA, "10.0.0.2")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[code])
+}
+
+// TestReviewControlIPv6Peer is the review's control: an AAAA and its PTR
+// through a peer, asked with an IPv6 client subnet /128 that went through
+// pack and unpack. It passed before the fixes, and has to after them.
+func TestReviewControlIPv6Peer(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true))
+	for i, n := range []string{"a", "b"} {
+		ip := []string{"fd42:1::2", "fd42:2::2"}[i]
+		prefix := []string{"fd42:1::/64", "fd42:2::/64"}[i]
+		key := onWire(n)
+		inst := iutil.NewInstance(true, nil, []iutil.InstanceInterface{
+			iutil.NewInstanceInterface("default", n, true, nil, []string{ip}),
+		}, map[string]*iutil.Network{key: iutil.NewNetwork(n, "default", true, "", prefix)})
+		c.p.fold(event(incusapi.EventLifecycleInstanceUpdated, "shop", n).WithInstance(inst, true))
+	}
+	c.p.write()
+	c.p.peered(peerRead{keys: c.p.state.peerTargets(), peers: map[string][]string{onWire("a"): {onWire("b")}, onWire("b"): {onWire("a")}}})
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	ptr, err := dns.ReverseAddr("fd42:2::2")
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name string
+		typ  uint16
+	}{{"b.shop.incus.", dns.TypeAAAA}, {ptr, dns.TypePTR}} {
+		q := new(dns.Msg)
+		q.SetQuestion(tc.name, tc.typ)
+		q.SetEdns0(1232, false)
+		q.IsEdns0().Option = []dns.EDNS0{&dns.EDNS0_SUBNET{Code: dns.EDNS0SUBNET, Family: 2, SourceNetmask: 128, Address: net.ParseIP("fd42:1::99")}}
+		wire, err := q.Pack()
+		require.NoError(t, err)
+		input := new(dns.Msg)
+		require.NoError(t, input.Unpack(wire))
+		w := &recorder{}
+		c.a.ServeDNS(w, input)
+		require.Equal(t, dns.RcodeSuccess, w.msg.Rcode)
+		require.Len(t, w.msg.Answer, 1)
+		if tc.typ == dns.TypeAAAA {
+			require.Equal(t, "fd42:2::2", w.msg.Answer[0].(*dns.AAAA).AAAA.String())
+		} else {
+			require.Equal(t, "b.shop.incus.", w.msg.Answer[0].(*dns.PTR).Ptr)
+		}
+	}
 }
 
 func TestReviewFailedFirstReadIsNotACompleteRound(t *testing.T) {
