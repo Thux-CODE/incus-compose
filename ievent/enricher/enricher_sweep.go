@@ -61,7 +61,18 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// Announced before the prune, the way a listing of instances is: a
 		// project that went, or one no longer served, would otherwise leave its
 		// names answering - restored ones most of all, which nothing else reads.
-		for _, s := range p.state.missingProjects(msg.names) {
+		//
+		// A project an instance was read in after the listing went out may
+		// have been made since: it stays, and so does what is held in it.
+		served := slices.Clone(msg.names)
+
+		for s, at := range p.readAt {
+			if at.After(msg.at) && !slices.Contains(served, s.project) {
+				served = append(served, s.project)
+			}
+		}
+
+		for _, s := range p.state.missingProjects(served) {
 			p.accept(ctx, iutil.NewEvent(time.Now(),
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
@@ -73,7 +84,7 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 			}
 		}
 
-		p.state.pruneProjects(msg.names)
+		p.state.pruneProjects(served)
 
 		p.forgetUnread(ctx, p.unreadOutside(func(s subject) bool { return slices.Contains(msg.names, s.project) })...)
 
@@ -109,7 +120,14 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// Through accept, which is where a delete drops the instance and its
 		// archive entry: a name Incus no longer lists is gone the same way one
 		// it announced is, and nothing downstream can tell them apart.
+		//
+		// Not one a read answered after the listing went out: it may have been
+		// made since, and the listing is no news about it.
 		for _, s := range p.state.missingInstances(msg.project, msg.names) {
+			if p.readAt[s].After(msg.at) {
+				continue
+			}
+
 			p.accept(ctx, iutil.NewEvent(time.Now(),
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}

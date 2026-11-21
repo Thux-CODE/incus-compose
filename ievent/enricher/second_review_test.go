@@ -182,6 +182,35 @@ func TestSecondNetworkCreatedAfterListing(t *testing.T) {
 	require.False(t, exists, "a listing after the create no longer has it, and prunes it")
 }
 
+// TestSecondInstanceCreatedAfterListing: the project's listing captured no
+// instance; before it is delivered an instance is started and read. The
+// listing is older news, and synthesizes no delete for it. A listing asked
+// for after the read, still leaving it out, does.
+func TestSecondInstanceCreatedAfterListing(t *testing.T) {
+	p := bare(t)
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceStarted: {Enrich: iutil.EnrichedInstance}}
+	p.reads.flush(t.Context())
+	oldList := sweepMsg{action: sweepActionInstances, project: "p", at: time.Now()}
+	inst := testlib.NewInstance("p", 0, 0)
+	p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+		return &inst, nil, nil
+	}
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceStarted, "p", inst.Name, ""))
+	p.settleRead(t.Context(), <-p.reads.results)
+	events := make([]string, 0)
+	p.args.Next = func(ev *iutil.Event) { events = append(events, ev.Action()) }
+	for ev := range p.q.release() {
+		p.args.Next(ev)
+	}
+	require.Equal(t, []string{api.EventLifecycleInstanceStarted}, events)
+	p.acceptSweep(t.Context(), oldList)
+	require.Equal(t, []string{api.EventLifecycleInstanceStarted}, events, "an older list synthesized a delete for the new instance")
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: "p", at: time.Now()})
+	require.Equal(t, []string{api.EventLifecycleInstanceStarted, api.EventLifecycleInstanceDeleted}, events,
+		"a listing after the read leaves it out")
+}
+
 // TestSecondRoundEndNamesItsSession: the run a connected restarts ends naming
 // that connected's session, which is what the source checks it against.
 func TestSecondRoundEndNamesItsSession(t *testing.T) {

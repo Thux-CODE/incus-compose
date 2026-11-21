@@ -135,6 +135,11 @@ type Plugin struct {
 	// absence final. Keyed like a call.
 	unread map[string]subject
 
+	// readAt is when the read each held instance was last answered by went
+	// out: a listing asked for before it may not have seen an instance made
+	// since, and is not taken as saying it went.
+	readAt map[subject]time.Time
+
 	// netMoved is when an event last arrived about each network: a read or a
 	// listing of it asked for before then is older news than the event, and
 	// is not taken.
@@ -304,6 +309,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		unread:     map[string]subject{},
 		owedDelete: map[string]subject{},
 		netMoved:   map[netName]time.Time{},
+		readAt:     map[subject]time.Time{},
 		state:      loadState(logger, o.StoreFile, o.Project),
 		reads:      newDeferred(o.Workers, o.ReadTimeout),
 		retries:    newRetries(),
@@ -765,6 +771,8 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	case !landed:
 	case p.state.instance(c.project, c.name) != nil:
 		delete(p.owedDelete, c.key)
+
+		p.readAt[subject{project: c.project, instance: c.name}] = c.sent
 	case had && p.reads.calls[c.key] != nil:
 		p.owedDelete[c.key] = subject{project: c.project, instance: c.name}
 	case had:
@@ -845,6 +853,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.q.push(ev, true)
 		p.forgetUnread(ctx, resourceKey(kindInstance, ev.ProjectName(), ev.Name()))
 		delete(p.owedDelete, resourceKey(kindInstance, ev.ProjectName(), ev.Name()))
+		delete(p.readAt, subject{project: ev.ProjectName(), instance: ev.Name()})
 
 		return
 	}
@@ -856,6 +865,7 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.archive.forget(ev.ProjectName(), ev.OldName())
 		p.updateMetrics()
 		p.forgetUnread(ctx, resourceKey(kindInstance, ev.ProjectName(), ev.OldName()))
+		delete(p.readAt, subject{project: ev.ProjectName(), instance: ev.OldName()})
 	}
 
 	// Both have to be true: wanted for instance enrichment, and the action
@@ -968,6 +978,7 @@ func (p *Plugin) patchState(
 		p.state.deleteInstance(project, name)
 		p.retries.done(project, name)
 		p.archive.forget(project, name)
+		delete(p.readAt, subject{project: project, instance: name})
 
 		return nil, true
 
@@ -981,6 +992,7 @@ func (p *Plugin) patchState(
 		p.state.deleteInstance(project, name)
 		p.retries.done(project, name)
 		p.archive.forget(project, name)
+		delete(p.readAt, subject{project: project, instance: name})
 
 		return nil, true
 	}
