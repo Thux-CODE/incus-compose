@@ -406,6 +406,59 @@ func TestSecondEmptyServedNetworkControl(t *testing.T) {
 	require.Equal(t, "NOERROR", dns.RcodeToString[code])
 }
 
+// TestSerialIgnoresConfigTheZoneDoesNotCarry: once warm, the same instance
+// read again with a config key ic-dns does not use, then with its health
+// status changed while it carries no service, moves no record: the serial
+// stays where it is, and an IXFR from it is the SOA alone. A service label
+// changing does move the zone, and steps it. A zone born before the round
+// comes out of it at 1.
+func TestSerialIgnoresConfigTheZoneDoesNotCarry(t *testing.T) {
+	const zone = "shop.example."
+
+	c := newColdServer(t, Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
+	web := func(extra map[string]string) *iutil.Event {
+		config := map[string]string{"user.a2lab.note": "a"}
+		for key, value := range extra {
+			config[key] = value
+		}
+
+		return event(api.EventLifecycleInstanceUpdated, "shop", "web").
+			WithInstance(read("shop", true, config, netsOf(map[string]string{"a": "10.0.0.2"})), true).
+			WithProject(iutil.NewProject(optedIn()))
+	}
+
+	c.p.fold(web(nil))
+	c.p.write()
+	require.Equal(t, uint32(1), c.p.state.serials[zone].Serial)
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	serial := c.p.state.serials[zone].Serial
+	require.Equal(t, uint32(1), serial, "a zone born before the round was stepped at its end")
+
+	upToDate := func(why string) {
+		t.Helper()
+
+		require.Equal(t, serial, c.p.state.serials[zone].Serial, why)
+
+		ix := xfrPeer(true)
+		require.Equal(t, dns.RcodeSuccess, serve(t, c.p.xfr, ix, xfrQuery(zone, serial)))
+		require.Len(t, ix.records(), 1, "%s: an IXFR from the serial held is the SOA alone", why)
+	}
+
+	c.p.fold(web(map[string]string{"user.a2lab.note": "x"}))
+	c.p.write()
+	upToDate("a config key the zone does not carry")
+
+	c.p.fold(web(map[string]string{"user.a2lab.note": "x", shared.HealthStatusKey: shared.HealthStatusHealthy}))
+	c.p.write()
+	c.p.fold(web(map[string]string{"user.a2lab.note": "x", shared.HealthStatusKey: shared.HealthStatusUnhealthy}))
+	c.p.write()
+	upToDate("the health of an instance in no service")
+
+	c.p.fold(web(map[string]string{"user.a2lab.note": "x", userLabel(labelServiceCompose): "api"}))
+	c.p.write()
+	require.Greater(t, c.p.state.serials[zone].Serial, serial, "a service name came, and the zone did not step")
+}
+
 // in stamps an event with the stream session the source minted it in.
 func in(session uint64, ev *iutil.Event) *iutil.Event { return ev.WithSession(session) }
 
