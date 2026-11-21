@@ -757,6 +757,19 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 	return reads, nil
 }
 
+// rolloutRunServes reports whether a replica this run made or kept serves on
+// the reads given.
+func rolloutRunServes(plan rolloutPlan, slots map[int]*replica, reads map[int]replicaRead) bool {
+	for i, read := range reads {
+		r := slots[i]
+		if r.fresh && r.runID == plan.RunID && read.serves() {
+			return true
+		}
+	}
+
+	return false
+}
+
 // rolloutNeeded reports whether a new replica that failed is not to be taken
 // away: it serves, and without it fewer than the declared count would. A
 // round that cannot be read keeps it too.
@@ -839,6 +852,14 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	}
 
 	if !reads[victim].Running {
+		// It serves nothing, but ic-healthd may start it again: with fewer
+		// than declared serving without it, it goes only for a replica of
+		// this run that serves in the same round, which a service all down
+		// is repaired with. Else it is kept as it is, restart policy and all.
+		if rolloutEnough(plan, reads, victim) != nil && !rolloutRunServes(plan, slots, reads) {
+			return fmt.Errorf("%s not retired: it is stopped, fewer than %d serve, and no replica of this run serves in its place", name, plan.Replicas)
+		}
+
 		err = ops.retire(context.WithoutCancel(ctx), victim, true)
 		if err != nil {
 			return fmt.Errorf("%s: retiring: %w", name, err)

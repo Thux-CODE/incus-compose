@@ -277,9 +277,10 @@ func TestThirdReviewForeignSubstituteBeforeFirstScan(t *testing.T) {
 }
 
 func TestThirdReviewStoppedVictimNoRecovery(t *testing.T) {
-	t.Skip("contested, as in the second round: a stopped old replica serves nothing, and keeping it for a " +
-		"restart ic-healthd might do would stop a degraded service from being rolled out of its state")
-
+	// A stopped old replica, fewer than declared serving without it, and the
+	// new one unhealthy in the round before the retire: it is kept, restart
+	// policy and all, and the run fails. (Granted in part: it goes when a
+	// replica of the run serves in that round, TestSecondReviewStoppedVictimBudget.)
 	r := old()
 	r.running = false
 	f := newFakeRollout(t, map[int]*fakeReplica{1: r}, []string{shared.HealthStatusHealthy, shared.HealthStatusHealthy, shared.HealthStatusUnhealthy})
@@ -290,6 +291,8 @@ func TestThirdReviewStoppedVictimNoRecovery(t *testing.T) {
 		survivor.running = true
 	}
 	require.Positive(t, f.ready(), "err=%v events=%v", err, f.events)
+	require.Error(t, err)
+	require.NotContains(t, f.events, "retire web-1")
 }
 
 func TestThirdReviewSettleChangedManualDrain(t *testing.T) {

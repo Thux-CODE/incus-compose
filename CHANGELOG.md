@@ -171,6 +171,11 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` retires a stopped old replica, with fewer than the declared count
+  serving without it, only when a replica of the run serves in the same round
+  of reads; else it keeps it, restart policy included, and fails.
+  (by @sandroden)
+
 - `rollout` reads the other replicas every 5 seconds during the grace of a
   drained one, and puts it back at the first round with fewer than the
   declared count serving, taking away the new ones that no longer serve and

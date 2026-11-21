@@ -97,7 +97,11 @@ Each replica is checked to be the instance first read under its name
 (`volatile.uuid`) before it is stopped, deleted or taken away: one whose name
 another instance took meanwhile is left alone, and the run fails. A replica
 read stopped is deleted only while it is stopped, with no drain; one that
-started again in between is left, and the run fails. A drain set by hand
+started again in between is left, and the run fails. With fewer than the
+declared count serving without it, a stopped old replica goes only when a
+replica of this run serves in the same round of reads (which repairs a service
+that is all down); else it is kept, with ic-healthd's restart policy, and the
+run fails. A drain set by hand
 (without the rollout's mark, below) is never taken off: such a replica does not
 count as serving, and is replaced like any old one. One put back into the
 service name by something else during its grace is not stopped.
