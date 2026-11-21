@@ -1571,3 +1571,177 @@ func TestRunInstanceActionsWatchdogDoesNotCountAPreviousRunTimeout(t *testing.T)
 	require.False(t, earliest.After(time.Now()))
 	s.silent(t)
 }
+
+// ----------------------------------------------------------------------------
+// status reads racing the daemon's own writes
+// ----------------------------------------------------------------------------
+
+// staleRead is an update read carrying the last run's healthy, the way one
+// taken before starting landed delivers it.
+func (s *scheduler) staleRead(inst *instance) {
+	keys := eventConfig(inst.config)
+	keys["status"] = shared.HealthStatusHealthy
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, inst.name, true, healthKeys(keys))
+}
+
+// TestAStartedRunWritesItsFirstHealthyOnce is the linear case: a start over the
+// last run's healthy, starting written, the first pass written, and the passes
+// after it deduped as before.
+func TestAStartedRunWritesItsFirstHealthyOnce(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.startPeriod = time.Minute
+	inst := s.add("web-1", cfg)
+
+	keys := eventConfig(cfg)
+	keys["status"] = shared.HealthStatusHealthy
+	s.eventRead(incusApi.EventLifecycleInstanceStarted, "web-1", true, healthKeys(keys))
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, res.status)
+	s.result(landed(res))
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
+// TestAReadDuringAWriteDoesNotOverrideIt: while starting is out, a read still
+// carrying healthy is not what is on the instance a moment later. Taking it
+// would let a failed check inside the retries keep "healthy" for a run that
+// has passed nothing.
+func TestAReadDuringAWriteDoesNotOverrideIt(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+
+	s.staleRead(inst)
+	s.staleRead(inst)
+	require.Equal(t, shared.HealthStatusStarting, inst.status, "the write out is what status holds")
+
+	s.result(landed(starting))
+	s.silent(t)
+
+	s.result(s.checked(t, inst, errors.New("not up yet")))
+	require.Equal(t, shared.HealthStatusStarting, inst.status)
+	s.silent(t)
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestALateStaleReadCannotSwallowTheFirstHealthy is the read taken before
+// starting landed but delivered after it: nothing tells it from a fresh one,
+// so it is adopted, and the first pass of the run is written regardless.
+func TestALateStaleReadCannotSwallowTheFirstHealthy(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	s.staleRead(inst)
+	require.Equal(t, shared.HealthStatusHealthy, inst.status)
+
+	// A failure first does not use up the run's first pass.
+	s.result(s.checked(t, inst, errors.New("not up yet")))
+	s.silent(t)
+
+	s.result(s.checked(t, inst, nil))
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, res.status)
+	s.result(landed(res))
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
+// TestAFirstHealthyQueuedBehindStartingIsWritten: the first pass lands while
+// starting is still out and a stale read has come in between. It goes once
+// starting lands, and only once.
+func TestAFirstHealthyQueuedBehindStartingIsWritten(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	starting := s.next(t)
+
+	s.staleRead(inst)
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+
+	s.result(landed(starting))
+
+	res := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, res.status)
+	s.result(landed(res))
+	s.silent(t)
+}
+
+// TestAFailedFirstHealthyIsWrittenAgain: the forced write is spent on the pass,
+// not on the write. A write that fails leaves status unknown, so the next pass
+// writes again.
+func TestAFailedFirstHealthyIsWrittenAgain(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	s.result(s.checked(t, inst, nil))
+
+	failed := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, failed.status)
+	require.Error(t, failed.err, "refusedConn refuses every write")
+	s.result(failed)
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestADiscoveredInstanceIsNotForced: the daemon coming up finds a run it did
+// not see start. Its status was read and is believed, so a healthy fleet is
+// not rewritten on every daemon restart.
+func TestADiscoveredInstanceIsNotForced(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	keys := eventConfig(testConfig())
+	keys["status"] = shared.HealthStatusHealthy
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, "web-1", true, healthKeys(keys))
+
+	inst := s.instances[s.key("web-1")]
+	require.NotNil(t, inst)
+	require.False(t, inst.unproven)
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}

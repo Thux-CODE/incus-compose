@@ -163,6 +163,12 @@ type instance struct {
 	run       uint64
 	actionRun uint64
 
+	// unproven says this run, opened by a start, has not passed a check yet.
+	// Its first pass writes healthy even when status already says so: status
+	// may come from a read taken before starting landed, which still carried
+	// the last run's healthy.
+	unproven bool
+
 	// failures counts consecutive failed checks since the last success.
 	// Failures inside the start period do not count, as in docker.
 	failures int
@@ -200,6 +206,7 @@ func instanceStarted(inst *instance, now time.Time) {
 func newRun(inst *instance, now time.Time) {
 	inst.config.running = true
 	inst.run++
+	inst.unproven = true
 	inst.failures = 0
 
 	// As in docker, a restarted instance gets its start period back.
@@ -397,11 +404,16 @@ func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, e
 		instanceStarted(inst, time.Now())
 	}
 
-	s, ok := evInst.ConfigValue(shared.HealthStatusKey)
-	if ok {
-		inst.status = s
-	} else {
-		inst.status = shared.HealthStatusUnknown
+	// While a write is out, status is what was asked for and the read may
+	// predate it: adopting it would make the write behind look landed. Its
+	// result, and the next read, settle it.
+	if !inst.writing {
+		s, ok := evInst.ConfigValue(shared.HealthStatusKey)
+		if ok {
+			inst.status = s
+		} else {
+			inst.status = shared.HealthStatusUnknown
+		}
 	}
 
 	inst.config = instConfig
@@ -689,6 +701,12 @@ func reportStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connec
 		return
 	}
 
+	forceStatus(ctx, logger, conn, project, results, inst, status)
+}
+
+// forceStatus writes status even when it is the one held, for when what is
+// held cannot be trusted to be on the instance.
+func forceStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance, status string) {
 	// Recorded before the write lands, so two writes in flight cannot invert.
 	inst.status = status
 
@@ -966,7 +984,14 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 
 		var want string
 
+		// The first pass of a run started under the daemon's eyes is
+		// written whatever status says.
+		force := false
+
 		if res.err == nil {
+			force = inst.unproven
+			inst.unproven = false
+
 			inst.failures = 0
 			want = shared.HealthStatusHealthy
 
@@ -988,7 +1013,11 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 			}
 		}
 
-		reportStatus(ctx, logger, conn, res.project, results, inst, want)
+		if force {
+			forceStatus(ctx, logger, conn, res.project, results, inst, want)
+		} else {
+			reportStatus(ctx, logger, conn, res.project, results, inst, want)
+		}
 
 		// A stop in flight or an escalation already set the deadline it wants.
 		if inst.action == instanceActionRestart {

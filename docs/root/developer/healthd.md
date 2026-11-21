@@ -307,6 +307,22 @@ is cancelled and its slot freed. A check that overran counts as a failed probe,
 matching docker; a restart that overran counts as a failed restart and widens
 the backoff.
 
+### Status writes
+
+`status` is the value last known to be on the instance, and a write goes out
+only on a transition. Writes are serialised per instance: one in flight, and the
+value asked for meanwhile queued behind it. Every event read refreshes `status`,
+since anyone may write the key, except while a write is out: such a read may
+predate it, and adopting the old value would make the write behind look landed.
+
+A read can still be taken before a write lands and delivered after its result,
+and nothing tells it from a fresh one. The one transition that matters is a new
+run's first `healthy`: a late read carrying the last run's `healthy` would make
+it a no-op, and the replica would stay `starting` for ic-dns. So a run opened by
+a start (`unproven`) writes the verdict of its first passing check whatever
+`status` says. Runs found by discovery are not forced, so a daemon restart does
+not rewrite a healthy fleet.
+
 ### Discovery and the roster
 
 ```mermaid
