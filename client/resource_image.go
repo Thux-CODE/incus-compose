@@ -256,6 +256,22 @@ func (r *Image) IncusName() string {
 	return r.incusName
 }
 
+// ProjectAliasTarget reads the fingerprint the image's alias points at in the
+// project, without ensuring the image or keeping what it reads.
+func (r *Image) ProjectAliasTarget(ctx context.Context) (string, error) {
+	conn, err := r.client.Connection()
+	if err != nil {
+		return "", err
+	}
+
+	alias, _, err := conn.GetImageAlias(ctx, r.client.incusProject, r.incusName, nil)
+	if err != nil {
+		return "", err
+	}
+
+	return alias.Target, nil
+}
+
 // resolvePlatform reads a platform request, answering the cache alias key and
 // the Incus architecture behind it.
 func (r *Image) resolvePlatform(platform string) (string, string, error) {

@@ -2,6 +2,7 @@ package project
 
 import (
 	"cmp"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	incusApi "github.com/lxc/incus/v7/shared/api"
@@ -77,8 +79,6 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 		}
 
 		all := serviceReplicas(instances, p.Name, service.Name, hash)
-		markImage(all, serviceImageTarget(c, service))
-
 		existing := ownedReplicas(all)
 
 		add := options.addReplica
@@ -106,6 +106,11 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 		if err != nil {
 			errs = errors.Join(errs, err)
 			continue
+		}
+
+		// The image tells replicas apart only for a surplus to give up.
+		if add == nil && len(existing) > desired {
+			markImage(all, serviceImageTarget(c, service))
 		}
 
 		// A container_name is one name, or one per index when scaled: there is
@@ -159,9 +164,9 @@ func (p *Project) replicaPlans(c *client.Client, options *ResourcesOptions) (map
 	return plans, errs
 }
 
-// serviceImageTarget returns the fingerprint the service's image points at,
-// as this client ensured it already (on the build that follows the pull of
-// `up`), and "" when it has not.
+// serviceImageTarget returns the fingerprint the service's image points at:
+// as this client ensured it already, or else as the project's alias reads in
+// Incus, which a built image `up` does not pull has; "" when neither tells.
 func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
 	name := service.Image
 	if service.Build != nil && name == "" {
@@ -178,11 +183,33 @@ func serviceImageTarget(c *client.Client, service types.ServiceConfig) string {
 	}
 
 	img, ok := res.(*client.Image)
-	if !ok || !img.IsEnsured() {
+	if !ok {
 		return ""
 	}
 
-	return img.State().IncusAlias.Target
+	return imageTarget(img, func() (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), imageTargetTimeout)
+		defer cancel()
+
+		return img.ProjectAliasTarget(ctx)
+	})
+}
+
+// imageTargetTimeout bounds the read of an alias a plan ranks replicas by.
+const imageTargetTimeout = 10 * time.Second
+
+// imageTarget is the fingerprint of an image ensured, or the one read reads.
+func imageTarget(img *client.Image, read func() (string, error)) string {
+	if img.IsEnsured() {
+		return img.State().IncusAlias.Target
+	}
+
+	target, err := read()
+	if err != nil {
+		return ""
+	}
+
+	return target
 }
 
 // ReplicaIndexes returns the indexes of the replicas of a service that exist,
