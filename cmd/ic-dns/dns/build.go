@@ -131,21 +131,40 @@ type ptrOn struct {
 	zone string
 }
 
-// zoneSerial is what a zone was published under. Serial and Owed persist; what
-// a zone is made of is rebuilt by folding, so the rest is unexported and the
-// cold store never sees it.
+// emptyDigest is the digest of a zone kept for its serial alone, nothing left
+// in it: no zone holding anything digests to it, so the zone coming back with
+// any content steps.
+const emptyDigest = "empty"
+
+// zoneSerial is what a zone was published under. Serial and Digest persist;
+// what a zone is made of is rebuilt by folding, so the rest is unexported and
+// the cold store never sees it.
 type zoneSerial struct {
 	Serial uint32
 
-	// Owed is a change made while cold that the serial has not yet answered
-	// for: cold may not step, so the first warm publish steps once for all of
-	// them. Persisted, so a restart before that publish still owes it. Never
-	// set by the replay of what was restored, which is what the stored serial
-	// already describes.
+	// Digest is what the zone carried under Serial, but for the SOA (see
+	// zoneDigest): the one thing that says whether the zone a publish holds is
+	// the one a secondary holding Serial has. Persisted with it, so a restart
+	// compares what it rebuilt against what it last published rather than
+	// trusting that the replay, the enricher's own store written on its own
+	// clock, is what Serial described. Empty is not known - a file from before
+	// it - and is taken on trust, as before it: the replay is what the serial
+	// described, unless Owed says otherwise. A zone emptied once complete
+	// keeps its serial under emptyDigest, which no content has.
+	Digest string `json:"digest,omitempty"`
+
+	// Owed is what a file from before Digest says instead: a change made
+	// before the round that the serial has not answered for. Read, never
+	// written - a digest says it all.
 	Owed bool `json:"owed,omitempty"`
 
-	// dirty is a name in this zone having moved since it was last published. A
-	// serial step is a claim that the zone changed, so only a patch sets it.
+	// born says Serial was given in this run before the first round ended:
+	// nothing could transfer it, so the first compare takes what the zone
+	// holds as what it describes instead of stepping.
+	born bool
+
+	// dirty is a name in this zone having moved since it was last published, so
+	// publish compares it again.
 	dirty bool
 
 	// names is how many names the zone holds, so the last one leaving takes the

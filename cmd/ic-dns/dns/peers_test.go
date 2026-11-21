@@ -347,7 +347,7 @@ func transferred(t *testing.T, s *state, zone string) []string {
 	require.NotNil(t, z, "%s is not served", zone)
 
 	var out []string
-	for _, rr := range zoneRecords(snap, z, z.SOA) {
+	for _, rr := range zoneRecords(snap.Tree.Root(), snap.Denial.Root(), z, z.SOA) {
 		out = append(out, rr.String())
 	}
 
@@ -407,7 +407,9 @@ func TestEverythingLeavingEmptiesThePeeredTrees(t *testing.T) {
 
 				assert.Empty(t, everyName(s.snapshot().Tree), "a name outlived every instance, applied as %v", order)
 				assert.Empty(t, s.nets, "applied as %v", order)
-				assert.Empty(t, s.serials, "applied as %v", order)
+				for zone, held := range s.serials {
+					assert.Zero(t, held.names, "%s, applied as %v", zone, order)
+				}
 			}
 		})
 	}

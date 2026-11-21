@@ -2,6 +2,9 @@ package dns
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/coredns/coredns/plugin"
 	"github.com/coredns/coredns/request"
+	iradix "github.com/hashicorp/go-immutable-radix/v2"
 	"github.com/miekg/dns"
 
 	"github.com/lxc/incus-compose/cmd/ic-dns/dns/ecs_view"
@@ -164,7 +168,7 @@ func (x *xfr) transfer(state request.Request) (int, error) {
 
 	// Everything is rendered already, so the envelopes are cut and the channel
 	// closed before Out reads any of it - no producer goroutine to hang on a peer.
-	ch := envelopes(zoneRecords(snap, z, apex))
+	ch := envelopes(zoneRecords(snap.Tree.Root(), snap.Denial.Root(), z, apex))
 
 	err = new(dns.Transfer).Out(w, r, ch)
 	if err != nil {
@@ -202,21 +206,22 @@ func peerAddr(a net.Addr) (netip.Addr, bool) {
 }
 
 // zoneRecords is the zone as a transfer carries it: apex SOA, NS, every name in
-// it, then SOA again.
-func zoneRecords(snap *ecs_view.Snapshot, z *ecs_view.Zone, apex dns.RR) []dns.RR {
+// it, then SOA again. Off the roots of the two trees, so a publish can work
+// out what a zone carries before it is a snapshot (see zoneDigest).
+func zoneRecords(names *iradix.Node[ecs_view.ViewAnswer], zones *iradix.Node[*ecs_view.Zone], z *ecs_view.Zone, apex dns.RR) []dns.RR {
 	out := []dns.RR{apex}
 	out = append(out, z.NS...)
 
 	// Keyed root-first, so a zone is a byte-wise prefix of the names in it and
 	// the walk is already in one deterministic order - two transfers of an
 	// unchanged zone are the same byte stream without sorting anything here.
-	snap.Tree.Root().WalkPrefix(ecs_view.NameKey(z.Name), func(key []byte, answer ecs_view.ViewAnswer) bool {
+	names.WalkPrefix(ecs_view.NameKey(z.Name), func(key []byte, answer ecs_view.ViewAnswer) bool {
 		name := keyName(key)
 
 		// The apex is written above, and a child zone's names are a prefix match
 		// too: without this the parent carries what it never delegated.
-		inside := snap.ZoneOf(name)
-		if name == z.Name || inside == nil || inside.Name != z.Name {
+		_, inside, ok := zones.LongestPrefix(key)
+		if name == z.Name || !ok || inside.Name != z.Name {
 			return false
 		}
 
@@ -246,6 +251,21 @@ func zoneRecords(snap *ecs_view.Snapshot, z *ecs_view.Zone, apex dns.RR) []dns.R
 	})
 
 	return append(out, apex)
+}
+
+// zoneDigest is what a zone carries apart from its serial, as one string:
+// the NS set and every record a transfer of it would hold. Two equal digests
+// are two transfers a secondary could not tell apart but for the SOA.
+func zoneDigest(names *iradix.Node[ecs_view.ViewAnswer], zones *iradix.Node[*ecs_view.Zone], z *ecs_view.Zone) string {
+	sum := sha256.New()
+
+	records := zoneRecords(names, zones, z, nil)
+	for _, rr := range records[1 : len(records)-1] {
+		_, _ = io.WriteString(sum, rr.String())
+		_, _ = sum.Write([]byte{'\n'})
+	}
+
+	return hex.EncodeToString(sum.Sum(nil))
 }
 
 // gather folds every view's records for one name together. It is the one answer

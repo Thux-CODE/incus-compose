@@ -384,7 +384,8 @@ func TestPluginStoresTheSerialsItPublished(t *testing.T) {
 // window, and a zone whose names have not come back by the first publish is as
 // likely late as gone. Forgetting its serial there would publish it at 1 when
 // they do - a serial going backwards, which a secondary never transfers past.
-// Once warm, a zone nothing came back to is gone, and so is its serial.
+// Once warm, a zone nothing came back to is no longer served, and keeps its
+// serial for when it does.
 func TestAZoneTheReplayHasNotReachedKeepsItsSerial(t *testing.T) {
 	const (
 		shop = "shop.example."
@@ -417,7 +418,8 @@ func TestAZoneTheReplayHasNotReachedKeepsItsSerial(t *testing.T) {
 	// The round reaches its end and nothing came back to gone.
 	p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
 
-	assert.NotContains(t, p.state.serials, "gone.example.", "a zone nothing came back to outlived warm")
+	assert.Nil(t, p.state.snapshot().ZoneOf("gone.example."), "a zone nothing came back to outlived warm")
+	assert.Equal(t, uint32(2), p.state.serials["gone.example."].Serial, "and lost the serial it would come back under")
 	assert.Equal(t, uint32(4), p.state.serials[blog].Serial, "warm stepped a zone that did not change")
 }
 
@@ -481,15 +483,15 @@ func TestWhatTheFirstRoundCorrectsStepsOnceWarm(t *testing.T) {
 	assert.Equal(t, uint32(8), p.state.serials[zone].Serial, "the correction was announced twice")
 }
 
-// TestWhatIsOwedSurvivesARestart: a restart between a cold change and the
-// first warm publish must still owe the step, so the mark goes to the store
-// with the serial.
-func TestWhatIsOwedSurvivesARestart(t *testing.T) {
-	b, err := encodeCold(map[string]zoneSerial{"shop.example.": {Serial: 7, Owed: true}}, nil)
+// TestTheDigestSurvivesARestart: a restart compares what it rebuilt against
+// what the serial was published with, so the digest goes to the store with
+// the serial.
+func TestTheDigestSurvivesARestart(t *testing.T) {
+	b, err := encodeCold(map[string]zoneSerial{"shop.example.": {Serial: 7, Digest: "abc"}}, nil)
 	require.NoError(t, err)
 
 	back, _, err := decodeCold(b)
 	require.NoError(t, err)
 
-	assert.Equal(t, zoneSerial{Serial: 7, Owed: true}, back["shop.example."])
+	assert.Equal(t, zoneSerial{Serial: 7, Digest: "abc"}, back["shop.example."])
 }

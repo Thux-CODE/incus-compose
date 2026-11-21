@@ -68,6 +68,10 @@ type state struct {
 	// a serial steps on, and the first time it pays what it owes.
 	complete bool
 
+	// compared is the first publish once complete having compared every zone
+	// against the digest its serial was stored with.
+	compared bool
+
 	// grown is every network a name has landed on that nothing was on: its
 	// peering has not been read, since until now it could change no answer.
 	grown []string

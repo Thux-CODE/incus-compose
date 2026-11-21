@@ -15,11 +15,6 @@ import (
 func (s *state) apply(key string, next *instance, ttl uint32) {
 	prev := s.held[key]
 
-	// Whether this is a change the stored serial does not already describe: an
-	// instance that moved, went, or was read in this run. Only the replay of
-	// what was restored, landing where nothing was held, is not one.
-	owe := prev != nil || next == nil || !next.Restored()
-
 	// Dropped while its claim still stands, or the views it answered in are no
 	// longer the views it is written under.
 	if prev != nil {
@@ -27,7 +22,7 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 			s.dropName(name, answer)
 		}
 
-		s.moved(prev, owe)
+		s.moved(prev)
 
 		for range prev.names {
 			s.leave(prev.zone, prev.ns, ttl, true, prev.transfer)
@@ -76,28 +71,22 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 		s.enter(s.aliasZone(name), nil, ttl, false, false)
 	}
 
-	s.moved(next, owe)
+	s.moved(next)
 	s.addAddrs(next, own)
 	s.backfill(fresh, ttl)
 }
 
 // moved marks every zone this instance has a name in, so publish knows which
-// serials to step, and which of them owe a step once warm.
-func (s *state) moved(inst *instance, owe bool) {
-	zones := append([]string{inst.zone}, s.aliasZones(inst)...)
-	for _, on := range inst.ptrs {
-		zones = append(zones, on.zone)
+// to compare again.
+func (s *state) moved(inst *instance) {
+	s.dirty(inst.zone)
+
+	for _, zone := range s.aliasZones(inst) {
+		s.dirty(zone)
 	}
 
-	for _, zone := range zones {
-		held, known := s.serials[zone]
-		if !known {
-			continue
-		}
-
-		held.dirty = true
-		held.Owed = held.Owed || owe
-		s.serials[zone] = held
+	for _, on := range inst.ptrs {
+		s.dirty(on.zone)
 	}
 }
 
@@ -111,52 +100,98 @@ func (s *state) aliasZones(inst *instance) []string {
 	return out
 }
 
-// step moves the serial of every zone a patch touched, and renders it under the
-// new one. Only while warm: a step is a claim the zone changed, and cold has
-// confirmed nothing, so it has no standing to make one. What changed while cold
-// is owed instead, and the first warm publish steps each zone owing once - a
-// secondary already holding the stored serial would otherwise never transfer
-// what the first round corrected.
+// step moves the serial of every zone whose content changed, and renders it
+// under the new one. What a zone carries is compared, not what happened to it:
+// a serial steps where the zone a transfer would carry (zoneDigest) differs
+// from the one its serial was published with, and only there - a change that
+// leaves the records as they were, a view moving or a read confirming the
+// replay, steps nothing.
 //
-// A zone nothing is left in stops being served either way, but its serial is
-// forgotten only once warm. Cold, an empty zone is as likely one the replay has
-// not reached yet as one that went, and forgetting it would publish it at 1
-// when its names come back - a serial going backwards.
-func (s *state) step(warm bool, ttl uint32) {
+// Only once complete: before the first round a zone holds whatever the replay
+// and the reads have reached, and a step is a claim the zone changed that
+// nothing has confirmed. Digest is left as it was stored, so the first publish
+// once complete compares every zone against what its serial was published
+// with, and steps each that differs once - what the replay got wrong (a
+// delete inside its window, an enricher store newer than this one) and what
+// the round corrected alike.
+//
+// A zone nothing is left in stops being served, but keeps its serial for good,
+// with a digest no content has: forgetting it would publish it at 1 when its
+// names come back - a serial going backwards, and one a secondary that polled
+// before may hold for the old content.
+func (s *state) step(complete bool, ttl uint32) {
+	first := complete && !s.compared
+
 	for name, held := range s.serials {
 		if held.names <= 0 {
 			s.zones.Delete(ecs_view.NameKey(name))
 
-			if warm {
-				delete(s.serials, name)
+			if complete {
+				held.Digest = emptyDigest
+				held.Owed = false
+				held.dirty = false
+				s.serials[name] = held
 			}
 
 			continue
 		}
 
-		if !held.dirty && (!warm || !held.Owed) {
+		if !held.dirty && !first {
+			continue
+		}
+
+		// Before complete a zone is rendered as it stands and left marked, so
+		// the first compare takes it in whatever happened to it meanwhile.
+		if !complete {
+			switch {
+			case held.Serial == 0:
+				// Its first publish is a birth rather than a step, and a
+				// secondary takes zero as "no zone here".
+				held.Serial = 1
+				held.born = true
+			case held.Digest == "" && !held.Owed:
+				// Stored by a build that kept no digest and owed nothing:
+				// what it held then is taken to be what the replay first
+				// publishes, as that build took it. A change after it, the
+				// round's included, steps once complete.
+				z, _ := s.zones.Get(ecs_view.NameKey(name))
+				held.Digest = zoneDigest(s.names.Root(), s.zones.Root(), z)
+			}
+
+			s.serials[name] = held
+			s.render(name, ttl)
+
 			continue
 		}
 
 		held.dirty = false
 
-		// Only what is owed steps: a change the replay made is one the stored
-		// serial already describes, rendered and claimed nothing about however
-		// it lands against the first round's publish.
+		z, _ := s.zones.Get(ecs_view.NameKey(name))
+		digest := zoneDigest(s.names.Root(), s.zones.Root(), z)
+
 		switch {
 		case held.Serial == 0:
-			// Its first publish is a birth rather than a step, and a secondary
-			// takes zero as "no zone here". Nothing was published before it, so
-			// nothing is owed.
 			held.Serial = 1
-			held.Owed = false
-		case warm && held.Owed:
+			held.Digest = digest
+		case held.born, held.Digest == "" && !held.Owed:
+			// Born in this run before anything could transfer it, or stored by
+			// a build that kept no digest, owed nothing and was not published
+			// before the round: what it holds now is what the serial is taken
+			// to describe.
+			held.Digest = digest
+			held.born = false
+		case digest != held.Digest:
 			held.Serial++
+			held.Digest = digest
 			held.Owed = false
 		}
 
 		s.serials[name] = held
 		s.render(name, ttl)
+	}
+
+	if complete {
+		s.compared = true
 	}
 }
 
@@ -165,9 +200,10 @@ func (s *state) step(warm bool, ttl uint32) {
 // count stale - ZoneOf takes the longest, so the answers are not.
 func (s *state) aliasZone(name string) string {
 	zone, _ := aliasZone(name, func(zone string) bool {
-		_, served := s.serials[zone]
+		held, known := s.serials[zone]
 
-		return served
+		// A zone kept for its serial alone holds nothing to be served.
+		return known && held.names > 0
 	})
 
 	return zone
@@ -237,7 +273,7 @@ func (s *state) refresh(ttl uint32) bool {
 		s.dropName(name, held)
 		s.ownBack(name, ttl)
 		delete(s.served, name)
-		s.dirty(s.servedZone[name], true)
+		s.dirty(s.servedZone[name])
 		delete(s.servedZone, name)
 
 		changed = true
@@ -260,11 +296,8 @@ func (s *state) refresh(ttl uint32) bool {
 		s.served[name] = next
 		s.servedZone[name] = zones[name]
 
-		// Owed only where this run has read a replica of it: one made of
-		// restored replicas alone is the replay's, which the stored serial
-		// already describes.
 		if !sameRecords(flatten(prev), flatten(next)) {
-			s.dirty(zones[name], slices.ContainsFunc(replicas, func(inst *instance) bool { return !inst.Restored() }))
+			s.dirty(zones[name])
 		}
 
 		changed = true
@@ -392,17 +425,14 @@ func pick(replicas []*instance) []*instance {
 	}
 }
 
-// dirty marks one zone as moved, so publish steps its serial, and as owing a
-// step once warm where owe says the change is not one the stored serial
-// already describes.
-func (s *state) dirty(zone string, owe bool) {
+// dirty marks one zone as moved, so publish compares it again.
+func (s *state) dirty(zone string) {
 	held, known := s.serials[zone]
 	if !known {
 		return
 	}
 
 	held.dirty = true
-	held.Owed = held.Owed || owe
 	s.serials[zone] = held
 }
 

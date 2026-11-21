@@ -52,12 +52,12 @@ func TestReviewIncompleteColdAXFR(t *testing.T) {
 	const zone = "shop.example."
 	p := New(slog.Default(), Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
 	p.next = func(*iutil.Event) {}
-	p.state = newState(map[string]zoneSerial{zone: {Serial: 42}})
 	ev := func(name, ip string) *iutil.Event {
 		return eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", name, nil, map[string]string{"a": ip}).
 			WithProject(iutil.NewProject(optedIn()))
 	}
 	one, two := ev("one", "10.0.0.1"), ev("two", "10.0.0.2")
+	p.state = newState(published(t, zone, 42, []Option{Suffix("example")}, one, two))
 	p.fold(one.WithRestored())
 	p.write() // first publish window expires during replay
 	first := xfrPeer(true)

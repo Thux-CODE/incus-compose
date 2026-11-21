@@ -378,10 +378,10 @@ func TestASingleReplicaGoingUnhealthyStaysPublished(t *testing.T) {
 
 	assert.Equal(t, []string{"10.0.0.5"}, answered(t, s.snapshot(), "frontend."+zone, "10.0.0.5"))
 
-	// The instance itself was patched, which marks its zone on its own: what
-	// refresh adds is nothing, so a warm step is one step, not two.
+	// The instance itself was patched, which marks its zone, but what the zone
+	// carries is the same records: a secondary holding born holds this zone.
 	s.step(true, 5)
-	assert.Equal(t, born+1, s.serials[zone].Serial)
+	assert.Equal(t, born, s.serials[zone].Serial)
 }
 
 // downReplica is a replica of frontend that is not running - stopped, or

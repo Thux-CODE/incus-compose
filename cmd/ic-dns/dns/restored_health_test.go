@@ -120,8 +120,8 @@ func TestReadinessPrefersWhatThisRunRead(t *testing.T) {
 // restored replicas one by one, and a read that finds one unchanged moves none
 // of its own records. It does move the service: while the others are still
 // restored the replica read is the only fresh one, and once they are read too
-// the service is back to all of them. Each step is published, and owed a serial
-// step, since the stored serial does not describe it.
+// the service is back to all of them. Each step is published, and compared
+// again at the next publish: the stored serial may not describe it.
 func TestARestoredReplicaReadUnchangedTakesItsPlace(t *testing.T) {
 	t.Parallel()
 
@@ -141,13 +141,12 @@ func TestARestoredReplicaReadUnchangedTakesItsPlace(t *testing.T) {
 	p.state.step(false, 0)
 
 	assert.Equal(t, []string{"10.0.0.5", "10.0.0.6"}, answered(t, p.state.snapshot(), service, "10.0.0.5"))
-	assert.False(t, p.state.serials[zone].Owed, "the replay owes a step")
 
 	p.fold(replica(updated, "frontend-1", "10.0.0.5", true, healthy))
 	assert.True(t, p.state.write(0), "the service moved and nothing was published")
 	assert.Equal(t, []string{"10.0.0.5"}, answered(t, p.state.snapshot(), service, "10.0.0.5"),
 		"a restored replica answered beside one read in this run")
-	assert.True(t, p.state.serials[zone].Owed, "a change the stored serial does not describe")
+	assert.True(t, p.state.serials[zone].dirty, "a change the zone has to be compared again for")
 	p.state.step(false, 0)
 
 	p.fold(replica(updated, "frontend-2", "10.0.0.6", true, healthy))

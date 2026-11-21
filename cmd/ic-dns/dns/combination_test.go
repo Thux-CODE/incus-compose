@@ -167,23 +167,64 @@ func TestTheSerialStepsOnlyWhenTheZoneMoved(t *testing.T) {
 
 // TestTheReplayOwesNoStep: what the cold store restored is what the stored
 // serial was published with, so folding it back in owes a secondary nothing -
-// or every restart would have every secondary transfer every zone again.
+// or every restart would have every secondary transfer every zone again. The
+// store says so by the digest it keeps with the serial. A file from before
+// the digest is taken on trust, unless it says the zone was owed a step.
 func TestTheReplayOwesNoStep(t *testing.T) {
 	const zone = "shop.example."
-
-	s := newState(map[string]zoneSerial{zone: {Serial: 7}})
 
 	restored := patchInstance(
 		eventOn(incusapi.EventLifecycleInstanceUpdated, "shop", "web", nil,
 			map[string]string{"net-a": "10.0.0.5"}).WithRestored(),
 		"example.")
 
+	// What the previous run published, and the digest it stored with 7.
+	before := newState(nil)
+	before.apply("shop/web", restored, 5)
+	before.step(true, 5)
+	digest := before.serials[zone].Digest
+	require.NotEmpty(t, digest)
+
+	s := newState(map[string]zoneSerial{zone: {Serial: 7, Digest: digest}})
 	s.apply("shop/web", restored, 5)
 	s.step(false, 5)
 	s.step(true, 5)
 
 	assert.Equal(t, uint32(7), s.serials[zone].Serial, "the replay claimed the zone changed")
-	assert.False(t, s.serials[zone].Owed)
+
+	legacy := newState(map[string]zoneSerial{zone: {Serial: 7}})
+	legacy.apply("shop/web", restored, 5)
+	legacy.step(true, 5)
+
+	assert.Equal(t, uint32(7), legacy.serials[zone].Serial, "a serial stored with no digest was not trusted")
+
+	owed := newState(map[string]zoneSerial{zone: {Serial: 7, Owed: true}})
+	owed.apply("shop/web", restored, 5)
+	owed.step(true, 5)
+	owed.step(true, 5)
+
+	assert.Equal(t, uint32(8), owed.serials[zone].Serial, "a step the old file owed is paid once")
+}
+
+// TestAZoneEmptiedKeepsItsSerial: the last name leaves a zone once complete,
+// and it comes back before a secondary polls. Its serial goes on from where it
+// was rather than starting again at 1, which the secondary may hold for the
+// old content.
+func TestAZoneEmptiedKeepsItsSerial(t *testing.T) {
+	const zone = "shop.example."
+
+	s := newState(nil)
+	s.apply("shop/web", instanceOn("shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}), 5)
+	s.step(true, 5)
+	require.Equal(t, uint32(1), s.serials[zone].Serial)
+
+	s.apply("shop/web", nil, 5)
+	s.step(true, 5)
+	require.Nil(t, s.snapshot().ZoneOf("web."+zone), "an empty zone is not served")
+
+	s.apply("shop/web", instanceOn("shop", "web", nil, map[string]string{"net-a": "10.0.0.5"}), 5)
+	s.step(true, 5)
+	assert.Equal(t, uint32(2), s.serials[zone].Serial, "the zone came back with its serial reset")
 }
 
 // TestEverythingLeavingEmptiesTheTrees is the invariant a subtracting patcher
@@ -211,7 +252,14 @@ func TestEverythingLeavingEmptiesTheTrees(t *testing.T) {
 
 				assert.Empty(t, everyName(snap.Tree), "a name outlived every instance, applied as %v", keys)
 				assert.Empty(t, s.nets, "a wire outlived every instance on it, applied as %v", keys)
-				assert.Empty(t, s.serials, "a zone outlived every name in it, applied as %v", keys)
+				assert.Zero(t, snap.Denial.Len(), "a zone outlived every name in it, applied as %v", keys)
+
+				// Kept for their serials alone, so one coming back goes on
+				// from where it was.
+				for zone, held := range s.serials {
+					assert.Zero(t, held.names, "%s outlived every name in it, applied as %v", zone, keys)
+					assert.Equal(t, emptyDigest, held.Digest, "%s, applied as %v", zone, keys)
+				}
 				assert.Empty(t, s.held, "applied as %v", keys)
 			}
 		})
