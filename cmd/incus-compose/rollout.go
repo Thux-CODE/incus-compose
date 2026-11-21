@@ -401,10 +401,11 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 			id:        info.Config["volatile.uuid"],
 			created:   info.CreatedAt,
 			running:   rolloutRunning(info.StatusCode),
-			drained:   util.IsTrue(rolloutExpanded(info)[shared.DNSDrainKey]),
+			drained:   shared.DNSDrained(rolloutExpanded(info)[shared.DNSDrainKey]),
 			drainedBy: info.Config[rolloutDrainKey],
 			runID:     info.Config[rolloutIDKey],
 			preStart:  info.Config[rolloutPreStartKey],
+			healthy:   info.Config[shared.HealthStatusKey] == shared.HealthStatusHealthy,
 		})
 		instances[i] = inst
 
@@ -546,7 +547,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		}
 
 		declared = declaredDevices(inst, c.Config().DefaultStoragePool)
-		drainDeclared = util.IsTrue(inst.Config.Extensions[shared.DNSDrainKey])
+		drainDeclared = shared.DNSDrained(inst.Config.Extensions[shared.DNSDrainKey])
 
 		break
 	}
@@ -628,6 +629,7 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		Present:       present,
 		Taken:         taken,
 		RunID:         runID,
+		PreStart:      slices.ContainsFunc(service.PreStart, func(h types.PreStartHook) bool { return !h.PerReplica }),
 		Name:          name,
 		KeepFailed:    args.KeepFailed,
 		HealthTimeout: healthTimeout,
@@ -709,7 +711,7 @@ func rolloutBlockers(service types.ServiceConfig, health map[string]string, oldC
 		add(rolloutUnwatchedBlocker)
 	}
 
-	if util.IsTrue(service.Labels[strings.TrimPrefix(shared.DNSDrainKey, "user.label.")]) {
+	if shared.DNSDrained(service.Labels[strings.TrimPrefix(shared.DNSDrainKey, "user.label.")]) {
 		add(rolloutDrainedBlocker)
 	}
 
@@ -876,7 +878,13 @@ type rolloutRunner struct {
 	writer      io.Writer
 }
 
-func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error {
+func (r *rolloutRunner) create(ctx context.Context, index int, first bool) (string, error) {
+	err := r.createReplica(ctx, index, first)
+
+	return r.uuids[index], err
+}
+
+func (r *rolloutRunner) createReplica(ctx context.Context, index int, first bool) error {
 	// A client of its own per replica, so the instance is built from the
 	// compose file as it is now and not from one this run built earlier.
 	cc := r.c.Clone()
@@ -966,7 +974,7 @@ func (r *rolloutRunner) create(ctx context.Context, index int, first bool) error
 
 	if info := inst.State().IncusInstance; info != nil {
 		made = info.Config["volatile.base_image"]
-		drained = util.IsTrue(rolloutExpanded(info)[shared.DNSDrainKey])
+		drained = shared.DNSDrained(rolloutExpanded(info)[shared.DNSDrainKey])
 		r.uuids[index] = info.Config["volatile.uuid"]
 	}
 
@@ -1042,7 +1050,7 @@ func (r *rolloutRunner) health(ctx context.Context, index int) (replicaRead, err
 		ID:        inst.Config["volatile.uuid"],
 		Status:    inst.Config[shared.HealthStatusKey],
 		Running:   rolloutRunning(inst.StatusCode),
-		Drained:   util.IsTrue(rolloutExpanded(&inst.Instance)[shared.DNSDrainKey]),
+		Drained:   shared.DNSDrained(rolloutExpanded(&inst.Instance)[shared.DNSDrainKey]),
 		DrainedBy: inst.Config[rolloutDrainKey],
 	}, nil
 }

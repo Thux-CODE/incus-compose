@@ -119,7 +119,17 @@ again tells new from old:
   starts.
 
 Once the rollout is over the `id` and `pre-start` marks are taken off the
-replicas it leaves; the drain mark goes with the replica it is on.
+replicas it leaves; the drain mark goes with the replica it is on. A service
+with service-wide `pre_start` hooks keeps the replicas a run picked up again
+made only once one of them records the hooks ran; else they are replaced, so
+the hooks run. The marks, and the service and project labels, cannot be set
+through `x-incus`: incus-compose sets the labels after it and drops the marks.
+
+At its end a rollout reads its replicas once more, and fails when one it made
+or kept no longer serves. A new replica that fails while it is the one that
+serves (the old ones stopped meanwhile) is left as it is, not taken away. Each
+read of a replica is bounded at 30 seconds. The drain label is read as ic-dns
+reads it, trimmed: `" true "` drains.
 
 Services named together are checked first, all of them, and rolled out one after
 the other; the first failure stops the run.

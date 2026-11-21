@@ -49,7 +49,19 @@ const (
 	// what they say together to count: a verdict read at the start of a long
 	// round may have changed by its end.
 	rolloutScanFresh = 10 * time.Second
+
+	// rolloutReadTimeout bounds each read of a replica, which the transport
+	// would let wait up to an hour.
+	rolloutReadTimeout = 30 * time.Second
 )
+
+// rolloutRead reads a replica, within rolloutReadTimeout.
+func rolloutRead(ctx context.Context, ops rolloutOps, index int) (replicaRead, error) {
+	ctx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
+	defer cancel()
+
+	return ops.health(ctx, index)
+}
 
 // replicaRead is a replica as Incus has it at the moment it is read.
 type replicaRead struct {
@@ -76,10 +88,11 @@ func (r replicaRead) serves() bool {
 // rolloutOps is what a rollout does to the replicas of one service, by index.
 type rolloutOps interface {
 	// create creates the replica from the compose file, marked as this run's,
-	// and starts it, without waiting for its healthcheck. The first one a
-	// rollout creates runs the service's pre_start hooks that are not per
-	// replica, and is marked as having run them.
-	create(ctx context.Context, index int, first bool) error
+	// and starts it, without waiting for its healthcheck; it returns what
+	// tells the instance from another by its name. The first one a rollout
+	// creates runs the service's pre_start hooks that are not per replica,
+	// and is marked as having run them.
+	create(ctx context.Context, index int, first bool) (string, error)
 
 	// health reads the replica as Incus has it now.
 	health(ctx context.Context, index int) (replicaRead, error)
@@ -130,6 +143,9 @@ type replica struct {
 	drainedBy string
 	runID     string
 	preStart  string
+
+	// healthy was called so when the plan was made.
+	healthy bool
 }
 
 // rolloutPlan is one service's rollout: what exists, and how long to wait.
@@ -145,6 +161,11 @@ type rolloutPlan struct {
 	// RunID is this run's: the one an interrupted run marked the replicas it
 	// made with, picked up again, or a new one.
 	RunID string
+
+	// PreStart tells a service with service-wide pre_start hooks: a run
+	// picked up again keeps what it made only once a replica records they
+	// ran, as they run with a create.
+	PreStart bool
 
 	// Name returns the instance name of an index.
 	Name func(index int) string
@@ -167,7 +188,7 @@ type rolloutPlan struct {
 // create, so a rollout picked up again may take fewer creates than replicas,
 // none included.
 func rolloutDescribe(plan rolloutPlan) {
-	resumed := rolloutResumed(plan.Present, plan.Replicas, plan.RunID)
+	resumed := rolloutResumed(plan)
 	present := make([]string, 0, len(plan.Present))
 
 	for _, r := range plan.Present {
@@ -230,37 +251,51 @@ func rolloutAdoptedRun(present []replica) string {
 // newest that serve, up to the declared count: the others are what is left to
 // retire. Otherwise none is kept, and a rollout run on an unchanged service
 // replaces them all, as it is asked to.
-func rolloutResumed(present []replica, replicas int, runID string) map[int]bool {
-	out := map[int]bool{}
+//
+// Either way no more than the declared count is kept, the healthy and the
+// newest first; and with service-wide pre_start hooks the marked ones are kept
+// only once one records the hooks ran, which they do with a create.
+func rolloutResumed(plan rolloutPlan) map[int]bool {
+	present, replicas, runID := plan.Present, plan.Replicas, plan.RunID
+
+	var keep []replica
 
 	marked := runID != "" && slices.ContainsFunc(present, func(r replica) bool { return r.runID == runID })
-	if marked {
+
+	switch {
+	case marked:
+		ran := slices.ContainsFunc(present, func(r replica) bool { return r.preStart == runID })
+		if plan.PreStart && !ran {
+			return map[int]bool{}
+		}
+
 		for _, r := range present {
 			if r.runID == runID && r.current && r.running && !r.drained {
-				out[r.index] = true
+				keep = append(keep, r)
 			}
 		}
-
-		return out
-	}
-
-	if len(present) <= replicas || slices.ContainsFunc(present, func(r replica) bool { return !r.current }) {
-		return out
-	}
-
-	var serving []replica
-
-	for _, r := range present {
-		if r.running && !r.drained {
-			serving = append(serving, r)
+	case len(present) > replicas && !slices.ContainsFunc(present, func(r replica) bool { return !r.current }):
+		for _, r := range present {
+			if r.running && !r.drained {
+				keep = append(keep, r)
+			}
 		}
 	}
 
-	slices.SortFunc(serving, func(a, b replica) int {
-		return cmp.Or(b.created.Compare(a.created), b.index-a.index)
+	slices.SortFunc(keep, func(a, b replica) int {
+		healthy := func(r replica) int {
+			if r.healthy {
+				return 0
+			}
+
+			return 1
+		}
+
+		return cmp.Or(healthy(a)-healthy(b), b.created.Compare(a.created), b.index-a.index)
 	})
 
-	for _, r := range serving[:min(replicas, len(serving))] {
+	out := map[int]bool{}
+	for _, r := range keep[:min(replicas, len(keep))] {
 		out[r.index] = true
 	}
 
@@ -337,7 +372,7 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	// retires nothing on it.
 	var failed error
 
-	resumed := rolloutResumed(plan.Present, n, plan.RunID)
+	resumed := rolloutResumed(plan)
 
 	for _, i := range slices.Sorted(maps.Keys(resumed)) {
 		r := slots[i]
@@ -345,13 +380,13 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 
 		_, _ = fmt.Fprintf(plan.Out, "%s: up to date, left by an earlier rollout; waiting up to %s for healthy\n", plan.Name(i), plan.HealthTimeout)
 
-		err := rolloutWaitHealthy(ctx, ops, plan, i)
+		err := rolloutWaitHealthy(ctx, ops, plan, i, r.id)
 		if err != nil {
 			if ctx.Err() != nil {
 				return fmt.Errorf("interrupted: %w", ctx.Err())
 			}
 
-			if errors.Is(err, errRolloutUnread) {
+			if errors.Is(err, errRolloutUnread) || errors.Is(err, errRolloutReplaced) {
 				return errors.Join(failed, fmt.Errorf("%s: %w", plan.Name(i), err))
 			}
 
@@ -374,7 +409,13 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 	for {
 		old := rolloutOld(slots)
 		if len(old) == 0 && len(slots) >= n {
-			return failed
+			if failed != nil {
+				return failed
+			}
+
+			// Done only if what the run leaves serves, read now: a replica
+			// it kept may have turned unhealthy while another was waited for.
+			return rolloutCheckServing(ctx, ops, plan, slots)
 		}
 
 		err := ctx.Err()
@@ -404,15 +445,19 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 
 		slots[index] = &replica{index: index, created: plan.Now(), current: true, fresh: true, running: true, runID: plan.RunID}
 
-		err = ops.create(ctx, index, first)
-		if err == nil {
+		id, err := ops.create(ctx, index, first)
+
+		started := err == nil
+		if started {
+			slots[index].id = id
+
 			if first {
 				slots[index].preStart = plan.RunID
 			}
 
 			_, _ = fmt.Fprintf(plan.Out, "%s: started, waiting up to %s for healthy\n", plan.Name(index), plan.HealthTimeout)
 
-			err = rolloutWaitHealthy(ctx, ops, plan, index)
+			err = rolloutWaitHealthy(ctx, ops, plan, index, id)
 		}
 
 		first = false
@@ -426,9 +471,18 @@ func rolloutSteps(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots m
 
 			// One whose health could not be read may be the only one that
 			// serves: it is left as it is, marked as this run's, for a run
-			// again to read.
-			if errors.Is(err, errRolloutUnread) && ctx.Err() == nil {
-				_, _ = fmt.Fprintf(plan.Out, "%s: left as it is, its health could not be read\n", plan.Name(index))
+			// again to read. One whose name another instance holds now is not
+			// this run's to take away.
+			if errors.Is(err, errRolloutUnread) && ctx.Err() == nil || errors.Is(err, errRolloutReplaced) {
+				_, _ = fmt.Fprintf(plan.Out, "%s: left as it is\n", plan.Name(index))
+
+				return err
+			}
+
+			// Nor is one taken away that serves while the others do not:
+			// healthy too late, or interrupted, as the old ones stopped.
+			if started && rolloutNeeded(ctx, ops, plan, slots, index) {
+				_, _ = fmt.Fprintf(plan.Out, "%s: left as it is, it serves and the others do not serve the declared count without it\n", plan.Name(index))
 
 				return err
 			}
@@ -489,6 +543,9 @@ func rolloutSettleDrained(ctx context.Context, ops rolloutOps, plan rolloutPlan,
 				serving++
 			}
 		}
+
+		// A drain an operator took over since the plan was made is theirs.
+		drained = slices.DeleteFunc(drained, func(r *replica) bool { return r.drainedBy == "" })
 	}
 
 	for _, r := range drained {
@@ -666,7 +723,7 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 	reads := map[int]replicaRead{}
 
 	for _, i := range slices.Sorted(maps.Keys(slots)) {
-		read, err := ops.health(ctx, i)
+		read, err := rolloutRead(ctx, ops, i)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", plan.Name(i), err)
 		}
@@ -696,6 +753,42 @@ func rolloutScanOnce(ctx context.Context, ops rolloutOps, plan rolloutPlan, slot
 	}
 
 	return reads, nil
+}
+
+// rolloutNeeded reports whether a new replica that failed is not to be taken
+// away: it serves, and without it fewer than the declared count would. A
+// round that cannot be read keeps it too.
+func rolloutNeeded(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica, index int) bool {
+	reads, err := rolloutScanOnce(context.WithoutCancel(ctx), ops, plan, slots)
+	if err != nil {
+		return true
+	}
+
+	if !reads[index].serves() {
+		return false
+	}
+
+	return rolloutEnough(plan, reads, index) != nil
+}
+
+// rolloutCheckServing reads what the run leaves, at its end: a replica it
+// made or kept that no longer serves fails the run, which then ends with
+// fewer serving than declared.
+func rolloutCheckServing(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots map[int]*replica) error {
+	reads, err := rolloutScan(context.WithoutCancel(ctx), ops, plan, slots)
+	if err != nil {
+		return err
+	}
+
+	var lapsed error
+
+	for _, i := range slices.Sorted(maps.Keys(reads)) {
+		if slots[i].fresh && !reads[i].serves() {
+			lapsed = errors.Join(lapsed, fmt.Errorf("%s: %w (%s) at the end of the rollout", plan.Name(i), errRolloutLapsed, rolloutShown(reads[i])))
+		}
+	}
+
+	return lapsed
 }
 
 // rolloutEnough checks, on one round of reads, that without the victim the
@@ -755,26 +848,30 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 	}
 
 	// A drain no rollout set is the operator's: it is neither set again nor
-	// taken off.
+	// taken off. What a drain is goes by the last read: one an operator took
+	// over during the grace is theirs too.
 	byHand := r.drained && r.drainedBy == ""
 
 	putBack := func() error {
-		if byHand {
+		if !r.drained || r.drainedBy == "" {
 			return nil
 		}
 
 		return rolloutUndrain(ctx, ops, plan, r)
 	}
 
+	// Short already: an earlier run's drain on it is taken off, so it serves
+	// with the others while the run stops.
 	err = rolloutEnough(plan, reads, victim)
 	if err != nil {
-		return err
+		return errors.Join(err, putBack())
 	}
 
 	if !byHand {
 		err = ops.drain(ctx, victim, true)
 		if err != nil {
-			return errors.Join(fmt.Errorf("%s: draining: %w", name, err), putBack())
+			// The drain may have landed though the call failed.
+			return errors.Join(fmt.Errorf("%s: draining: %w", name, err), rolloutUndrain(ctx, ops, plan, r))
 		}
 
 		r.drained = true
@@ -796,15 +893,25 @@ func rolloutRetire(ctx context.Context, ops rolloutOps, plan rolloutPlan, slots 
 
 	switch {
 	case errors.Is(err, errRolloutReplaced):
+		// Another replica's name changed hands; the victim, still the one
+		// read before, is put back. One that changed hands itself is not.
+		read, readErr := rolloutRead(context.WithoutCancel(ctx), ops, victim)
+		if readErr == nil && (r.id == "" || read.ID == r.id) {
+			return errors.Join(fmt.Errorf("%s not retired: %w", name, err), putBack())
+		}
+
 		return fmt.Errorf("%s not retired: %w", name, err)
-	case err != nil && ctx.Err() != nil:
+	case err == nil && ctx.Err() != nil, err != nil && ctx.Err() != nil:
+		// An interrupt during the last round, even one that read through.
 		return errors.Join(fmt.Errorf("interrupted before %s was stopped: %w", name, ctx.Err()), putBack())
 	case err != nil:
 		return errors.Join(fmt.Errorf("%s not retired: %w", name, err), putBack())
 	}
 
-	if !reads[victim].Drained {
-		return fmt.Errorf("%s not retired: put back into the service name by something else during its grace", name)
+	// The grace counts only spent drained by this run all along: a drain
+	// taken off and set again, by hand, may have let it be published again.
+	if !reads[victim].Drained || reads[victim].DrainedBy != plan.RunID && !byHand {
+		return fmt.Errorf("%s not retired: its drain changed during its grace, by something else than this rollout", name)
 	}
 
 	err = rolloutEnough(plan, reads, victim)
@@ -868,13 +975,20 @@ func rolloutUndrain(ctx context.Context, ops rolloutOps, plan rolloutPlan, r *re
 // other verdict ends the wait: unhealthy, a stop, or no verdict in time. A
 // verdict read past the timeout, after a read that took long, is no verdict
 // in time either.
-func rolloutWaitHealthy(ctx context.Context, ops rolloutOps, plan rolloutPlan, index int) error {
+//
+// id is the instance the replica is, "" for not known: a read of another one
+// by its name ends the wait.
+func rolloutWaitHealthy(ctx context.Context, ops rolloutOps, plan rolloutPlan, index int, id string) error {
 	start := plan.Now()
 	last := "-"
 	failed := 0
 
 	for {
-		read, err := ops.health(ctx, index)
+		read, err := rolloutRead(ctx, ops, index)
+		if err == nil && id != "" && read.ID != "" && read.ID != id {
+			return errRolloutReplaced
+		}
+
 		if err != nil {
 			// A wait of minutes outlives a hiccup of the API.
 			failed++

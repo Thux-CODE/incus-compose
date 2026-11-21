@@ -171,6 +171,19 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` reads the drain label as ic-dns does, trimmed, in `up` and in its
+  refusals too. It ends by reading its replicas and fails when one it made or
+  kept no longer serves; keeps a failed new replica that is the only one
+  serving; keeps at most the declared count of replicas a run picked up
+  again made, the healthy and newest first, and with service-wide `pre_start`
+  hooks only once one records they ran; puts back an earlier run's drain when
+  it stops short before a drain; leaves a drain an operator took over; checks
+  that the grace was spent drained by itself; puts the victim back when
+  another replica's name changed hands; and takes an interrupt during the
+  last round of reads for an interrupt. Each read is bounded at 30 seconds,
+  and a new replica is checked to be the instance it created on every read.
+  (by @sandroden)
+
 - A required `depends_on` with `condition: service_healthy` on a service
   scaled to 0 is waited for (and checked by `rollout`) as its first replica,
   which is missing, instead of not at all. A plan made again on the same

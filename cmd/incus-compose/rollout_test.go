@@ -153,7 +153,16 @@ func (f *fakeRollout) op(ctx context.Context, event string) error {
 	return nil
 }
 
-func (f *fakeRollout) create(ctx context.Context, index int, first bool) error {
+func (f *fakeRollout) create(ctx context.Context, index int, first bool) (string, error) {
+	err := f.createReplica(ctx, index, first)
+	if err != nil {
+		return "", err
+	}
+
+	return fakeID(f.replicas[index]), nil
+}
+
+func (f *fakeRollout) createReplica(ctx context.Context, index int, first bool) error {
 	err := f.op(ctx, fmt.Sprintf("create web-%d", index))
 	if err != nil {
 		return err
@@ -322,6 +331,7 @@ func (f *fakeRollout) plan(replicas int) rolloutPlan {
 			index: i, id: fakeID(r), created: time.Unix(r.born, 0),
 			current: r.current, running: r.running, drained: r.drained,
 			drainedBy: r.drainBy, runID: r.runID, preStart: r.preStart,
+			healthy: r.seen == shared.HealthStatusHealthy,
 		})
 	}
 
