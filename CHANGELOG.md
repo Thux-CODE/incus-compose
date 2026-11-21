@@ -171,6 +171,13 @@ form.
   date keeps the newest ones and gives up the oldest, with no create. A stop's
   kill and status reads are bounded by its deadline. (by @sandroden)
 
+- `rollout` begins a stop only within 10 seconds of the round of reads it goes
+  by, and stops a victim once: one started again by ic-healthd, or a stop
+  that would begin later, takes a new round first. The identity read and the
+  marker written before the stop are bounded at 30 seconds, and the delete
+  checks `volatile.uuid` again. A failed create on an index a retired replica
+  held is no longer checked against that replica's uuid. (by @sandroden)
+
 - `rollout --dry-run` pulls no image: a pull may delete the copy it replaces
   (an architecture change) and creates the global project and its locks
   volume. The plan reads the image as the project has it. A healthcheck test

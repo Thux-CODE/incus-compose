@@ -94,8 +94,12 @@ new replica that no longer serves when the replicas are read (ic-healthd
 restarted it, or it turned `unhealthy`) is old again: it is the one taken away,
 the old ones serve on, and `rollout` exits with an error.
 
-Each replica is checked to be the instance first read under its name
-(`volatile.uuid`) before it is stopped, deleted or taken away: one whose name
+A stop goes by the round of reads right before it: one that would begin more
+than 10 seconds after that round, or a victim ic-healthd starts again after
+its stop, takes a new round first, three times at most. Each replica is
+checked to be the instance first read under its name (`volatile.uuid`) before
+it is stopped, deleted (again right before the delete, after the stop) or
+taken away: one whose name
 another instance took meanwhile is left alone, and the run fails. A replica
 read stopped is deleted only while it is stopped, with no drain; one that
 started again in between is left, and the run fails. With fewer than the

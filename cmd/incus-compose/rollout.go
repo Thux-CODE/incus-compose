@@ -947,6 +947,10 @@ func (r *rolloutRunner) createReplica(ctx context.Context, index int, first bool
 
 	r.instances[index] = inst
 
+	// The index may be one a replica retired earlier in the run held: its
+	// uuid is not this instance's, which is known once it is created.
+	delete(r.uuids, index)
+
 	// Marked as this run's from its create on, and, the first one, as having
 	// run the service-wide pre_start hooks once they succeed: a run picked up
 	// again keeps it, and does not run them again.
@@ -1122,8 +1126,12 @@ func (r *rolloutRunner) sameInstance(ctx context.Context, index int) (*incusApi.
 	return &info.Instance, nil
 }
 
-func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool) error {
-	info, err := r.sameInstance(ctx, index)
+func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool, notAfter time.Time) error {
+	readCtx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
+	info, err := r.sameInstance(readCtx, index)
+
+	cancel()
+
 	if err != nil {
 		return err
 	}
@@ -1132,8 +1140,10 @@ func (r *rolloutRunner) retire(ctx context.Context, index int, stopped bool) err
 		return client.ErrNotFound.WithKindName(client.KindInstance, r.name(index))
 	}
 
+	// Stopped once: started again by ic-healthd, it is the rollout's to read
+	// the others again before a second stop (errRolloutRestarted).
 	if !stopped {
-		return r.takeDown(ctx, index, true, false)
+		return r.takeDown(ctx, index, true, false, 1, notAfter)
 	}
 
 	// One read stopped serves nothing and was not drained: it is deleted only
@@ -1187,12 +1197,15 @@ func (r *rolloutRunner) discard(ctx context.Context, index int, keep bool) error
 	}
 
 	// One kept for a look is let shut down; one going away is killed.
-	return r.takeDown(ctx, index, keep, keep)
+	return r.takeDown(ctx, index, keep, keep, rolloutTakeDownAttempts, time.Time{})
 }
 
 // takeDown stops a replica, gracefully within its grace period or not, and
 // deletes it or, with keep, leaves it stopped.
-func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool) error {
+//
+// It is stopped up to attempts times when ic-healthd starts it again; past
+// notAfter, when not zero, it is not stopped at all (errRolloutStale).
+func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, keep bool, attempts int, notAfter time.Time) error {
 	inst := r.instances[index]
 
 	// Each read is bounded, so a read that hangs does not hold up the stop's
@@ -1234,18 +1247,40 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 		return err
 	}
 
+	bounded := func(ctx context.Context, call func(ctx context.Context) error) error {
+		ctx, cancel := context.WithTimeout(ctx, rolloutReadTimeout)
+		defer cancel()
+
+		return call(ctx)
+	}
+
 	stop := func(ctx context.Context) error {
 		// The marker keeps ic-healthd's restart policy off it from here on.
-		err := inst.SetHealthCheckingStopped(ctx, true)
+		err := bounded(ctx, func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, true) })
 		if err != nil {
 			return err
+		}
+
+		// The decision to stop it is good only for so long after the round
+		// it was made on: past that, nothing is stopped, and it is made again.
+		if !notAfter.IsZero() && time.Now().After(notAfter) {
+			return errors.Join(errRolloutStale, bounded(ctx, func(ctx context.Context) error { return inst.SetHealthCheckingStopped(ctx, false) }))
 		}
 
 		return rolloutStop(ctx, shutdown, kill, status, graceful, rolloutStopSettle, time.Second, rolloutKillEvery)
 	}
 
 	remove := func(ctx context.Context) error {
-		err := inst.Delete(ctx)
+		// Deleted by name, so only while the name is the instance's still.
+		err := bounded(ctx, func(ctx context.Context) error {
+			_, err := r.sameInstance(ctx, index)
+			return err
+		})
+		if err != nil {
+			return err
+		}
+
+		err = inst.Delete(ctx)
 		if err == nil {
 			delete(r.instances, index)
 		}
@@ -1291,7 +1326,7 @@ func (r *rolloutRunner) takeDown(ctx context.Context, index int, graceful bool, 
 		return false, nil
 	}
 
-	return rolloutTakeDown(ctx, keep, rolloutTakeDownAttempts, stop, remove, running, startsAgain)
+	return rolloutTakeDown(ctx, keep, attempts, stop, remove, running, startsAgain)
 }
 
 // rolloutRunning reports whether a status is one of a running instance. Incus
@@ -1412,7 +1447,7 @@ func rolloutTakeDown(ctx context.Context, keep bool, attempts int, stop, remove 
 		}
 
 		if attempt >= attempts {
-			return fmt.Errorf("started again after %d stops, by ic-healthd's restart policy", attempt)
+			return fmt.Errorf("%w after %d stops, by ic-healthd's restart policy", errRolloutRestarted, attempt)
 		}
 	}
 }
