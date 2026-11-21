@@ -150,6 +150,14 @@ func newRolloutCommand() *cli.Command {
 			dryRun := cmd.Bool("dry-run")
 			if dryRun {
 				projectOpts = append(projectOpts, client.EnsureProjectReadOnly(&missingKeys))
+
+				// Nor the image cache's project, which Connect creates.
+				globalClient, err := clientFromContext(ctx)
+				if err != nil {
+					return err
+				}
+
+				globalClient.SetReadOnly()
 			}
 
 			p, c, err := loadProject(ctx, cmd, projectOpts...)
@@ -232,6 +240,15 @@ func newRolloutCommand() *cli.Command {
 				pullMode = client.PullNever
 			}
 
+			// A refresh deletes the copies of the image before it pulls the
+			// new one, which a dry run does not: it pulls what is missing, and
+			// the plan reads the alias as it is.
+			var pullNote string
+			if dryRun && pullMode == client.PullAlways {
+				pullMode = client.PullMissing
+				pullNote = "with --pull always a rollout refreshes the image first, which --dry-run does not: the plan goes by the image the project has"
+			}
+
 			args := rolloutArgs{
 				Pull:          pullMode,
 				HealthTimeout: cmd.Duration("health-timeout"),
@@ -277,6 +294,10 @@ func newRolloutCommand() *cli.Command {
 
 			if dryRun {
 				for _, j := range jobs {
+					if pullNote != "" {
+						j.plan.Notes = append(j.plan.Notes, pullNote)
+					}
+
 					rolloutDescribe(j.plan)
 				}
 
@@ -434,6 +455,12 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 
 	if args.DryRun {
 		err = images.ForActionF(client.ActionEnsure, isImage).Run(ctx, client.ActionEnsure)
+
+		// Only an image that is not there; a read that failed is an error.
+		if err != nil && !errors.Is(err, client.ErrCreate) && !errors.Is(err, client.ErrNotFound) {
+			return nil, rolloutPlan{}, err
+		}
+
 		if err != nil {
 			unbuilt = true
 
@@ -555,8 +582,10 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		blockers = append(blockers, rolloutDrainedBlocker)
 	}
 
-	// The image a dry run did not get may declare the healthcheck.
-	if unbuilt && slices.Contains(blockers, rolloutUnwatchedBlocker) {
+	// The image a dry run did not get may declare the healthcheck, unless the
+	// compose file disables it, which a create honours.
+	disabled := service.HealthCheck != nil && service.HealthCheck.Disable
+	if unbuilt && !disabled && slices.Contains(blockers, rolloutUnwatchedBlocker) {
 		blockers = slices.DeleteFunc(blockers, func(b string) bool { return b == rolloutUnwatchedBlocker })
 		notes = append(notes, "the compose file declares no healthcheck, and a rollout refuses the service unless its image does")
 	}

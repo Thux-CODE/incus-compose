@@ -180,7 +180,10 @@ form.
 
 - `rollout --dry-run` writes nothing but a pull: it no longer adds to an
   existing project the config keys the compose file has gained, nor builds an
-  image missing from the project or copies it from the cache. The plan says
+  image missing from the project or copies it from the cache, nor creates the
+  image cache's project, nor refreshes an image with `--pull always`, which
+  deletes the copies before the new pull. A compose file that disables the
+  healthcheck is refused even with the image not built. The plan says
   what it could not check for that reason (`not checked:`), and which project
   keys a rollout would add. (by @sandroden)
 

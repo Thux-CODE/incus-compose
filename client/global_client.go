@@ -182,6 +182,9 @@ type GlobalClient struct {
 	ctx    context.Context
 	config ClientConfig
 
+	// readOnly creates no project on Connect, the image cache's included.
+	readOnly bool
+
 	logger *slog.Logger
 
 	stdout    io.Writer
@@ -508,6 +511,16 @@ func (c *GlobalClient) detectStoragePool() error {
 
 // setupImageCache configures the image cache based on CacheProject or defaults.
 func (c *GlobalClient) setupImageCache() error {
+	if c.config.CacheProject != "" && c.readOnly {
+		// One that does not exist is not created: there is no cache then.
+		cacheClient, err := c.EnsureProject(c.config.CacheProject)
+		if err == nil {
+			c.imageCache = cacheClient
+		}
+
+		return nil
+	}
+
 	if c.config.CacheProject != "" {
 		// Use dedicated cache project (create if needed)
 		cacheClient, err := c.EnsureProject(c.config.CacheProject, EnsureProjectWithCreate())
@@ -599,6 +612,12 @@ func (c *GlobalClient) getProject(name string) (*Client, error) {
 
 	c.logger.DebugContext(c.ctx, "Got project", "name", name, "incus_name", incusName)
 	return c.newProjectClient(name, incusName, false, project.Config)
+}
+
+// SetReadOnly makes Connect create no project, the image cache's included, for
+// a command that only says what it would do. It is set before Connect.
+func (c *GlobalClient) SetReadOnly() {
+	c.readOnly = true
 }
 
 // EnsureProjectOption is a functional option for configuring project creation.

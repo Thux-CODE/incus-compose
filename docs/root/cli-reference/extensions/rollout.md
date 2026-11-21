@@ -38,8 +38,11 @@ read the same variables as `up`.
 line per service with the replicas found, the creates and the timeouts it would
 use. It still pulls an image that is missing from the project, since the
 healthcheck an image declares is part of the check. It writes nothing else: it
-neither builds an image nor copies one from the cache, and does not add the
-project config keys a compose file has gained (`x-incus` at the top level). What
+neither builds an image nor copies one from the cache, creates no project (the
+image cache's included), does not refresh an image with `--pull always` (it
+pulls only what is missing, and says so), and does not add the project config
+keys a compose file has gained (`x-incus` at the top level). A compose file
+that disables the healthcheck is refused even with the image not built yet. What
 it could not check for that reason follows the plan, on lines that read `not
 checked:`, and the keys a rollout would add on a line of their own.
 
