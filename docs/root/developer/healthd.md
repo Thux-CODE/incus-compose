@@ -223,7 +223,10 @@ flowchart TD
 `handleInstanceEvent` and `handleInstanceResult` must never block: anything that
 talks to Incus is started on its own goroutine and reports back through the
 results channel. The loop's job is to stay responsive, so a blocking send into
-it always drains.
+it always drains - from those goroutines. The loop itself never sends on the
+results channel: it is the only reader, and with the channel full the send
+would wait on itself for good. A read the daemon does not watch (no
+healthcheck, not enabled, a config that does not parse) is logged on the spot.
 
 ### Worker pools
 

@@ -1,8 +1,11 @@
 package checker
 
 import (
+	"context"
 	"testing"
 	"time"
+
+	api "github.com/lxc/incus/v7/shared/api"
 
 	"github.com/lxc/incus-compose/shared"
 )
@@ -24,4 +27,25 @@ func TestSecondWatchdogExpiresStartPeriod(t *testing.T) {
 		}
 	}
 	t.Fatal("three timed out probes after the start period, still starting without restart")
+}
+
+func TestSecondFullResultsBlocksScheduler(t *testing.T) {
+	s := newScheduler(t)
+	keys := healthKeys(map[string]string{"test": "invalid JSON"})
+	for range cap(s.results) {
+		s.eventRead(api.EventLifecycleInstanceUpdated, "web", true, keys)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	s.ctx = ctx
+	returned := make(chan struct{})
+	go func() {
+		defer close(returned)
+		s.eventRead(api.EventLifecycleInstanceUpdated, "web", true, keys)
+	}()
+	defer func() { cancel(); <-returned }()
+	select {
+	case <-returned:
+	case <-time.After(absenceGrace):
+		t.Fatal("the results channel can be drained only after the event handler returns")
+	}
 }

@@ -997,19 +997,62 @@ func TestUpdatedReportsAStoppedInstance(t *testing.T) {
 	s.silent(t)
 }
 
-func TestDiscoverResultIgnoresUninterestingInstances(t *testing.T) {
+// TestUnwatchedReadsSendNothing: a read the daemon does not watch - no
+// healthcheck, one not enabled, one that does not parse - is told on the log
+// and nothing else. The loop handling the event is the one reading results,
+// so a send from there could only wait on itself.
+func TestUnwatchedReadsSendNothing(t *testing.T) {
 	t.Parallel()
 
-	for _, err := range []error{ErrInstanceNoHealthcheck} {
-		t.Run(err.Error(), func(t *testing.T) {
+	for name, keys := range map[string]map[string]string{
+		"no healthcheck": {},
+		"not enabled":    {shared.HealthKeyPrefix + "test": `["CMD","true"]`},
+		"invalid":        healthKeys(map[string]string{"test": "invalid JSON"}),
+	} {
+		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 
 			s := newScheduler(t)
-			s.result(instanceResult{kind: instanceResultDiscovered, name: "web-1", err: err})
+
+			for _, action := range []string{
+				incusApi.EventLifecycleInstanceStarted,
+				incusApi.EventLifecycleInstanceStopped,
+				incusApi.EventLifecycleInstanceUpdated,
+			} {
+				s.eventRead(action, "web-1", true, keys)
+			}
 
 			require.Empty(t, s.instances)
+			s.silent(t)
 		})
 	}
+}
+
+// TestABrokenHealthcheckIsDroppedAndComesBack is the linear case around it: a
+// watched instance whose healthcheck stops parsing is forgotten, and the read
+// that fixes it is watched again from a fresh start.
+func TestABrokenHealthcheckIsDroppedAndComesBack(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	s.result(landed(s.next(t)))
+
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, "web-1", true,
+		healthKeys(map[string]string{"test": "invalid JSON"}))
+	require.Empty(t, s.instances)
+	s.silent(t)
+
+	s.event(incusApi.EventLifecycleInstanceUpdated, "web-1")
+
+	inst, ok := s.instances[s.key("web-1")]
+	require.True(t, ok)
+	require.Equal(t, instanceActionCheck, inst.action)
+	require.False(t, inst.due.After(time.Now()), "due a check at once")
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
 }
 
 // ----------------------------------------------------------------------------

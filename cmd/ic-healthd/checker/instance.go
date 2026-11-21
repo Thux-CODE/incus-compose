@@ -117,21 +117,34 @@ type instanceResult struct {
 	project string
 
 	// ctx identifies the action that ran: an abandoned one can still deliver,
-	// and the loop compares this against the context it holds. Unset by
-	// instanceResultDiscovered, which no instance state produced.
+	// and the loop compares this against the context it holds. Unset by a
+	// status write.
 	ctx context.Context
 
 	config *instanceConfig
 
-	// status is the value that was written (instanceResultStatus) or the value
-	// found on the instance (instanceResultDiscovered).
+	// status is the value that was written (instanceResultStatus).
 	status string
 
 	err error
 }
 
-func newDiscoveredResult(name string, project string, err error) instanceResult {
-	return instanceResult{kind: instanceResultDiscovered, name: name, project: project, err: err}
+// reportUnwatched says why an event's read is not watched. It runs on the loop
+// itself and never sends a result: the loop is the only reader of results, and
+// with the channel full a send from it would wait on itself for good.
+func reportUnwatched(logger *slog.Logger, project string, name string, err error) {
+	switch {
+	case errors.Is(err, ErrInstanceNotEnabled):
+		// The one case worth saying out loud: it asked to be checked and
+		// will not be.
+		logger.Warn("Not watching an instance that has a healthcheck but is not enabled",
+			"project", project, "instance", name, "key", shared.HealthEnabledKey)
+	case errors.Is(err, ErrInstanceNoHealthcheck):
+		// Nothing to say: these are the normal reasons to skip.
+	default:
+		logger.Error("Not watching an instance",
+			"project", project, "instance", name, "error", err)
+	}
 }
 
 func (r instanceResult) Key() string {
@@ -434,11 +447,7 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 	case incusApi.EventLifecycleInstanceStarted, incusApi.EventLifecycleInstanceRestarted, incusApi.EventLifecycleInstanceResumed:
 		inst, err := saveInstance(instances, ev)
 		if err != nil {
-			res := newDiscoveredResult(ev.Name(), ev.ProjectName(), err)
-			select {
-			case <-ctx.Done():
-			case results <- res:
-			}
+			reportUnwatched(logger, ev.ProjectName(), ev.Name(), err)
 			return
 		}
 
@@ -463,11 +472,7 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 	case incusApi.EventLifecycleInstanceStopped, incusApi.EventLifecycleInstanceShutdown:
 		inst, err := saveInstance(instances, ev)
 		if err != nil {
-			res := newDiscoveredResult(ev.Name(), ev.ProjectName(), err)
-			select {
-			case <-ctx.Done():
-			case results <- res:
-			}
+			reportUnwatched(logger, ev.ProjectName(), ev.Name(), err)
 			return
 		}
 
@@ -501,12 +506,7 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 	case incusApi.EventLifecycleInstanceUpdated:
 		inst, err := saveInstance(instances, ev)
 		if err != nil {
-			res := newDiscoveredResult(ev.Name(), ev.ProjectName(), err)
-			select {
-			case <-ctx.Done():
-			case results <- res:
-			}
-
+			reportUnwatched(logger, ev.ProjectName(), ev.Name(), err)
 			return
 		}
 
@@ -927,24 +927,6 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 // must not block: the status write it may start runs on its own goroutine.
 func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, instances map[string]*instance, results chan<- instanceResult, res instanceResult, metrics bool) {
 	switch res.kind {
-	case instanceResultDiscovered:
-		// saveInstance reports its failures here; a success folds into the map
-		// itself and sends nothing.
-		if res.err == nil {
-			return
-		}
-
-		switch {
-		case errors.Is(res.err, ErrInstanceNotEnabled):
-			// The one case worth saying out loud: it asked to be
-			// checked and will not be.
-			logger.Warn("Not watching an instance that has a healthcheck but is not enabled",
-				"instance", res.name, "key", shared.HealthEnabledKey)
-		case errors.Is(res.err, ErrInstanceNoHealthcheck):
-			// Nothing to say: these are the normal reasons to skip.
-		default:
-			logger.Error("Discover failed", "instance", res.name, "error", res.err)
-		}
 	case instanceResultChecked:
 		inst, ok := instances[res.Key()]
 		if !ok {

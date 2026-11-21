@@ -32,10 +32,9 @@ const (
 type instanceResultKind string
 
 const (
-	instanceResultDiscovered instanceResultKind = "discovered"
-	instanceResultRestarted  instanceResultKind = "restarted"
-	instanceResultChecked    instanceResultKind = "checked"
-	instanceResultStatus     instanceResultKind = "status"
+	instanceResultRestarted instanceResultKind = "restarted"
+	instanceResultChecked   instanceResultKind = "checked"
+	instanceResultStatus    instanceResultKind = "status"
 )
 
 // instanceAction is what an idle instance does when it comes due. A check and
