@@ -189,6 +189,11 @@ type Plugin struct {
 	// counts as known until a read lands. Run's goroutine alone.
 	peersRestored bool
 
+	// knownPeers is the last peering that counted as known - restored, or a
+	// read this run would turn warm on - and what the cold store keeps, nil
+	// before there is one. Run's goroutine alone.
+	knownPeers map[string][]string
+
 	// peerRetry is the backoff after a failed read, first and longest.
 	peerRetry [2]time.Duration
 
@@ -528,6 +533,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 	if p.cfg.PeerViews && peers != nil {
 		p.state.setPeers(peers, p.cfg.TTL)
 		p.peersRestored = true
+		p.knownPeers = peers
 		p.logger.Info("restored the network peering from the cold store", "peers", describePeers(peers))
 	}
 
@@ -902,7 +908,7 @@ func (p *Plugin) storeCold() {
 	// A run without the flag holds no peering worth restoring.
 	var peers map[string][]string
 	if p.cfg.PeerViews {
-		peers = p.state.peers
+		peers = p.knownPeers
 	}
 
 	b, err := encodeCold(p.state.serials, peers)

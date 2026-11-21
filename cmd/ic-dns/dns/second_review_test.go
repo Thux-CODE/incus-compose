@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/netip"
@@ -212,6 +213,38 @@ func TestSecondPeeringCompletesWhileDisconnected(t *testing.T) {
 	c.p.fold(event(iutil.ActionConnected, "", ""))
 	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
 	require.True(t, c.p.view.Ready(), "the reconnection's round ended")
+}
+
+// TestSecondIncompletePeerReadStoredAsKnown: the first read was asked for
+// before any name was on a network, and lands once the hub and its spokes are.
+// It does not make the peering known in this run, and is not stored as known
+// either: the next start, with the peering unreadable, stays SERVFAIL for a
+// name seen only through a peer. The read that does cover them is stored.
+func TestSecondIncompletePeerReadStoredAsKnown(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true), ColdMemory(nil))
+	c.p.askPeers(false)
+	first := <-c.p.peerAsk
+	for _, ev := range hubFleetEvents(false) {
+		c.p.fold(ev)
+	}
+	c.p.write()
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.peered(peerRead{keys: first.keys, gen: first.gen, peers: map[string][]string{}})
+	require.Error(t, c.p.PeeringReady())
+	f := hubIncus()
+	f.down = errors.New("unavailable")
+	r := runPeered(t, f, Suffix("incus"), ColdMemory(<-c.p.cold.writes))
+	defer r.stop(t)
+	r.feed(t, append(hubFleetEvents(true), warm(event(iutil.ActionSweepEnd, "", "")))...)
+	code, _ := resolve(&adapter{chain: r.p.view}, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+	require.Equal(t, "SERVFAIL", dns.RcodeToString[code])
+
+	covering := <-c.p.peerAsk
+	c.p.peered(peerRead{keys: covering.keys, gen: covering.gen, peers: hubPeers()})
+	require.NoError(t, c.p.PeeringReady())
+	_, stored, err := decodeCold(<-c.p.cold.writes)
+	require.NoError(t, err)
+	require.Equal(t, hubPeers(), stored, "the read that covers every network is what the next start restores")
 }
 
 // in stamps an event with the stream session the source minted it in.

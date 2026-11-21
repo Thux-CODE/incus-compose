@@ -263,10 +263,11 @@ func (p *Plugin) askIfGrew() {
 // after the last event that could have moved it. A slow or failing read never
 // keeps a replica that restored its peering cold.
 func (p *Plugin) peeringKnown() bool {
-	if p.peersRestored {
-		return true
-	}
+	return p.peersRestored || p.readKnown()
+}
 
+// readKnown is peeringKnown on the reads of this run alone.
+func (p *Plugin) readKnown() bool {
 	if p.peerCovered == nil || p.peerLanded < p.peerNeed {
 		return false
 	}
@@ -393,11 +394,19 @@ func (p *Plugin) peered(read peerRead) {
 		p.peerOwedBy = nil
 	}
 
-	known := p.state.peers != nil
-
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
 	if changed {
 		p.logger.Info("network peering changed", "peers", describePeers(peers))
+	}
+
+	// What the next start restores as known is a table this run would turn
+	// warm on, not merely the last one read: one too old for the last peer
+	// event, or not covering every network a name is on, is no knowledge.
+	stored := false
+
+	if p.readKnown() && (p.knownPeers == nil || changed) {
+		p.knownPeers = p.state.peers
+		stored = true
 	}
 
 	switch {
@@ -412,7 +421,7 @@ func (p *Plugin) peered(read peerRead) {
 		// says.
 		p.publish()
 
-	case changed || !known:
+	case stored:
 		// Nothing goes out, but the next start replays under this peering:
 		// the serials stored with it are the ones last published, unchanged.
 		// The first read finding nothing peered is a peering known all the
