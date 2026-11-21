@@ -530,12 +530,26 @@ func (r *Instance) Ensure(ctx context.Context, opts ...Option) error {
 
 	options := NewOptions(opts...)
 
+	// Gone between the read and the delete, taken away by something else, is
+	// the delete done.
+	gone := func(err error) bool {
+		return incusApi.StatusErrorCheck(err, http.StatusNotFound) || errors.Is(err, ErrNotFound)
+	}
+
 	err = r.Stop(ctx, OptionTimeout(options.Timeout), OptionForce())
-	if err != nil {
+	if err != nil && !gone(err) {
 		return err
 	}
 
-	return r.Delete(ctx)
+	err = r.Delete(ctx)
+	if err != nil && gone(err) {
+		r.clearState()
+		r.client.resources.Remove(r)
+
+		return nil
+	}
+
+	return err
 }
 
 // ensure fetches or creates the instance. The bool reports a marked instance
@@ -600,6 +614,7 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 
 		if missing && r.deleteMarked {
 			// Just remove the resource
+			r.clearState()
 			r.client.resources.Remove(r)
 		}
 
@@ -615,6 +630,8 @@ func (r *Instance) ensure(ctx context.Context, opts ...Option) (bool, error) {
 	// One marked to go that is gone already, taken away by something else
 	// since the plan, is what the plan asked for: it is not made again.
 	if r.deleteMarked {
+		// Not ensured either: nothing starts or waits for it afterwards.
+		r.clearState()
 		r.client.resources.Remove(r)
 
 		return false, r.client.hookAfter(ctx, ActionEnsure, r, options, nil)
