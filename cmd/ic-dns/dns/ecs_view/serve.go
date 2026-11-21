@@ -19,6 +19,10 @@ const staleTTL = 5
 // engine depends on nothing of ours. TestLevelTraceMatchesShared pins them.
 const levelTrace = slog.LevelDebug - 4
 
+// testHookAfterWarm runs between the two loads Answer makes, so a test can
+// publish in between. Nil outside tests.
+var testHookAfterWarm func()
+
 // Answer resolves one query against the current snapshot and writes the reply.
 // handled=false is the caller's cue to hand the request to the next plugin.
 func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) (bool, int, error) {
@@ -68,11 +72,21 @@ func (v *ECSView) Answer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) 
 		client, haveClient = src, haveSrc
 	}
 
-	snap := v.current.Load()
-
 	// Before the first whole read, every miss below may be a name not read yet
 	// rather than one that is not there, so none of them is answered as final.
+	//
+	// Loaded before the snapshot: a source publishes the snapshot that makes
+	// it warm and only then says so, so a query that reads warm is answered
+	// from that snapshot or a later one. The other way round, a query could
+	// take a snapshot from before the last name landed and then the warm that
+	// came after it, and deny that name for good.
 	cold := !v.warm.Load()
+
+	if testHookAfterWarm != nil {
+		testHookAfterWarm()
+	}
+
+	snap := v.current.Load()
 
 	// Zones first, and the zone tree is zones deep rather than names deep: a name
 	// outside every zone is the common case and never touches the name tree.
