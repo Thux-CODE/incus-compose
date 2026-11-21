@@ -365,6 +365,23 @@ form.
   name on the strength of a 404 read before it, nor lets a network read taken
   before a network update, delete or rename undo it. (by @sandroden)
 
+- `ic-healthd` no longer lets a check sent before an instance restarted decide
+  the new run: its verdict, pass, fail or timeout, is dropped and the new run is
+  checked at once, so the previous process can neither mark the restarted one
+  `healthy` nor use up its retries. (by @sandroden)
+
+- `ic-healthd` always writes `healthy` on the first passing check after a start.
+  An update read taken while `starting` was being written could carry the
+  previous run's `healthy` and suppress that write, leaving the replica
+  `starting`, and out of its service in `ic-dns`, until a later transition.
+  Reads no longer override a status write in flight. (by @sandroden)
+
+- `ic-healthd` wakes for the watchdog deadline of every check or restart in
+  flight, and for the next check or restart the watchdog schedules. With a
+  single watched instance, a check that never returned was reaped only when an
+  unrelated event woke the loop, up to an hour later. Already present in
+  v1.4.0. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added
