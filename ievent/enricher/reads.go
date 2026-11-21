@@ -49,6 +49,11 @@ type call struct {
 	// The read may have been taken before what they announce, so they get one
 	// of their own once this one lands.
 	again *call
+
+	// gone is an earlier read having found the instance held and Incus no
+	// longer having it, while this read was already owed: the delete that read
+	// would have announced is this one's to announce, if it finds the same.
+	gone bool
 }
 
 // join folds a second call for the same key into this one; the first ev is
@@ -62,6 +67,7 @@ func (c *call) join(other *call) {
 
 	c.wantInterfaces = c.wantInterfaces || other.wantInterfaces
 	c.waitForRunning = c.waitForRunning || other.waitForRunning
+	c.gone = c.gone || other.gone
 }
 
 // result is what a worker hands back, carrying the call rather than a key so
@@ -374,6 +380,7 @@ func (d *deferred) send(ctx context.Context, c *call) {
 				}
 
 				c.wantInterfaces = c.wantInterfaces || prev.wantInterfaces
+				c.gone = c.gone || prev.gone
 
 				// This read starts after them, so it answers them too.
 				if prev.again != nil {

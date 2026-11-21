@@ -3,6 +3,7 @@ package enricher
 import (
 	"log/slog"
 	"maps"
+	"net/http"
 	"testing"
 	"time"
 
@@ -12,6 +13,76 @@ import (
 	"github.com/lxc/incus-compose/ievent/iutil"
 	"github.com/lxc/incus-compose/internal/testlib"
 )
+
+// TestReviewOld404AfterNewRead: a read finds the instance gone, while an update
+// for the instance made again under the same name waits behind it for a read
+// of its own. That read finds the new instance, and nothing after it takes the
+// name away: the 404 was older news. Three events reach the chain - the
+// update the 404 answered, the one the second read answered, the sync - and
+// the last about the name is the update.
+func TestReviewOld404AfterNewRead(t *testing.T) {
+	h := seeded(t, 1, 1)
+	name := testlib.InstanceName(0)
+	before := h.readsOf("p", name)
+	h.mu.Lock()
+	h.err = incusapi.StatusErrorf(http.StatusNotFound, "absent at time of read")
+	gate := make(chan struct{})
+	h.gate = gate
+	h.mu.Unlock()
+	h.send(incusapi.EventLifecycleInstanceUpdated, "p", name)
+	require.Eventually(t, func() bool { return h.readsOf("p", name) > before }, time.Second, time.Millisecond)
+	h.mu.Lock()
+	h.err = nil
+	h.tag = "replacement"
+	h.mu.Unlock()
+	h.send(incusapi.EventLifecycleInstanceUpdated, "p", name)
+	settled(t, h)
+	close(gate)
+	var last *iutil.Event
+	for range 3 {
+		e := h.next()
+		if e.Name() == name {
+			last = e
+		}
+	}
+	require.NotNil(t, last)
+	require.Equal(t, incusapi.EventLifecycleInstanceUpdated, last.Action(), "the recreated instance must remain published")
+	require.True(t, last.Enriched(iutil.EnrichedInstance))
+	require.Equal(t, "replacement", tagOf(last))
+
+	select {
+	case e := <-h.out:
+		require.NotEqual(t, name, e.Name(), "%s after the read of the new instance", e.Action())
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// TestReviewOld404ThenGoneAgain: the same, with the instance gone again by the
+// second read. The delete the first read owed is the second read's to make.
+func TestReviewOld404ThenGoneAgain(t *testing.T) {
+	h := seeded(t, 1, 1)
+	name := testlib.InstanceName(0)
+	before := h.readsOf("p", name)
+	h.mu.Lock()
+	h.err = incusapi.StatusErrorf(http.StatusNotFound, "absent at time of read")
+	gate := make(chan struct{})
+	h.gate = gate
+	h.mu.Unlock()
+	h.send(incusapi.EventLifecycleInstanceUpdated, "p", name)
+	require.Eventually(t, func() bool { return h.readsOf("p", name) > before }, time.Second, time.Millisecond)
+	h.send(incusapi.EventLifecycleInstanceUpdated, "p", name)
+	settled(t, h)
+	close(gate)
+
+	var last string
+	for range 4 {
+		e := h.next()
+		if e.Name() == name {
+			last = e.Action()
+		}
+	}
+	require.Equal(t, incusapi.EventLifecycleInstanceDeleted, last)
+}
 
 // TestReviewNetworkEventDuringRead: a network read taken before an update, a
 // delete or a rename lands after it. The newer event wins: the update is read

@@ -616,7 +616,7 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 		return
 	}
 
-	had := p.state.instance(c.project, c.name) != nil
+	had := p.state.instance(c.project, c.name) != nil || c.gone
 	unserved := p.opts.Instance != nil && res.instance != nil && !p.opts.Instance(res.instance)
 
 	inst, landed := p.patchState(ctx, c.project, c.name, res.instance, res.state, res.err)
@@ -672,7 +672,20 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	// the cold store put it back - is not, and a fan-out reaching it first
 	// leaves the listing nothing to prune. Announced here, then, the way a
 	// prune does; a second delete for the same name changes nothing.
+	//
+	// Unless a read of the same key is already owed: it was asked for after
+	// this one went out, so its events are in the line ahead of where this
+	// delete would go, and an instance made again under the name in between
+	// would reach the chain and then be taken away by the older news. That
+	// read announces the delete instead, if it finds the instance gone too.
 	if had && landed && p.state.instance(c.project, c.name) == nil {
+		next := p.reads.calls[c.key]
+		if next != nil {
+			next.gone = true
+
+			return
+		}
+
 		p.q.push(iutil.NewEvent(time.Now(),
 			incusapi.EventLifecycleInstanceDeleted, c.project, c.name, "").
 			WithChainState(p.chain), true)
