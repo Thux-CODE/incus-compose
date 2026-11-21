@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/pprof"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,8 +61,15 @@ type Plugin struct {
 	ready atomic.Bool
 
 	// lost is when the stream last went, so a warm event stamped before it - a
-	// debounced leftover - is not taken for one since. Handle's goroutine alone.
+	// debounced leftover - is not taken for one since.
 	lost time.Time
+
+	// mu orders the decisions on ready against each other. Handle has more
+	// than one caller at once - a plugin before this one hands on what it
+	// drops from its own caller's goroutine while its fold hands on the rest -
+	// and a warm event that read lost before a disconnect stored it would
+	// otherwise set ready again after the disconnect cleared it.
+	mu sync.Mutex
 
 	// connected is the source's own state, straight off the chain.
 	connected atomic.Bool
@@ -124,9 +132,21 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 func (p *Plugin) Handle(ev *iutil.Event) {
 	p.lastEvent.Store(time.Now().UnixNano())
 
+	p.decide(ev)
+
+	p.next(ev)
+}
+
+// decide moves readiness on one event, under mu.
+func (p *Plugin) decide(ev *iutil.Event) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
 	switch ev.Action() {
 	case iutil.ActionConnected:
 		p.connected.Store(true)
+
+		return
 
 	case iutil.ActionDisconnected:
 		// The one thing that takes readiness back: nothing confirms what is
@@ -134,8 +154,6 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 		p.connected.Store(false)
 		p.ready.Store(false)
 		p.lost = ev.At()
-
-		p.next(ev)
 
 		return
 	}
@@ -149,8 +167,6 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 	if ev.ChainState() == iutil.ChainWarm && ev.Err() == nil && ev.At().After(p.lost) {
 		p.ready.Store(true)
 	}
-
-	p.next(ev)
 }
 
 // Run serves until ctx is canceled; it blocks, so main owns the goroutine.
