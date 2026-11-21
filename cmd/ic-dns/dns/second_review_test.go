@@ -1,7 +1,10 @@
 package dns
 
 import (
+	"fmt"
+	"runtime"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -10,6 +13,45 @@ import (
 
 // in stamps an event with the stream session the source minted it in.
 func in(session uint64, ev *iutil.Event) *iutil.Event { return ev.WithSession(session) }
+
+// TestSecondSpillFIFO: one producer, an inbox of one, and a consumer taking
+// the inbox and the spill as Run does. Every event is folded in arrival order.
+func TestSecondSpillFIFO(t *testing.T) {
+	c := newColdServer(t, InboxSize(1))
+	const total = 150000
+	events := make([]*iutil.Event, total)
+	for i := range events {
+		events[i] = iutil.NewEvent(time.Unix(int64(i+1), 0), "stored", "p", "web", "").WithRestored()
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		for i, ev := range events {
+			c.p.Handle(ev)
+			if i%4 == 3 {
+				runtime.Gosched()
+			}
+		}
+	}()
+	var seen int
+	var firstReordered string
+	c.p.next = func(ev *iutil.Event) {
+		if seen < total && ev != events[seen] && firstReordered == "" {
+			firstReordered = fmt.Sprintf("arrival %d folded in position %d", ev.At().Unix(), seen+1)
+		}
+		seen++
+	}
+	for seen < total {
+		select {
+		case ev := <-c.p.inbox:
+			c.p.fold(ev)
+		case <-c.p.spilled:
+			c.p.foldSpilled()
+		}
+	}
+	<-finished
+	require.Empty(t, firstReordered)
+}
 
 // TestSecondLostConnectionControls: the controls a full inbox drops go on
 // past the fold, ahead of what is queued. The events carry the session the

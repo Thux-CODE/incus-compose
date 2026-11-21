@@ -459,23 +459,31 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 
 // foldSpilled folds what spilled, after everything on the inbox: what is
 // there arrived before the first of it.
+//
+// The inbox is emptied and the spill taken under the one lock Handle takes,
+// so the two are one cut: unlocked between them, Handle could find the spill
+// empty, fill the inbox and spill the next event, which would be folded ahead
+// of the one left on the inbox.
 func (p *Plugin) foldSpilled() {
+	var head []*iutil.Event
+
+	p.spillMu.Lock()
+
 drained:
 	for {
 		select {
 		case ev := <-p.inbox:
-			p.fold(ev)
+			head = append(head, ev)
 		default:
 			break drained
 		}
 	}
 
-	p.spillMu.Lock()
 	spill := p.spill
 	p.spill, p.spillLive = nil, 0
 	p.spillMu.Unlock()
 
-	for _, ev := range spill {
+	for _, ev := range slices.Concat(head, spill) {
 		p.fold(ev)
 	}
 }
