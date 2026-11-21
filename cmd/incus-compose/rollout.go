@@ -586,6 +586,8 @@ func rolloutPrepare(ctx context.Context, p *project.Project, c *client.Client, s
 		}
 	}
 
+	health = rolloutProfileHealth(health, first)
+
 	blockers := rolloutBlockers(service, health, first.Config, []map[string]map[string]string{first.ExpandedDevices, declared}, pools, clustered)
 	if drainDeclared && !slices.Contains(blockers, rolloutDrainedBlocker) {
 		blockers = append(blockers, rolloutDrainedBlocker)
@@ -678,6 +680,28 @@ func declaredDevices(inst *client.Instance, defaultPool string) map[string]map[s
 	}
 
 	maps.Copy(out, inst.Config.ExtraDevices)
+
+	return out
+}
+
+// rolloutProfileHealth adds to the healthcheck the compose file and the image
+// give a new replica what a profile gives it: the keys the old replica has
+// from its profiles alone, which ic-healthd runs as well. What the compose
+// file or the image sets wins.
+func rolloutProfileHealth(health map[string]string, old *incusApi.Instance) map[string]string {
+	out := maps.Clone(health)
+	if out == nil {
+		out = map[string]string{}
+	}
+
+	for k, v := range old.ExpandedConfig {
+		_, local := old.Config[k]
+		_, declared := out[k]
+
+		if strings.HasPrefix(k, shared.HealthKeyPrefix) && !local && !declared {
+			out[k] = v
+		}
+	}
 
 	return out
 }
