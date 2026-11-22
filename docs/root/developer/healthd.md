@@ -227,6 +227,9 @@ it always drains - from those goroutines. The loop itself never sends on the
 results channel: it is the only reader, and with the channel full the send
 would wait on itself for good. A read the daemon does not watch (no
 healthcheck, not enabled, a config that does not parse) is logged on the spot.
+An instance event with no read at all is a leftover of an earlier stream
+session, which the enricher passes on unread: it changes nothing held and is
+logged at debug only, since every reconnect brings some.
 
 ### Worker pools
 

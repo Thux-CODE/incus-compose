@@ -1099,6 +1099,48 @@ func TestUnwatchedReadsSendNothing(t *testing.T) {
 	}
 }
 
+// TestAnUnreadEventOfAnEarlierSessionIsIgnoredQuietly (R6-3): the enricher
+// passes an instance event of an earlier stream session on without its read.
+// It changes nothing held, sends nothing, and logs no error: every reconnect
+// brings some. The linear case after it - the newer session's own read - still
+// acts.
+func TestAnUnreadEventOfAnEarlierSessionIsIgnoredQuietly(t *testing.T) {
+	t.Parallel()
+
+	var out syncBuffer
+
+	s := newScheduler(t)
+	s.logger = slog.New(slog.NewTextHandler(&out, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+	due := inst.due
+
+	for _, action := range []string{
+		incusApi.EventLifecycleInstanceStopped,
+		incusApi.EventLifecycleInstanceStarted,
+		incusApi.EventLifecycleInstanceUpdated,
+	} {
+		handleInstanceEvent(s.ctx, s.logger, s.conn, s.instances, s.results,
+			iutil.NewEvent(time.Now(), action, s.project, "web-1", "").WithSession(1))
+	}
+
+	require.Same(t, inst, s.instances[s.key("web-1")], "still held")
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionCheck, inst.action)
+	require.Equal(t, due, inst.due)
+	require.Equal(t, shared.HealthStatusHealthy, inst.status)
+	s.silent(t)
+
+	require.NotContains(t, out.String(), "level=ERROR")
+	require.Contains(t, out.String(), "earlier stream session")
+
+	// The newer session's read of the stop is acted on as ever.
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+	require.Equal(t, instanceActionRestart, inst.action)
+	require.Equal(t, shared.HealthStatusStopped, s.next(t).status)
+}
+
 // TestABrokenHealthcheckIsDroppedAndComesBack is the linear case around it: a
 // watched instance whose healthcheck stops parsing is forgotten, and the read
 // that fixes it is watched again from a fresh start.

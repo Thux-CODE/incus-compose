@@ -169,6 +169,12 @@ func reportUnwatched(logger *slog.Logger, project string, name string, err error
 			"project", project, "instance", name, "key", shared.HealthEnabledKey)
 	case errors.Is(err, ErrInstanceNoHealthcheck):
 		// Nothing to say: these are the normal reasons to skip.
+	case errors.Is(err, ErrNotEnriched):
+		// A leftover of an earlier stream session, passed on unread. What is
+		// held stays as it is: the newer session's reads say what the
+		// instance is now. Every reconnect brings some, so no more than debug.
+		logger.Debug("Ignoring an instance event of an earlier stream session",
+			"project", project, "instance", name)
 	default:
 		logger.Error("Not watching an instance",
 			"project", project, "instance", name, "error", err)
@@ -452,7 +458,7 @@ func instKey(ev *iutil.Event) string {
 // is for a stop, whatever made it due.
 func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, error) {
 	if !ev.Enriched(iutil.EnrichedInstance) {
-		return nil, errors.New("event without an instance read")
+		return nil, ErrNotEnriched
 	}
 
 	k := instKey(ev)
