@@ -72,11 +72,15 @@ type state struct {
 	// against the digest its serial was stored with.
 	compared bool
 
-	// live is the change being folded now coming from somewhere other than
-	// the replay off the enricher's store: every zone it marks as moved is
-	// marked live too (see zoneSerial.live). Set around each change by whoever
-	// makes it, false otherwise.
-	live bool
+	// replay is what the replay off the enricher's store said of each
+	// instance, kept until the first compare: what a read of this run is told
+	// apart from, so one confirming it changes nothing a serial answers for,
+	// even when both landed in one window and pending kept the read alone.
+	replay map[string]*instance
+
+	// reading is a read of the peering being folded: every zone it marks as
+	// moved is changed by something other than the replay (see taint).
+	reading bool
 
 	// grown is every network a name has landed on that nothing was on: its
 	// peering has not been read, since until now it could change no answer.
@@ -119,6 +123,7 @@ func newState(serials map[string]zoneSerial) *state {
 	return &state{
 		held:       map[string]*instance{},
 		pending:    map[string]*instance{},
+		replay:     map[string]*instance{},
 		nets:       map[string]map[ecs_view.ViewID]int{},
 		serials:    serials,
 		served:     map[string]ecs_view.ViewAnswer{},
@@ -160,19 +165,18 @@ func (s *state) write(ttl uint32) bool {
 		}
 	}()
 
-	// live is any of it not being the replay: what refresh moves after it may
-	// be its doing.
-	live := false
-
-	defer func() { s.live = false }()
-
 	for key, next := range s.pending {
 		delete(s.pending, key)
 
 		prev := s.held[key]
 
-		// Only updates are replayed: a delete is this run's.
-		s.live = next == nil || !next.Restored()
+		// What the replay said of it: filed on arrival, so a read that
+		// landed in the same window is still compared with it, or else the
+		// restored instance the trees hold.
+		replayed := s.replay[key]
+		if replayed == nil && prev != nil && prev.Restored() {
+			replayed = prev
+		}
 
 		// The same records, so the trees are left alone - but the event held is
 		// the newer one, or an instance restored from the cold store would read
@@ -182,29 +186,28 @@ func (s *state) write(ttl uint32) bool {
 			next.aliasIn = prev.aliasIn
 			s.held[key] = next
 
-			if next.service != "" && prev.Restored() != next.Restored() {
-				confirmed = true
-				live = true
-			}
+			confirmed = confirmed || (next.service != "" && prev.Restored() != next.Restored())
+
+			s.differs(prev, replayed, next)
 
 			continue
 		}
 
 		if next == nil && prev == nil {
+			// Never reached the trees, but the replay said it was there.
+			s.differs(nil, replayed, nil)
+
 			continue
 		}
 
-		live = live || s.live
-
 		s.apply(key, next, ttl)
+		s.differs(prev, replayed, next)
 
 		moved = true
 	}
 
 	// After every instance has moved: a service name is written from all of
 	// its replicas at once.
-	s.live = live
-
 	if (moved || confirmed) && s.refresh(ttl) {
 		moved = true
 	}
@@ -213,9 +216,64 @@ func (s *state) write(ttl uint32) bool {
 }
 
 // arrive files what an event says of one instance for the next write, nil
-// for one gone. Only the last word reaches the trees.
+// for one gone. Only the last word reaches the trees, but what the replay
+// said is kept apart until the first compare, so a read is compared with it
+// whatever window either landed in (see differs).
 func (s *state) arrive(key string, inst *instance) {
+	if inst != nil && inst.Restored() && !s.compared {
+		s.replay[key] = inst
+	}
+
 	s.pending[key] = inst
+}
+
+// differs marks the zones an instance is in, was in and was replayed in as
+// changed by something other than the replay, where what arrived is neither
+// the replay itself nor a read that says what it said: a read that differs,
+// one of an instance it did not hold, or a delete. Before the first compare
+// alone; that compare ends the replay's part, and lets go of what it said.
+func (s *state) differs(prev, replayed, next *instance) {
+	if s.compared {
+		return
+	}
+
+	if next != nil && (next.Restored() || (replayed != nil && sameForZones(next, replayed))) {
+		return
+	}
+
+	for _, inst := range []*instance{prev, replayed, next} {
+		if inst == nil {
+			continue
+		}
+
+		for _, zone := range s.zonesOf(inst) {
+			s.taint(zone)
+		}
+	}
+}
+
+// sameForZones reports whether two reads of one instance put the same thing
+// in the zones: what it is called and where, its addresses, its readiness
+// and what its project says of the zone. A config key ic-dns does not read,
+// a health note or a timestamp is not a change a serial answers for, though
+// it makes the two events differ.
+func sameForZones(a, b *instance) bool {
+	if a.zone != b.zone || a.transfer != b.transfer || a.service != b.service ||
+		a.standby != b.standby || a.ready != b.ready ||
+		!slices.Equal(a.ns, b.ns) || !slices.Equal(a.names, b.names) || !slices.Equal(a.alias, b.alias) ||
+		!maps.Equal(a.ptrs, b.ptrs) || len(a.nets) != len(b.nets) {
+		return false
+	}
+
+	for key, on := range a.nets {
+		other, sits := b.nets[key]
+		if !sits || !slices.Equal(on.ipv4, other.ipv4) || !slices.Equal(on.ipv6, other.ipv6) ||
+			!slices.Equal(on.prefixes, other.prefixes) {
+			return false
+		}
+	}
+
+	return true
 }
 
 // snapshot freezes the working copy. The radix trees commit by copy; the

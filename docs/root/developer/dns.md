@@ -224,9 +224,26 @@ could transfer it before.
 A zone nothing is left in stops being served but keeps its serial for good,
 under a digest no content has: forgetting it would publish it at 1 when its
 names come back, which a secondary that polled before may hold for the old
-content. A file from before the digest is taken on trust as it was then - the
-replay's first publish of a zone is what its serial is taken to describe -
-unless it says a step was owed.
+content.
+
+A file from before the digest is taken on trust: what its serial described is
+taken to be **the replay**, the whole of it, which may land over several
+windows. Such a zone takes no digest before the first compare. Instead every
+instance is told apart from what the replay said of it (`state.replay`, filed
+on arrival by `arrive`, so a read landing in the same window as its replay is
+still compared with it): a read that differs in what the zones carry
+(`sameForZones` - names, addresses, readiness, the project's zone settings,
+not a config key `ic-dns` does not read), a delete of an instance the replay
+held, an instance the replay did not hold, or a peering read changing a
+zone, marks the zones involved `Owed` (`taint`), and the zones above one that
+came or went because of it. At the first compare a zone owed steps once, one
+not owed takes what it holds as what its serial describes. Before then the
+cold store says only `owed`, so a restart halfway through the replay fixes
+nothing partial; a file that says `owed` steps once. Taking the serial as is
+at the first compare, whatever happened before it, is not enough: a real
+change folded before the round would keep the old serial, a secondary holding
+it would be told by IXFR that it is up to date, and keep the old records until
+the next change.
 
 The plugin stamps it because it is the only thing that knows what it published
 last - the engine is a read-only view and holds nothing to compare against.

@@ -84,20 +84,8 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 // moved marks every zone this instance has a name in, so publish knows which
 // to compare again.
 func (s *state) moved(inst *instance) {
-	s.dirty(inst.zone)
-
-	// Where each alias is carried now, and where it was counted, which a zone
-	// born since may have parted.
-	for _, zone := range s.aliasZones(inst) {
+	for _, zone := range s.zonesOf(inst) {
 		s.dirty(zone)
-	}
-
-	for _, zone := range inst.aliasIn {
-		s.dirty(zone)
-	}
-
-	for _, on := range inst.ptrs {
-		s.dirty(on.zone)
 	}
 }
 
@@ -157,32 +145,16 @@ func (s *state) step(complete bool, ttl uint32) {
 		// Before complete a zone is rendered as it stands and left marked, so
 		// the first compare takes it in whatever happened to it meanwhile.
 		if !complete {
-			switch {
-			case held.Serial == 0:
-				// Its first publish is a birth rather than a step, and a
-				// secondary takes zero as "no zone here".
+			// Its first publish is a birth rather than a step, and a
+			// secondary takes zero as "no zone here". A zone stored by a
+			// build that kept no digest takes none here: what its serial
+			// described is the whole replay, which may land over several
+			// windows and is only whole at the first compare. Whatever else
+			// changes it meanwhile marks it owed (taint), and that is what a
+			// cold store written now keeps.
+			if held.Serial == 0 {
 				held.Serial = 1
 				held.born = true
-			case held.Digest == "" && !held.Owed, held.replayed:
-				// Stored by a build that kept no digest and owed nothing:
-				// what it held then is taken to be what the replay publishes,
-				// as that build took it - all of it, over however many
-				// windows it lands in, so the digest is taken again at each
-				// publish the replay alone has moved the zone. Once anything
-				// else has, the one taken before it stays, and a change after
-				// it, the round's included, steps once complete; where
-				// nothing of the replay was published before it, there is
-				// none to take and the zone is owed a step.
-				switch {
-				case !held.live:
-					z, _ := s.zones.Get(ecs_view.NameKey(name))
-					held.Digest = zoneDigest(s.names.Root(), s.zones.Root(), z)
-					held.replayed = true
-				case !held.replayed:
-					held.Owed = true
-				default:
-					held.replayed = false
-				}
 			}
 
 			s.serials[name] = held
@@ -202,9 +174,10 @@ func (s *state) step(complete bool, ttl uint32) {
 			held.Digest = digest
 		case held.born, held.Digest == "" && !held.Owed:
 			// Born in this run before anything could transfer it, or stored by
-			// a build that kept no digest, owed nothing and was not published
-			// before the round: what it holds now is what the serial is taken
-			// to describe.
+			// a build that kept no digest and that nothing but the replay has
+			// changed since: what it holds now is the replay, confirmed or
+			// not, and that is what the serial is taken to describe. One owed
+			// has no digest to equal and steps below.
 			held.Digest = digest
 			held.born = false
 		case digest != held.Digest:
@@ -219,6 +192,7 @@ func (s *state) step(complete bool, ttl uint32) {
 
 	if complete {
 		s.compared = true
+		s.replay = nil
 	}
 }
 
@@ -230,8 +204,6 @@ func (s *state) step(complete bool, ttl uint32) {
 // Without this the parent's content changes under the serial it holds, and a
 // secondary at that serial keeps the old records.
 func (s *state) reparent() {
-	defer func() { s.live = false }()
-
 	for name, held := range s.serials {
 		serving := held.names > 0
 		if !serving {
@@ -245,13 +217,15 @@ func (s *state) reparent() {
 		held.served = serving
 		s.serials[name] = held
 
-		// What moved the zones above is whatever made this one come or go.
-		s.live = held.live
-
+		// What changed the zones above is whatever made this one come or go.
 		above := name
 		for i := strings.IndexByte(above, '.'); i >= 0 && i+1 < len(above); i = strings.IndexByte(above, '.') {
 			above = above[i+1:]
 			s.dirty(above)
+
+			if held.changed {
+				s.taint(above)
+			}
 		}
 	}
 }
@@ -513,8 +487,49 @@ func (s *state) dirty(zone string) {
 	}
 
 	held.dirty = true
-	held.live = held.live || s.live
 	s.serials[zone] = held
+
+	if s.reading {
+		s.taint(zone)
+	}
+}
+
+// taint marks a zone as changed by something other than the replay, before
+// the first compare: a zone stored by a build that kept no digest is owed a
+// step then, since what its serial described - the replay - is no longer
+// what it holds. After the first compare a digest says it all, and this is
+// nothing.
+func (s *state) taint(zone string) {
+	if s.compared {
+		return
+	}
+
+	held, known := s.serials[zone]
+	if !known {
+		return
+	}
+
+	held.changed = true
+
+	if held.Serial != 0 && !held.born && held.Digest == "" {
+		held.Owed = true
+	}
+
+	s.serials[zone] = held
+}
+
+// zonesOf is every zone one instance has a name in: where each alias is
+// carried now, and where it was counted, which a zone born since may have
+// parted.
+func (s *state) zonesOf(inst *instance) []string {
+	out := append([]string{inst.zone}, s.aliasZones(inst)...)
+	out = append(out, inst.aliasIn...)
+
+	for _, on := range inst.ptrs {
+		out = append(out, on.zone)
+	}
+
+	return out
 }
 
 // sameAnswer reports whether two answers for one name say the same thing in
@@ -721,7 +736,6 @@ func (s *state) leave(name string, ns []string, ttl uint32, host, transfer bool)
 	// deleting between the two would lose the serial and republish it at 1.
 	// Publish is what sweeps a zone nothing came back to.
 	held.dirty = true
-	held.live = held.live || s.live
 
 	s.serials[name] = held
 

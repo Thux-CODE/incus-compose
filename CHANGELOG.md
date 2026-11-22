@@ -430,11 +430,16 @@ form.
   and answered `SERVFAIL` until the other one's grace ran out, up to 45
   seconds later. (by @sandroden)
 
-- `ic-dns` no longer steps a serial at the first start on a cold store from
-  before the digest when the replay of an unchanged zone lands over several
-  windows: what the serial described is taken to be the whole replay, not its
-  first window. A zone that a read of the new run changes before the replay
-  has published any of it steps once, as such a change did before the digest.
+- `ic-dns`, at the first start on a cold store from before the digest, steps
+  a zone's serial exactly when this run changed what the replay of it said:
+  an instance read with different addresses, names or readiness, one deleted,
+  one the replay did not hold, or the peering read. A change folded together
+  with the end of the first round kept the old serial, and an IXFR from it
+  was the SOA alone, so a secondary kept the old address. A read confirming
+  the replay, in the same window or after it, a config key `ic-dns` does not
+  read, a replay landing over several windows and a restart halfway through
+  it no longer step anything: no digest is taken before the first round ends,
+  and the cold store written meanwhile says only whether a step is owed.
   (by @sandroden)
 
 - The `ievent` enricher no longer deletes an instance made again under the same

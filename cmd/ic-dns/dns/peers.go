@@ -447,10 +447,11 @@ func (p *Plugin) peered(read peerRead) {
 
 	p.armOwed()
 
-	// A read is this run's, never the replay's.
-	p.state.live = true
+	// A read is this run's, never the replay's: what it changes in a zone is
+	// a change the replay did not describe.
+	p.state.reading = true
 	changed, touched := p.state.setPeers(peers, p.cfg.TTL)
-	p.state.live = false
+	p.state.reading = false
 
 	if changed {
 		p.logger.Info("network peering changed", "peers", describePeers(peers))

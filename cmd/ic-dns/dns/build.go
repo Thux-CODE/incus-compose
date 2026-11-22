@@ -166,23 +166,19 @@ type zoneSerial struct {
 	Digest string `json:"digest,omitempty"`
 
 	// Owed is what a file from before Digest says instead: a change made
-	// before the round that the serial has not answered for. Written only for
-	// a zone such a file left without a digest, where a change from outside
-	// the replay reached it before the replay alone was published: there is
-	// no digest of what the serial described to take, and it steps once
-	// complete. Anywhere else a digest says it all.
+	// before the round that the serial has not answered for. Such a zone
+	// never takes a digest before the first compare; it is marked owed when
+	// something other than the replay changes it before then (see
+	// state.taint), and that is all a cold store written meanwhile says of
+	// it, so a restart halfway through the replay fixes nothing partial.
+	// Anywhere else a digest says it all.
 	Owed bool `json:"owed,omitempty"`
 
-	// replayed is Digest having been taken in this run off a publish of the
-	// replay alone, for a zone a file from before Digest left without one:
-	// taken again at every publish while only the replay has moved the zone,
-	// since the replay can land over several windows, and kept from the first
-	// one after something else has.
-	replayed bool
-
-	// live is something other than the replay - a read of this run, a delete,
-	// the peering read - having moved the zone since this run started.
-	live bool
+	// changed is something other than the replay - a read of this run that
+	// differs from what was replayed, a delete, the peering read - having
+	// changed the zone before the first compare. What makes a legacy zone
+	// owed, and the zones above it where it came or went.
+	changed bool
 
 	// born says Serial was given in this run before the first round ended:
 	// nothing could transfer it, so the first compare takes what the zone
