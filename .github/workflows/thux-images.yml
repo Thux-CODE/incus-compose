@@ -37,7 +37,7 @@ jobs:
         id: tags
         run: |
           case "${GITHUB_REF_NAME}" in
-            thux-1.4) tag=1.4.0-thux.4 ;;
+            thux-1.4) tag=1.4.0-thux.5 ;;
             *) echo "no image tag for branch ${GITHUB_REF_NAME}" >&2; exit 1 ;;
           esac
           image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/incus-compose/${{ matrix.image }}"
