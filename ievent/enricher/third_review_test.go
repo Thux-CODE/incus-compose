@@ -186,7 +186,7 @@ func TestThirdColdProjectListingGraceReleasesEnd(t *testing.T) {
 	p := bare(t)
 	inst := testlib.NewInstance("p", 0, 0)
 	p.state.setInstance(&inst, nil)
-	p.projectsListed = true
+	p.state.projectsListed = true
 	p.sweepSession = 2
 	commands := make(chan iutil.Command, 1)
 	p.args.CommandOut = commands

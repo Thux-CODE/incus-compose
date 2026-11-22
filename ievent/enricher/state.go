@@ -71,6 +71,12 @@ func newProject() *project {
 type state struct {
 	projects map[string]*project
 
+	// projectsListed is a listing of the projects having succeeded, here or
+	// in the run that wrote the cold store, empty included. With each
+	// project's listed it is the inventory: known only from a listing, never
+	// from what one read or one event brought in.
+	projectsListed bool
+
 	// dirty says something has changed since the last clone went to the store.
 	// Set by every write here, cleared by the fold when it takes one.
 	dirty bool
@@ -103,6 +109,8 @@ func (s *state) clone() *state {
 		}
 	}
 
+	out.projectsListed = s.projectsListed
+
 	return out
 }
 
@@ -111,15 +119,20 @@ func (s *state) clone() *state {
 // renaming a field here is not a format change.
 //
 // Version is absent from what v1.4.0 wrote, which is the same shape as version
-// one: a missing key reads as zero and is taken for it. Anything else is a
-// format this binary does not know, and is ignored rather than migrated.
+// one: a missing key reads as zero and is taken for it. Version two adds what
+// was listed, written whatever it is: in it, a project whose instances were
+// not listed is one, and so are the projects. A version one file never said,
+// and a project holding instances is taken as listed there, as the projects
+// are where one is. Anything else is a format this binary does not know, and
+// is ignored rather than migrated.
 type stateJSON struct {
-	Version  int                    `json:"version"`
-	Projects map[string]projectJSON `json:"projects"`
+	Version        int                    `json:"version"`
+	Projects       map[string]projectJSON `json:"projects"`
+	ProjectsListed bool                   `json:"projects_listed,omitempty"`
 }
 
 // storeVersion is the on-disk format written here.
-const storeVersion = 1
+const storeVersion = 2
 
 type projectJSON struct {
 	// Not omitempty: a project that sets nothing writes an empty object, and one
@@ -130,14 +143,13 @@ type projectJSON struct {
 	Networks  map[string]*iutil.Network  `json:"networks,omitempty"`
 
 	// Listed is the project's instances having been listed: an empty project
-	// listed is an inventory, one whose configuration alone was read is not.
-	// Absent in a file from before it, where a project holding instances is
-	// taken as listed.
+	// listed is an inventory, one whose configuration alone was read, or one
+	// instance an event brought in, is not.
 	Listed bool `json:"listed,omitempty"`
 }
 
 func (s state) MarshalJSON() ([]byte, error) {
-	out := stateJSON{Version: storeVersion, Projects: make(map[string]projectJSON, len(s.projects))}
+	out := stateJSON{Version: storeVersion, Projects: make(map[string]projectJSON, len(s.projects)), ProjectsListed: s.projectsListed}
 
 	for projectName, p := range s.projects {
 		out.Projects[projectName] = projectJSON{
@@ -164,11 +176,14 @@ func decodeState(b []byte) (*state, error) {
 		return nil, err
 	}
 
-	if in.Version != 0 && in.Version != storeVersion {
+	if in.Version < 0 || in.Version > storeVersion {
 		return nil, fmt.Errorf("%w %d", errStoreVersion, in.Version)
 	}
 
+	legacy := in.Version < storeVersion
+
 	out := newState()
+	out.projectsListed = in.ProjectsListed
 
 	for projectName, p := range in.Projects {
 		held := newProject()
@@ -188,7 +203,8 @@ func decodeState(b []byte) (*state, error) {
 			}
 		}
 
-		held.listed = p.Listed || len(held.instances) > 0
+		held.listed = p.Listed || (legacy && len(held.instances) > 0)
+		out.projectsListed = out.projectsListed || (legacy && held.listed)
 
 		out.projects[projectName] = held
 	}
@@ -350,6 +366,22 @@ func (s *state) setProject(name string, config map[string]string) {
 	s.dirty = true
 
 	s.project(name).config = config
+}
+
+// setListed records a listing that succeeded: of one project's instances, or
+// with project empty, of the projects. Durable at once: dirty, so the next
+// clone carries it even where nothing else changed - an empty listing changes
+// nothing else.
+func (s *state) setListed(project string) {
+	s.dirty = true
+
+	if project == "" {
+		s.projectsListed = true
+
+		return
+	}
+
+	s.project(project).listed = true
 }
 
 // listed reports whether one project's instances have been listed, here or by

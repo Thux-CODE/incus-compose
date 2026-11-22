@@ -145,12 +145,8 @@ type Plugin struct {
 	unread map[string]subject
 
 	// brokenSince is when the first of the runs breaking since the last one
-	// that ended broke; zero while none is. projectsListed is a listing of
-	// the projects having succeeded, here or in the run that wrote the cold
-	// store, empty included: where a project listing that keeps failing has
-	// something to answer from. See endBroken.
-	brokenSince    time.Time
-	projectsListed bool
+	// that ended broke; zero while none is. See endBroken.
+	brokenSince time.Time
 
 	// readAt is when the read each held instance was last answered by went
 	// out: a listing asked for before it may not have seen an instance made
@@ -334,9 +330,6 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		retries:    newRetries(),
 		archive:    archive{},
 	}
-
-	// A project the cold store put back was listed by the run that wrote it.
-	p.projectsListed = p.state.projectCount() > 0
 
 	// Nil where nothing is written, which is what the fold and the shutdown
 	// both check rather than the path.
