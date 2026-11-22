@@ -85,4 +85,9 @@ func TestSecondFullResultsBlocksScheduler(t *testing.T) {
 	case <-time.After(absenceGrace):
 		t.Fatal("the results channel can be drained only after the event handler returns")
 	}
+	// Unwatched reads send nothing, so the loop above never fills results and
+	// cannot by itself show the handler returning past a full channel; that is
+	// TestThirdUnwatchedWithAlreadyFullResults. What it does pin is the
+	// nothing sent.
+	require.Empty(t, s.results, "an unwatched read sends no result")
 }
