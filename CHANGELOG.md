@@ -362,8 +362,14 @@ form.
   longer reopens it, a late connected of a session whose round already ended
   no longer takes `/ready` back, a lost disconnected no longer keeps the view
   healthy across the next connected, and an end of round of an earlier session
-  is no round. Neither `ic-dns` nor the enricher drops connection controls on
-  a full inbox. A peering that becomes known while the stream is down turns the
+  is no round, and a delete of an earlier session no longer takes away a name
+  the newer one confirmed: an older session's event changes no data either.
+  Neither `ic-dns` nor the enricher drops connection controls on a full inbox,
+  nor the first event of a newer session, and what the enricher holds back at
+  a full inbox is kept by session, so the connected of the newest session is
+  never pushed out by leftovers of the one before, which left every round of
+  the healthy session refused and `/ready` at 503; the debounce no longer
+  hands on an older control ahead of a newer one it queues. A peering that becomes known while the stream is down turns the
   view warm, clamped and not ready, instead of leaving every name `SERVFAIL`
   with `--cold-answers=false`. (by @sandroden)
 
@@ -520,6 +526,32 @@ form.
   restart, with its next check deferred, stayed stopped for good. Instances
   stopped on purpose, without a policy, or found stopped at discovery still wait
   for their start. Already present in v1.4.0. (by @sandroden)
+
+### Known issues
+
+- `ievent` enricher inventory: a failed listing of the projects can end a
+  round where a project's instances were never listed; and a listing bit set
+  reaches the cold store at the next store tick or at shutdown, not at once, so
+  a crash in between loses it.
+- `ievent` enricher, excluded projects: a read sent while its project was
+  excluded is published if it lands after the project is served again; a
+  listing of projects whose marker read timed out serves the project again
+  instead of keeping its last exclusion; pruning an excluded owner project
+  drops its network history, so a tenant's older read can put a deleted
+  network back.
+- `ievent` enricher, listings and reads: a read not yet sent when a listing
+  lands is taken as older than the listing; and the grace bounds when the end
+  of a round is emitted, not when it leaves the line behind reads still queued
+  before it.
+- `ic-dns` zone serials: a legacy confirmation that changes which replica a
+  service picks, a peering read before the legacy replay, and a legacy child
+  zone gone before the first publish can change what a zone transfers without
+  stepping its serial; a dotted service name steps the serial of the
+  instance's zone rather than the child zone that transfers it; and a forward
+  alias change steps an unchanged reverse zone.
+- Cold store format 2: a binary from before it ignores the file and starts
+  cold, so a rollback loses the inventory the store held until a listing
+  succeeds again.
 
 ## [v1.4.0] - 2026-11-11
 

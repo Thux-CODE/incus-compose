@@ -515,8 +515,12 @@ session, of any kind - a peer event included, folded before the peering
 returns - opens it not fresh, its connected and the disconnected before it
 lost or not; its disconnected closes it for good, and its connected, early or
 late, opens nothing already open. A warm event, the end of a round included,
-counts for a round only in the newest session, open. `dns` itself spills connection controls rather than dropping them, so the
-plugins after it see them in order.
+counts for a round only in the newest session, open, and an event of an
+older session changes no record either: a delete late out of a queue takes
+away nothing the newer session confirmed. `dns` itself spills connection
+controls rather than dropping them, and the first event of a session newer
+than any seen at `Handle` too, so its fold takes the session into account
+before `http` does, and the plugins after it see them in order.
 
 `/ready` follows the same signal, with the same rule. `http` turns ready on a
 warm event only when it was not dropped and was stamped after the last lost

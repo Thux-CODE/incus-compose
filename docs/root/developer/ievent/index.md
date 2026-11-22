@@ -103,7 +103,9 @@ invariant, and keeps the newest session it has seen:
 
 - an event of a session older than the newest seen is a leftover and changes
   nothing: no readiness, no freshness, not the session the enricher's run
-  reads for;
+  reads for, and no data - a delete late out of a queue takes nothing away,
+  and a read the enricher settles after a newer session came up does not
+  enter its archive;
 - the first event of a newer session, of whatever kind - a peer event or an
   ordinary one as much as a connected - opens that session not fresh: its
   connected, and the disconnected of the session before, may have been lost
@@ -111,6 +113,15 @@ invariant, and keeps the newest session it has seen:
 - within the newest session its disconnected closes it for good, and its
   connected, early or late, opens nothing already open: a connected arriving
   after its own session's round ended takes nothing back.
+
+The newest session seen at a plugin's door is never lost on the way to its
+fold. The enricher keeps what its full inbox cannot take by session, not by
+arrival: only the newest seen at the door, its controls and the first event
+of it. A leftover of an older session takes no place there. `dns` spills the
+first event of a newer session, of any kind, the way it spills controls. The
+debounce does not hand on ahead of its queue a control older than the newest
+it has seen. A control of a higher session is never pushed out or overtaken
+by one of a lower session.
 
 What it costs: nothing looks back. A disconnected of the newest session that
 arrives after a newer event of the same session still closes it, which is what

@@ -451,13 +451,18 @@ follows the invariant every consumer keeps (see
 the newer of the run's session and the last one a disconnected closed: the
 first event of a newer session, its connected or any other, starts the run for
 it, so the run follows the stream even where its connected did not get here;
-an older one - a connected kept in its slot while a newer one went through the
-inbox - starts nothing and moves no session back. A connection control is
-never dropped at a full inbox, nor handed on dropped ahead of what is queued:
-it waits in a slot of its own, the newest two kept, taken behind what the inbox
-held. The chain state is taken only from events of the newest session - a warm
-one of the session before, late out of a queue, says nothing of a stream that
-came back cold - and what the enricher mints carries the run's session.
+an older one - a connected late out of a queue while a newer one went through
+the inbox - starts nothing, moves no session back and changes nothing held:
+it goes on as it is, with no read. A connection control is never dropped at a
+full inbox, nor handed on dropped ahead of what is queued, and neither is the
+first event of a session newer than any seen at `Handle`: they are held by
+session (`heldSessions`), only those of the newest session seen at the door,
+the last two of it, and taken behind what the inbox held. The chain state is
+taken only from events of the newest session - a warm one of the session
+before, late out of a queue, says nothing of a stream that came back cold -
+and what the enricher mints carries the run's session. A read settled after a
+newer session came up goes on in its own session and does not enter the
+archive, since nothing after this plugin folds it.
 
 A listing that leaves out an instance held, or one owed a delete, decides on
 its own only when it was asked for after the read that found the instance
