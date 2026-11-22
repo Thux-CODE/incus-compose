@@ -835,14 +835,24 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	// it that lands and finds it gone announces it, however many fail first,
 	// and so does a listing that no longer has it. One that finds it there
 	// owes nothing any more.
+	//
+	// A read that failed, where a listing left the instance out while it was
+	// out, leaves the listing's verdict as the newest news there is: the
+	// instance goes (listedGone).
 	switch {
 	case !landed:
+		if owed, ok := p.owedDelete[c.key]; ok && !owed.gone.IsZero() && p.reads.calls[c.key] == nil {
+			p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, c.project, c.name, ""))
+		}
 	case p.state.instance(c.project, c.name) != nil:
 		delete(p.owedDelete, c.key)
 
 		p.readAt[subject{project: c.project, instance: c.name}] = c.sent
 	case had && p.reads.calls[c.key] != nil:
-		p.owedDelete[c.key] = owedDelete{subject: subject{project: c.project, instance: c.name}, since: c.sent}
+		owed := p.owedDelete[c.key]
+		owed.subject = subject{project: c.project, instance: c.name}
+		owed.since = c.sent
+		p.owedDelete[c.key] = owed
 	case had:
 		p.announceDelete(c.project, c.name)
 	}
@@ -916,19 +926,41 @@ func (p *Plugin) stamp(ev *iutil.Event) *iutil.Event {
 }
 
 // owedDelete is one delete a key owes: the instance, and when the read that
-// found it gone went out.
+// found it gone went out - zero where none did, and it is a listing that left
+// it out. gone is when the newest listing that left it out, while a read of
+// it was out, went out: zero while none has.
 type owedDelete struct {
 	subject
 
-	since time.Time
+	since, gone time.Time
 }
 
-// listingOwes reports whether a listing asked for at, which leaves the
-// instance out, announces the delete owed: only one asked for after the read
-// that found it gone, and with no read of it out - that one was asked for
-// later still, and decides.
-func (p *Plugin) listingOwes(key string, owed owedDelete, at time.Time) bool {
-	return at.After(owed.since) && p.reads.calls[key] == nil
+// listedGone takes a listing asked for at that leaves out an instance held,
+// or one owed a delete. One asked for before the read that found it gone says
+// nothing new. With no read of it out, the listing decides, and the instance
+// goes. With one out that went after the listing, that read knows more, and
+// decides. With one out that went before it, the read is not taken as the
+// answer the listing already is: the events it holds are ahead of where a
+// delete would go, and one finding the instance there would reach the chain
+// after its delete. The listing's verdict waits for it, owed: the read finding
+// the instance there settles it, the read failing makes it final (settleRead).
+func (p *Plugin) listedGone(ctx context.Context, key string, s subject, at time.Time) {
+	owed, isOwed := p.owedDelete[key]
+	if isOwed && !at.After(owed.since) {
+		return
+	}
+
+	c := p.reads.calls[key]
+
+	switch {
+	case c == nil:
+		p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+	case c.sent.After(at):
+	default:
+		owed.subject = s
+		owed.gone = at
+		p.owedDelete[key] = owed
+	}
 }
 
 // announceDelete puts in the line the delete of one instance nothing announced

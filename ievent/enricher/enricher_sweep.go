@@ -82,9 +82,8 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		}
 
 		for key, s := range p.owedDelete {
-			if !slices.Contains(msg.names, s.project) && p.listingOwes(key, s, msg.at) {
-				p.accept(ctx, iutil.NewEvent(time.Now(),
-					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+			if !slices.Contains(msg.names, s.project) {
+				p.listedGone(ctx, key, s.subject, msg.at)
 			}
 		}
 
@@ -137,22 +136,21 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// it announced is, and nothing downstream can tell them apart.
 		//
 		// Not one a read answered after the listing went out: it may have been
-		// made since, and the listing is no news about it.
+		// made since, and the listing is no news about it. Nor, yet, one with
+		// a read out (listedGone).
 		for _, s := range p.state.missingInstances(msg.project, msg.names) {
 			if p.readAt[s].After(msg.at) {
 				continue
 			}
 
-			p.accept(ctx, iutil.NewEvent(time.Now(),
-				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+			p.listedGone(ctx, resourceKey(kindInstance, s.project, s.instance), s, msg.at)
 		}
 
 		// And what is owed a delete nothing holds any more, by a listing that
 		// knows more than the read that found it gone.
 		for key, s := range p.owedDelete {
-			if s.project == msg.project && !slices.Contains(msg.names, s.instance) && p.listingOwes(key, s, msg.at) {
-				p.accept(ctx, iutil.NewEvent(time.Now(),
-					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
+			if s.project == msg.project && !slices.Contains(msg.names, s.instance) {
+				p.listedGone(ctx, key, s.subject, msg.at)
 			}
 		}
 
