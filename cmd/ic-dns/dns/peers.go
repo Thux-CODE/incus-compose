@@ -432,15 +432,18 @@ func (p *Plugin) peered(read peerRead) {
 	// grew and after the last event that can have moved the peering - an
 	// older one may have been taken before the change that event announced -
 	// or by nothing being on it any more.
-	owed := len(p.peerOwed) > 0
+	// Any network settled is one whose misses are final again, whatever is
+	// still owed by the others: the snapshot carries the debt network by
+	// network, and the timer left armed is only for the ones still owed.
+	settled := false
 
 	for key, o := range p.peerOwed {
 		if (read.gen >= max(o.gen, p.peerNeed) && p.peerCovered[key]) || p.state.nets[key] == nil {
 			delete(p.peerOwed, key)
+
+			settled = true
 		}
 	}
-
-	settled := owed && len(p.peerOwed) == 0
 
 	p.armOwed()
 
@@ -471,8 +474,8 @@ func (p *Plugin) peered(read peerRead) {
 		p.publish()
 
 	case settled && p.published:
-		// Nothing moved, but misses are final again, which only a snapshot
-		// says.
+		// Nothing moved, but misses on the networks settled are final again,
+		// which only a snapshot says.
 		p.publish()
 
 	case stored:

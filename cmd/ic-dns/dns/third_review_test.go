@@ -4,6 +4,8 @@ import (
 	"net/netip"
 	"slices"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	api "github.com/lxc/incus/v7/shared/api"
 	"github.com/miekg/dns"
@@ -75,4 +77,28 @@ func TestThirdLatestConfirmedPeerTableIsStored(t *testing.T) {
 	_, stored, err := decodeCold(<-c.p.cold.writes)
 	require.NoError(t, err)
 	require.Equal(t, hubPeers(), stored)
+}
+
+func TestThirdSettledPeerDebtReachesPublishedSnapshot(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		c := newColdServer(t, Suffix("incus"), PeerViews(true))
+		c.p.peerReader = hubIncus()
+		f := hubFleet()
+		empty := map[string][]string{}
+		c.p.fold(f["default/mgmt"].Event)
+		c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+		first := <-c.p.peerAsk
+		c.p.peered(peerRead{keys: first.keys, gen: first.gen, peers: empty})
+		c.p.fold(f["pvlab1/django-1"].Event)
+		c.p.write()
+		one := <-c.p.peerAsk
+		time.Sleep(30 * time.Second)
+		c.p.fold(f["pvlab2/django-1"].Event)
+		c.p.write()
+		c.p.peered(peerRead{keys: one.keys, gen: one.gen, peers: empty})
+		time.Sleep(16 * time.Second)
+		require.NotContains(t, c.p.peerOwed, app1)
+		code, _ := resolve(c.a, "django-1.pvlab1.incus.", dns.TypeA, "10.146.11.6")
+		require.Equal(t, "NXDOMAIN", dns.RcodeToString[code])
+	})
 }

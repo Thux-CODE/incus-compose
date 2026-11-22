@@ -407,6 +407,12 @@ form.
   with the peer API down answered `NXDOMAIN` through a real peer.
   (by @sandroden)
 
+- `ic-dns --peer-views` answers `NXDOMAIN` again for a network whose peering
+  debt a read has settled as soon as that read lands, while another network
+  is still owed one. The settled network stayed in the published snapshot,
+  and answered `SERVFAIL` until the other one's grace ran out, up to 45
+  seconds later. (by @sandroden)
+
 - The `ievent` enricher no longer deletes an instance made again under the same
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an
