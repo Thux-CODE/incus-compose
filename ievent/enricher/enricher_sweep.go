@@ -66,8 +66,10 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// have been made since: it stays, and so does what is held in it.
 		served := slices.Clone(msg.names)
 
+		// One the listing had and does not serve is not new: it went from what
+		// is served because the configuration says so.
 		for s, at := range p.readAt {
-			if at.After(msg.at) && !slices.Contains(served, s.project) {
+			if at.After(msg.at) && !slices.Contains(served, s.project) && !slices.Contains(msg.excluded, s.project) {
 				served = append(served, s.project)
 			}
 		}

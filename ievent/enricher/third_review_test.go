@@ -2,6 +2,7 @@ package enricher
 
 import (
 	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -71,6 +72,32 @@ func TestThirdOldListingWhileReplacementReadIsPending(t *testing.T) {
 	require.Contains(t, actions, api.EventLifecycleInstanceUpdated)
 	require.NotEqual(t, api.EventLifecycleInstanceDeleted, actions[len(actions)-1])
 	require.Empty(t, p.owedDelete, "the read that found the replacement settled it")
+}
+
+// TestThirdProjectFilterAfterRecentInstanceRead: the predicate leaves shop
+// out of the run, and an instance of shop is read between the listing and its
+// delivery. The project is not served, and the read does not put it back.
+func TestThirdProjectFilterAfterRecentInstanceRead(t *testing.T) {
+	p := bare(t)
+	fleet := testlib.NewProject("shop", 1, 0)
+	f := &fixture{fleet: fleet}
+	msgs := make(chan sweepMsg, 1)
+	served, _, err := sweepProjects(t.Context(), slog.Default(), sweepArgs{
+		conn: f, serves: func(*api.Project) bool { return false }, timeout: time.Second, sweepOut: msgs,
+	})
+	require.NoError(t, err)
+	require.Empty(t, served)
+	inst := fleet.Instances[0]
+	p.reads.flush(t.Context())
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
+	p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+		return &inst, nil, nil
+	}
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "shop", inst.Name, ""))
+	p.settleRead(t.Context(), awaitResult(t, p))
+	require.NotNil(t, p.state.instance("shop", inst.Name))
+	p.acceptSweep(t.Context(), <-msgs)
+	require.Nil(t, p.state.instance("shop", inst.Name), "the project was explicitly excluded by its configuration")
 }
 
 // TestThirdConnectedIsNeverDropped: a full inbox drops what it has no room

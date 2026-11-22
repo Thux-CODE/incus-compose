@@ -101,6 +101,11 @@ type sweepMsg struct {
 	// names is the whole of one scope, as the listing answered it.
 	names []string
 
+	// excluded is, for the projects, the ones the listing had and the
+	// predicate does not serve: gone from what is served on purpose, not for
+	// being made after the listing.
+	excluded []string
+
 	// network is one network read whole.
 	network *incusapi.Network
 
@@ -233,6 +238,8 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 	served = make([]string, 0, len(names))
 	projects = []string{iutil.DefaultProject}
 
+	var excluded []string
+
 	for _, projectName := range names {
 		readCtx, cancel := context.WithTimeout(ctx, a.timeout)
 		project, _, err := a.conn.GetProject(readCtx, projectName)
@@ -249,6 +256,8 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 		}
 
 		if a.serves != nil && !a.serves(project) {
+			excluded = append(excluded, projectName)
+
 			continue
 		}
 
@@ -264,7 +273,7 @@ func sweepProjects(ctx context.Context, logger *slog.Logger, a sweepArgs) (serve
 		}
 	}
 
-	err = sweepSend(ctx, a, sweepMsg{action: sweepActionProjects, names: served, at: listed})
+	err = sweepSend(ctx, a, sweepMsg{action: sweepActionProjects, names: served, excluded: excluded, at: listed})
 	if err != nil {
 		return nil, nil, err
 	}
