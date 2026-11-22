@@ -77,8 +77,8 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
 
-		for _, s := range p.owedDelete {
-			if !slices.Contains(msg.names, s.project) {
+		for key, s := range p.owedDelete {
+			if !slices.Contains(msg.names, s.project) && p.listingOwes(key, s, msg.at) {
 				p.accept(ctx, iutil.NewEvent(time.Now(),
 					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 			}
@@ -134,9 +134,10 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
 
-		// And what is owed a delete nothing holds any more.
-		for _, s := range p.owedDelete {
-			if s.project == msg.project && !slices.Contains(msg.names, s.instance) {
+		// And what is owed a delete nothing holds any more, by a listing that
+		// knows more than the read that found it gone.
+		for key, s := range p.owedDelete {
+			if s.project == msg.project && !slices.Contains(msg.names, s.instance) && p.listingOwes(key, s, msg.at) {
 				p.accept(ctx, iutil.NewEvent(time.Now(),
 					incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 			}

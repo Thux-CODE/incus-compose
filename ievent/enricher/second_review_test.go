@@ -108,7 +108,9 @@ func TestSecondOwedDeleteByTheListing(t *testing.T) {
 		deleted = deleted || (ev.Action() == api.EventLifecycleInstanceDeleted && ev.Name() == inst.Name)
 	}
 
-	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: "p", run: p.sweepRun})
+	// A listing asked for after those reads: one from before them knows less
+	// than the 404 (TestThirdOldListingWhileReplacementReadIsPending).
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: "p", run: p.sweepRun, at: time.Now()})
 
 	require.True(t, deleted, "a listing without the instance announced no delete")
 	require.Empty(t, p.owedDelete)

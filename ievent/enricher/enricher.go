@@ -162,7 +162,7 @@ type Plugin struct {
 	// the key's to announce - by the next read that lands and finds it gone,
 	// or the next listing that leaves it out - and not lost with a read that
 	// fails meanwhile.
-	owedDelete map[string]subject
+	owedDelete map[string]owedDelete
 
 	// endGrace is when a run held on unread ends anyway, and graceOver says it
 	// has come: an instance whose read fails for good holds a run up to this
@@ -320,7 +320,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 
 		q:          &queue{},
 		unread:     map[string]subject{},
-		owedDelete: map[string]subject{},
+		owedDelete: map[string]owedDelete{},
 		netMoved:   map[netRef]time.Time{},
 		readAt:     map[subject]time.Time{},
 		state:      loadState(logger, o.StoreFile, o.Project),
@@ -835,10 +835,26 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 
 		p.readAt[subject{project: c.project, instance: c.name}] = c.sent
 	case had && p.reads.calls[c.key] != nil:
-		p.owedDelete[c.key] = subject{project: c.project, instance: c.name}
+		p.owedDelete[c.key] = owedDelete{subject: subject{project: c.project, instance: c.name}, since: c.sent}
 	case had:
 		p.announceDelete(c.project, c.name)
 	}
+}
+
+// owedDelete is one delete a key owes: the instance, and when the read that
+// found it gone went out.
+type owedDelete struct {
+	subject
+
+	since time.Time
+}
+
+// listingOwes reports whether a listing asked for at, which leaves the
+// instance out, announces the delete owed: only one asked for after the read
+// that found it gone, and with no read of it out - that one was asked for
+// later still, and decides.
+func (p *Plugin) listingOwes(key string, owed owedDelete, at time.Time) bool {
+	return at.After(owed.since) && p.reads.calls[key] == nil
 }
 
 // announceDelete puts in the line the delete of one instance nothing announced
