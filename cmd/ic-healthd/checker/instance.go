@@ -86,7 +86,17 @@ type instanceConfig struct {
 
 	restart string
 
+	// stoppedOnPurpose is user.healthcheck.stopped as read: a stop that
+	// incus-compose stop or pause asked for, which no policy undoes.
+	stoppedOnPurpose bool
+
 	running bool
+}
+
+// restartOwed says a stop read on the instance calls for a restart: it has a
+// restart policy and was not stopped on purpose.
+func (ic *instanceConfig) restartOwed() bool {
+	return slices.Contains(shared.RestartPolicies, ic.restart) && !ic.stoppedOnPurpose
 }
 
 // command is what to run in an instance, and as what.
@@ -108,6 +118,7 @@ func (ic *instanceConfig) equals(other *instanceConfig) bool {
 		ic.uid == other.uid &&
 		ic.gid == other.gid &&
 		ic.restart == other.restart &&
+		ic.stoppedOnPurpose == other.stoppedOnPurpose &&
 		ic.running == other.running
 }
 
@@ -189,6 +200,11 @@ type instance struct {
 	run       uint64
 	actionRun uint64
 
+	// ran says the daemon has seen the instance running. One it has only
+	// ever seen stopped - found so at discovery, say - waits for its start
+	// event whatever its policy, as it did before the daemon came up.
+	ran bool
+
 	// unproven says this run, opened by a start, has no healthy of its own on
 	// the instance yet. Until one lands, every pass writes healthy even when
 	// status already says so: status may come from a read taken before the
@@ -240,6 +256,7 @@ func instanceStarted(inst *instance, now time.Time) {
 // re-armed. The action and its schedule are the caller's.
 func newRun(inst *instance, now time.Time) {
 	inst.config.running = true
+	inst.ran = true
 	inst.run++
 	inst.unproven = true
 	inst.failures = 0
@@ -298,7 +315,9 @@ func parseInstanceConfig(config map[string]string, running bool) (*instanceConfi
 		retries:       defaultRetries,
 		cwd:           config["oci.cwd"],
 		restart:       config[shared.HealthKeyPrefix+"restart"],
-		running:       running,
+
+		stoppedOnPurpose: util.IsTrue(config[shared.HealthStoppedKey]),
+		running:          running,
 	}
 
 	// Absent parses to 0, which is root, which is where an exec landed anyway.
@@ -388,6 +407,23 @@ func parseInstanceConfig(config map[string]string, running bool) (*instanceConfi
 	return &cfg, nil
 }
 
+// unparkForRestart schedules the restart a stop calls for, one backoff away,
+// widening it as a crash loop would. A check out probed the run that ended:
+// it is called off, so its result cannot schedule the same restart again.
+func unparkForRestart(inst *instance, now time.Time) {
+	if inst.state == instanceChecking && inst.actionCancel != nil {
+		inst.actionCancel()
+		inst.actionCancel = nil
+		inst.actionContext = nil
+		inst.actionDeadline = time.Time{}
+	}
+
+	inst.state = instanceIdle
+	inst.action = instanceActionRestart
+	inst.due = now.Add(inst.restartDelay)
+	inst.restartDelay = min(inst.restartDelay*2, maxRestartDelay)
+}
+
 // instKey is how an instance is held: by project and name, never by name
 // alone. A delete is never enriched, so the key cannot ask for a read.
 func instKey(ev *iutil.Event) string {
@@ -426,15 +462,26 @@ func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, e
 		if !instConfig.running {
 			inst.state = instanceParked
 			inst.action = ""
-		} else if instConfig.startPeriod > 0 {
-			inst.inRestart = true
-			inst.restartDone = now.Add(instConfig.startPeriod)
+		} else {
+			inst.ran = true
+
+			if instConfig.startPeriod > 0 {
+				inst.inRestart = true
+				inst.restartDone = now.Add(instConfig.startPeriod)
+			}
 		}
 
 		instances[k] = inst
 	} else if !instConfig.running && inst.action == instanceActionCheck {
-		inst.state = instanceParked
-		inst.action = ""
+		if inst.ran && instConfig.restartOwed() {
+			// A stop known from a read alone: its event lost, or folded
+			// while a restart was out and the restart's start reported
+			// since. Parking it would leave nothing to bring it back.
+			unparkForRestart(inst, time.Now())
+		} else {
+			inst.state = instanceParked
+			inst.action = ""
+		}
 	} else if instConfig.running && inst.state == instanceParked {
 		instanceStarted(inst, time.Now())
 	}

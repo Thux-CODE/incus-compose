@@ -37,6 +37,31 @@ type scheduler struct {
 	instances map[string]*instance
 	results   chan instanceResult
 	metrics   bool
+
+	// t is the test the invariants are checked against after every step.
+	t *testing.T
+}
+
+// requireRestartOwed is the invariant every step of every sequence here is
+// held to: an instance the daemon has seen running, now known stopped, with a
+// restart policy and not stopped on purpose, has its restart in flight, due
+// (idle, with a due the loop wakes for), or refused (parked, waiting on a
+// start). Never parked with no action, which nothing would ever undo.
+func (s *scheduler) requireRestartOwed() {
+	s.t.Helper()
+
+	for k, inst := range s.instances {
+		if inst.config == nil || !inst.ran || inst.config.running || !inst.config.restartOwed() {
+			continue
+		}
+
+		require.Equalf(s.t, instanceActionRestart, inst.action,
+			"%s is stopped with a restart owed and nothing to restart it: state=%v", k, inst.state)
+
+		if inst.state == instanceIdle {
+			require.Falsef(s.t, inst.due.IsZero(), "%s waits on a restart with no due", k)
+		}
+	}
 }
 
 func newScheduler(t *testing.T) *scheduler {
@@ -63,6 +88,7 @@ func newSchedulerWithPools(t *testing.T, workers, restartWorkers int) *scheduler
 		pools:     pools,
 		instances: map[string]*instance{},
 		results:   make(chan instanceResult, 32),
+		t:         t,
 	}
 }
 
@@ -81,6 +107,7 @@ func (s *scheduler) add(name string, cfg *instanceConfig) *instance {
 		action:       instanceActionCheck,
 		due:          time.Now(),
 		restartDelay: baseRestartDelay(cfg),
+		ran:          cfg.running,
 	}
 
 	s.instances[s.key(name)] = inst
@@ -101,11 +128,19 @@ func (s *scheduler) running(t *testing.T, inst *instance, state instanceState, d
 }
 
 func (s *scheduler) run() time.Time {
-	return runInstanceActions(s.ctx, s.logger, s.conn, s.pools, s.instances, s.results, s.metrics)
+	s.t.Helper()
+
+	earliest := runInstanceActions(s.ctx, s.logger, s.conn, s.pools, s.instances, s.results, s.metrics)
+	s.requireRestartOwed()
+
+	return earliest
 }
 
 func (s *scheduler) result(res instanceResult) {
+	s.t.Helper()
+
 	handleInstanceResult(s.ctx, s.logger, s.conn, s.instances, s.results, res, s.metrics)
+	s.requireRestartOwed()
 }
 
 func (s *scheduler) event(action string, name string) {
@@ -132,6 +167,7 @@ func (s *scheduler) eventRead(action string, name string, running bool, keys map
 	read := iutil.NewInstance(running, keys, []iutil.InstanceInterface{}, map[string]*iutil.Network{})
 	ev := iutil.NewEvent(time.Now(), action, s.project, name, "").WithInstance(read, false)
 	handleInstanceEvent(s.ctx, s.logger, s.conn, s.instances, s.results, ev)
+	s.requireRestartOwed()
 }
 
 // eventConfig is the healthcheck keys a parsed config came from, so an event
@@ -152,6 +188,10 @@ func eventConfig(cfg *instanceConfig) map[string]string {
 
 	if cfg.restart != "" {
 		m["restart"] = cfg.restart
+	}
+
+	if cfg.stoppedOnPurpose {
+		m["stopped"] = "true"
 	}
 
 	return m
@@ -2099,6 +2139,131 @@ func TestANoneProbeRunIsProvenByItsOwnCheck(t *testing.T) {
 
 	s.result(s.checked(t, inst, nil))
 	s.silent(t)
+}
+
+// ----------------------------------------------------------------------------
+// a stop known from a read alone
+// ----------------------------------------------------------------------------
+
+// stoppedRead is an update read saying the instance is stopped, with the keys
+// of its config and, if marked, the stopped-on-purpose marker.
+func (s *scheduler) stoppedRead(inst *instance, marked bool) {
+	keys := eventConfig(inst.config)
+	if marked {
+		keys["stopped"] = "true"
+	}
+
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, inst.name, false, healthKeys(keys))
+}
+
+// TestAStopReadWithoutItsEventIsRestarted is the linear case: the stop event
+// never came, an update read says stopped. The restart is due one backoff on,
+// the loop wakes for it, and once it lands the run goes starting then healthy.
+func TestAStopReadWithoutItsEventIsRestarted(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	now := time.Now()
+	s.stoppedRead(inst, false)
+	s.stoppedRead(inst, false)
+
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionRestart, inst.action)
+	requireDue(t, inst, now, 30*time.Second)
+	require.Equal(t, 60*time.Second, inst.restartDelay, "widened once for two reads of one stop")
+	require.Equal(t, inst.due, s.run(), "the loop wakes for it")
+
+	stopped := s.next(t)
+	require.Equal(t, shared.HealthStatusStopped, stopped.status)
+	s.result(landed(stopped))
+
+	// The stop event, late and reading the stopped that landed, leaves the
+	// restart already due alone.
+	late := eventConfig(inst.config)
+	late["status"] = shared.HealthStatusStopped
+	s.eventRead(incusApi.EventLifecycleInstanceStopped, "web-1", false, healthKeys(late))
+	require.Equal(t, 60*time.Second, inst.restartDelay)
+	s.silent(t)
+
+	s.result(s.restarted(t, inst, nil))
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestAStopReadThatOwesNoRestartParks pins the other side: stopped on purpose,
+// or without a restart policy, the read parks the instance until it starts.
+func TestAStopReadThatOwesNoRestartParks(t *testing.T) {
+	t.Parallel()
+
+	for name, marked := range map[string]bool{"on purpose": true, "no policy": false} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			s := newScheduler(t)
+
+			cfg := testConfig()
+			if !marked {
+				cfg.restart = ""
+			}
+
+			inst := s.add("web-1", cfg)
+			s.stoppedRead(inst, marked)
+
+			require.Equal(t, instanceParked, inst.state)
+			require.Empty(t, inst.action)
+
+			s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+			require.Equal(t, instanceIdle, inst.state)
+			require.Equal(t, instanceActionCheck, inst.action)
+		})
+	}
+}
+
+// TestAStoppedInstanceFoundAtDiscoveryWaitsForItsStart: one the daemon never
+// saw run is not restarted on the strength of a read, as before.
+func TestAStoppedInstanceFoundAtDiscoveryWaitsForItsStart(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, "web-1", false, healthKeys(eventConfig(testConfig())))
+	inst := s.instances[s.key("web-1")]
+	require.Equal(t, instanceParked, inst.state)
+
+	s.stoppedRead(inst, false)
+	require.Equal(t, instanceParked, inst.state)
+	require.Empty(t, inst.action)
+}
+
+// TestAStopReadDuringACheckCallsItOff: the check out probed the run that ended;
+// its not-running result must not schedule the restart a second time.
+func TestAStopReadDuringACheckCallsItOff(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	late := s.checked(t, inst, ErrNotRunning)
+	probe := inst.actionContext
+
+	now := time.Now()
+	s.stoppedRead(inst, false)
+
+	require.Error(t, probe.Err())
+	require.Nil(t, inst.actionContext)
+	require.Equal(t, instanceActionRestart, inst.action)
+
+	s.result(late)
+	require.Equal(t, 60*time.Second, inst.restartDelay, "widened once")
+	requireDue(t, inst, now, 30*time.Second)
 }
 
 // TestAReplacementGetsOnlyItsOwnWriteResults is the linear case of a delete and

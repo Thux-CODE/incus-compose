@@ -500,6 +500,13 @@ form.
   the check off, so the restart backoff widens once. Already present in v1.4.0.
   (by @sandroden)
 
+- `ic-healthd` restarts an instance with a restart policy that a read finds
+  stopped, as a stop event would. Such a read used to park it, waiting on a
+  start event that never came: an instance that fell over again right after a
+  restart, with its next check deferred, stayed stopped for good. Instances
+  stopped on purpose, without a policy, or found stopped at discovery still wait
+  for their start. Already present in v1.4.0. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

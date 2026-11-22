@@ -289,6 +289,18 @@ it for a new stop would also free the slot and fire a second restart beside the
 first. A stopped event during a check calls the check off before scheduling the
 restart, so its result cannot schedule it again.
 
+**Parked** means waiting on a start event and nothing else, so it is only for an
+instance no policy brings back: stopped on purpose (`user.healthcheck.stopped`
+in the read), without a restart policy, or never seen running by this daemon -
+found stopped at discovery, which waits for its start as it did before the
+daemon came up. Any read that finds an instance the daemon saw running stopped,
+with a restart policy and no marker, schedules the restart one backoff on, like
+a stop event: the event may be lost, or folded while a restart was out whose
+start has reported since, and a park there would leave nothing to bring it
+back. The scheduler tests hold every step of every sequence to that invariant
+(`requireRestartOwed`): such an instance always has its restart in flight, due,
+or refused.
+
 ### Telling results apart
 
 Each in-flight action gets a fresh context, and the result carries it back. The
