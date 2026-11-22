@@ -9,6 +9,7 @@ import (
 	"iter"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -762,6 +763,39 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 		}
 
 		delete(p.unread, c.key)
+		p.endIfRead(ctx)
+
+		return
+	}
+
+	// A read whose answer would go on only in a session older than the newest
+	// there is news of: no fan-out of its own, which goes on stamped as of
+	// now, and every event it holds a leftover by now. The plugins after this
+	// one fold nothing of it, so nothing here takes it in either - not the
+	// state, which a listing is compared against, nor what the end of the
+	// round waits on (isCurrent). Its events go on with what it found, held
+	// nowhere: the round of the newer session reads the instance for itself,
+	// and finds it neither held nor archived. A listing's verdict that waited
+	// on it stands.
+	if c.ev == nil && len(c.items) > 0 && !slices.ContainsFunc(c.items, func(it *item) bool { return p.isCurrent(it.ev) }) {
+		var found *iutil.Instance
+		if res.err == nil && res.instance != nil {
+			found, _ = p.state.buildInstance(res.instance, res.state)
+		}
+
+		for _, it := range c.items {
+			ev := it.ev
+			if found != nil {
+				ev = p.withProject(ev.WithInstance(found, true))
+			}
+
+			p.q.settle(it, ev)
+		}
+
+		if verdict, ok := p.owedDelete[c.key]; ok && !verdict.gone.IsZero() && p.reads.calls[c.key] == nil {
+			p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, c.project, c.name, ""))
+		}
+
 		p.endIfRead(ctx)
 
 		return

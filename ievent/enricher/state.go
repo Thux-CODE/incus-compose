@@ -422,8 +422,23 @@ func (s *state) setInstance(
 	inst *incusapi.Instance,
 	instanceState *incusapi.InstanceState,
 ) (*iutil.Instance, string) {
-	s.dirty = true
+	i, missing := s.buildInstance(inst, instanceState)
+	if i == nil {
+		return nil, missing
+	}
 
+	s.dirty = true
+	s.project(inst.Project).instances[inst.Name] = i
+
+	return i, ""
+}
+
+// buildInstance is what setInstance would hold for one read, held nowhere:
+// nil and the network that was missing where it could not be placed.
+func (s *state) buildInstance(
+	inst *incusapi.Instance,
+	instanceState *incusapi.InstanceState,
+) (*iutil.Instance, string) {
 	interfaces, networks, missing, whole := s.interfaces(inst, instanceState)
 	if !whole {
 		return nil, missing
@@ -447,11 +462,7 @@ func (s *state) setInstance(
 	// stopped instance from a running one has to see it as running.
 	running := inst.StatusCode == incusapi.Running || inst.StatusCode == incusapi.Ready
 
-	i := iutil.NewInstance(running, held, interfaces, networks)
-
-	s.project(inst.Project).instances[inst.Name] = i
-
-	return i, ""
+	return iutil.NewInstance(running, held, interfaces, networks), ""
 }
 
 // interfaces is where one instance sits: one entry per NIC whose network is
