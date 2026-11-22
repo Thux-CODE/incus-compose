@@ -775,9 +775,19 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	// state, which a listing is compared against, nor what the end of the
 	// round waits on (isCurrent). Its events go on with what it found, held
 	// nowhere: the round of the newer session reads the instance for itself,
-	// and finds it neither held nor archived. A listing's verdict that waited
-	// on it stands.
-	if c.ev == nil && len(c.items) > 0 && !slices.ContainsFunc(c.items, func(it *item) bool { return p.isCurrent(it.ev) }) {
+	// and finds it neither held nor archived.
+	//
+	// But what it found is still news, whatever session asked: a leftover
+	// must lose neither a delete nor a live instance. A 404 is not taken here
+	// at all - the instance is gone in any session, and the path below takes
+	// it out of the state and announces the delete, stamped with the newest
+	// session (announceDelete). And a listing's verdict that waited on it is
+	// settled as by any read: one that went out after the listing and found
+	// the instance takes it back, since the instance outlived the listing;
+	// any other answer leaves the verdict final once no read is out.
+	gone := incusapi.StatusErrorCheck(res.err, http.StatusNotFound)
+
+	if !gone && c.ev == nil && len(c.items) > 0 && !slices.ContainsFunc(c.items, func(it *item) bool { return p.isCurrent(it.ev) }) {
 		var found *iutil.Instance
 		if res.err == nil && res.instance != nil {
 			found, _ = p.state.buildInstance(res.instance, res.state)
@@ -792,8 +802,18 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 			p.q.settle(it, ev)
 		}
 
-		if verdict, ok := p.owedDelete[c.key]; ok && !verdict.gone.IsZero() && p.reads.calls[c.key] == nil {
-			p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, c.project, c.name, ""))
+		if verdict, ok := p.owedDelete[c.key]; ok && !verdict.gone.IsZero() {
+			switch {
+			case res.err == nil && res.instance != nil && c.sent.After(verdict.gone):
+				verdict.gone = time.Time{}
+				if verdict.since.IsZero() {
+					delete(p.owedDelete, c.key)
+				} else {
+					p.owedDelete[c.key] = verdict
+				}
+			case p.reads.calls[c.key] == nil:
+				p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, c.project, c.name, ""))
+			}
 		}
 
 		p.endIfRead(ctx)

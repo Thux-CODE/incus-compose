@@ -92,6 +92,67 @@ func TestARoundWaitsForAReadNewerThanItsListing(t *testing.T) {
 	require.Nil(t, p.state.instance("p", inst.Name))
 }
 
+// TestALeftoverReadNewerThanTheListingTakesTheVerdictBack: a listing leaves
+// out a held instance while a read of it is out, so its verdict waits. That
+// read went before the listing and decides nothing; the one asked for after
+// it finds the instance alive, but lands as a leftover, the door having seen
+// session 3 meanwhile. It is still news that the instance outlived the
+// listing: the verdict is taken back, and no delete goes on.
+func TestALeftoverReadNewerThanTheListingTakesTheVerdictBack(t *testing.T) {
+	p := bare(t)
+
+	var deleted bool
+
+	p.args.Next = func(ev *iutil.Event) {
+		if ev.Action() == api.EventLifecycleInstanceDeleted {
+			deleted = true
+		}
+	}
+
+	inst := testlib.NewInstance("p", 0, 0)
+	state := testlib.NewInstanceState(0, 0)
+	p.state.setNetwork(testlib.NewNetwork("p", 0))
+	p.state.setInstance(&inst, state)
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstanceWithInterfaces}}
+	p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+		return &inst, state, nil
+	}
+	p.reads.flush(t.Context())
+
+	update := func() *iutil.Event {
+		return iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", inst.Name, "").WithChainState(iutil.ChainCold).WithSession(2)
+	}
+
+	p.held.seen(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", "").WithSession(2))
+	p.sweepSession = 2
+
+	p.accept(t.Context(), update())
+	older := awaitResult(t, p)
+
+	listing := sweepMsg{action: sweepActionInstances, project: "p", at: time.Now()}
+	p.acceptSweep(t.Context(), listing)
+	require.True(t, p.verdictsOwed(), "the verdict waits for the read out")
+
+	// A read asked for after the listing, behind the one out.
+	p.accept(t.Context(), update())
+	p.settleRead(t.Context(), older)
+	require.True(t, p.verdictsOwed(), "the older read decides nothing")
+
+	newer := awaitResult(t, p)
+	require.True(t, newer.call.sent.After(listing.at))
+
+	// Session 3 seen at the door before the newer read lands.
+	p.held.seen(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", "").WithSession(3))
+	p.settleRead(t.Context(), newer)
+
+	for ev := range p.q.release() {
+		p.args.Next(ev)
+	}
+
+	require.False(t, deleted, "a live instance found after the listing was deleted")
+	require.False(t, p.verdictsOwed())
+}
+
 // TestANewerListingSettlesAnOlderVerdict: a listing that has the instance,
 // newer than the one that left it out, takes the verdict back, so it holds no
 // round up.
