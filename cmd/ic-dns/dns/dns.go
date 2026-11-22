@@ -716,11 +716,11 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// A rename is a new name and an old one gone. The event carries both, and
 	// the enricher already read the instance under its new name.
 	if ev.OldName() != "" {
-		p.state.pending[heldKey(ev.ProjectName(), ev.OldName())] = nil
+		p.state.arrive(heldKey(ev.ProjectName(), ev.OldName()), nil)
 	}
 
 	if ev.Action() == incusapi.EventLifecycleInstanceDeleted {
-		p.state.pending[key] = nil
+		p.state.arrive(key, nil)
 
 		return
 	}
@@ -734,7 +734,7 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		return
 	}
 
-	p.state.pending[key] = inst
+	p.state.arrive(key, inst)
 }
 
 // sessionOf applies the stream session ev was minted in, and reports whether

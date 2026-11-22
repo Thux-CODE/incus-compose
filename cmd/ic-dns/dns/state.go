@@ -212,6 +212,12 @@ func (s *state) write(ttl uint32) bool {
 	return moved
 }
 
+// arrive files what an event says of one instance for the next write, nil
+// for one gone. Only the last word reaches the trees.
+func (s *state) arrive(key string, inst *instance) {
+	s.pending[key] = inst
+}
+
 // snapshot freezes the working copy. The radix trees commit by copy; the
 // critbits mutate in place, so they are walked into fresh ones.
 func (s *state) snapshot() *ecs_view.Snapshot {
