@@ -401,6 +401,12 @@ form.
   kept its serial, so an IXFR from it was the SOA alone and a secondary kept
   the old records. Already present in v1.4.0. (by @sandroden)
 
+- `ic-dns --peer-views` stores in the cold store the last peering that counted
+  as known even where a read too old to count had already put the same table
+  in memory: the read confirming it left the one before on disk, and a restart
+  with the peer API down answered `NXDOMAIN` through a real peer.
+  (by @sandroden)
+
 - The `ievent` enricher no longer deletes an instance made again under the same
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an

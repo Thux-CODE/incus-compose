@@ -57,3 +57,22 @@ func TestThirdParentTransferAfterChildZoneGoes(t *testing.T) {
 	require.True(t, slices.ContainsFunc(after, alias), "%v", after)
 	require.Greater(t, len(transfer(before[0].(*dns.SOA).Serial)), 1)
 }
+
+func TestThirdLatestConfirmedPeerTableIsStored(t *testing.T) {
+	c := newColdServer(t, Suffix("incus"), PeerViews(true), ColdMemory(nil))
+	for _, ev := range hubFleetEvents(false) {
+		c.p.fold(ev)
+	}
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	first := <-c.p.peerAsk
+	c.p.peered(peerRead{keys: first.keys, gen: first.gen, peers: map[string][]string{}})
+	c.p.askPeers(false)
+	old := <-c.p.peerAsk
+	c.p.fold(event(api.EventLifecycleNetworkPeerCreated, "default", "hub"))
+	fresh := <-c.p.peerAsk
+	c.p.peered(peerRead{keys: old.keys, gen: old.gen, peers: hubPeers()})
+	c.p.peered(peerRead{keys: fresh.keys, gen: fresh.gen, peers: hubPeers()})
+	_, stored, err := decodeCold(<-c.p.cold.writes)
+	require.NoError(t, err)
+	require.Equal(t, hubPeers(), stored)
+}

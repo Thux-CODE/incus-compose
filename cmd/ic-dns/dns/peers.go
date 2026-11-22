@@ -452,9 +452,12 @@ func (p *Plugin) peered(read peerRead) {
 	// What the next start restores as known is a table this run would turn
 	// warm on, not merely the last one read: one too old for the last peer
 	// event, or not covering every network a name is on, is no knowledge.
+	// Compared with what is stored rather than with what was held: a read
+	// too old to count may have put the table in memory already, and the one
+	// confirming it changes nothing there while it is still to be stored.
 	stored := false
 
-	if p.readKnown() && (p.knownPeers == nil || changed) {
+	if p.readKnown() && (p.knownPeers == nil || len(changedPeers(p.knownPeers, p.state.peers)) > 0) {
 		p.knownPeers = p.state.peers
 		stored = true
 	}
