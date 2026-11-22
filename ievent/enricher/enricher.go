@@ -838,6 +838,19 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	}
 }
 
+// stamp is an event this plugin minted, marked the way the source marks what
+// it mints: the chain as last seen, and the session the run reads for, so a
+// plugin after this one judges it by the session rather than its time.
+func (p *Plugin) stamp(ev *iutil.Event) *iutil.Event {
+	ev = ev.WithChainState(p.chain)
+
+	if ev.Session() == 0 {
+		ev = ev.WithSession(p.sweepSession)
+	}
+
+	return ev
+}
+
 // owedDelete is one delete a key owes: the instance, and when the read that
 // found it gone went out.
 type owedDelete struct {
@@ -859,18 +872,22 @@ func (p *Plugin) listingOwes(key string, owed owedDelete, at time.Time) bool {
 func (p *Plugin) announceDelete(project, name string) {
 	delete(p.owedDelete, resourceKey(kindInstance, project, name))
 
-	p.q.push(iutil.NewEvent(time.Now(),
-		incusapi.EventLifecycleInstanceDeleted, project, name, "").
-		WithChainState(p.chain), true)
+	p.q.push(p.stamp(iutil.NewEvent(time.Now(),
+		incusapi.EventLifecycleInstanceDeleted, project, name, "")), true)
 }
 
 // accept puts one event in the line, issuing whatever read it needs first.
 func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
-	if ev.ChainState() == "" {
+	switch {
+	case ev.ChainState() == "":
 		// The run's own events arrive here unstamped: nothing minted them past
-		// the source, so this plugin carries over what it last saw.
-		ev = ev.WithChainState(p.chain)
-	} else {
+		// the source, so this plugin carries over what it last saw, and the
+		// session it is reading for.
+		ev = p.stamp(ev)
+	case ev.Session() >= p.sweepSession:
+		// What the chain is, as said in the session read for now. A warm
+		// event of the session before, late out of a queue, says nothing of
+		// a stream that came back cold since.
 		p.chain = ev.ChainState()
 	}
 
@@ -1031,9 +1048,8 @@ func (p *Plugin) fanOut(ctx context.Context, subjects iter.Seq[subject]) {
 			kind:    kindInstance,
 			project: s.project,
 			name:    s.instance,
-			ev: iutil.NewEvent(time.Now(),
-				incusapi.EventLifecycleInstanceUpdated, s.project, s.instance, "").
-				WithChainState(p.chain),
+			ev: p.stamp(iutil.NewEvent(time.Now(),
+				incusapi.EventLifecycleInstanceUpdated, s.project, s.instance, "")),
 			wantInterfaces: wantInterfaces,
 		})
 	}

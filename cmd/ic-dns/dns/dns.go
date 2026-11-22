@@ -440,7 +440,12 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 		}
 	}
 
-	if !ev.Restored() && (len(p.spill) == 0 || p.spillLive >= p.cfg.InboxSize) {
+	// A connection control spills too: dropped, it would go on past the fold
+	// and the plugins after this one out of order with what is queued, and
+	// the view would miss the stream going or coming back.
+	kept := ev.Restored() || ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected
+
+	if !kept && (len(p.spill) == 0 || p.spillLive >= p.cfg.InboxSize) {
 		p.spillMu.Unlock()
 
 		p.next(ev.WithDropped(name))
@@ -449,7 +454,7 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 		return
 	}
 
-	if !ev.Restored() {
+	if !kept {
 		p.spillLive++
 	}
 
@@ -684,8 +689,11 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// said is as old as the stream's loss, so the round that counts is the one
 	// the enricher starts now. A first connection follows no loss, and takes
 	// nothing back.
+	//
+	// Nor does the connected of a session already seen closed: it waited in
+	// a queue the disconnected that closed it went past.
 	if ev.Action() == iutil.ActionConnected {
-		if session < p.state.upSession {
+		if session < p.state.upSession || (session != 0 && p.state.down && session <= p.state.downSession) {
 			return
 		}
 
@@ -694,9 +702,10 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		return
 	}
 
-	// Any event of a session newer than the one that went says the stream is
-	// back, the connected that said so having been dropped on the way.
-	if p.state.down && session > p.state.downSession {
+	// Any event of a session newer than the last one up says the stream is
+	// back - the connected that said so dropped on the way, and maybe the
+	// disconnected before it too.
+	if session != 0 && session > max(p.state.upSession, p.state.downSession) {
 		p.reconnected(ev)
 	}
 
@@ -704,8 +713,10 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// overtook the reads still in flight before it, and rounding on it would
 	// turn the view warm over names nobody has read yet. Nor one while the
 	// stream is down: the fleet is read again from the top once it is back.
+	// Nor one of a session other than the one up: it is the end of a round
+	// read before the stream last came back, which waited in a queue.
 	if ev.Action() == iutil.ActionSweepEnd && ev.Err() == nil {
-		if !p.state.down {
+		if !p.state.down && (session == 0 || session == p.state.upSession) {
 			p.rounded()
 		}
 
@@ -768,8 +779,11 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 // reconnected takes a stream back up in ev's session: nothing confirms what
 // is served until that session's round has ended.
+//
+// A session newer than the last one up takes back what was confirmed even
+// with no disconnected seen: there was one, and it did not get here.
 func (p *Plugin) reconnected(ev *iutil.Event) {
-	if p.state.down {
+	if p.state.down || (ev.Session() != 0 && ev.Session() > p.state.upSession && p.state.upSession != 0) {
 		p.view.SetHealthy(false)
 		p.state.fresh = false
 		p.state.lost = ev.At()

@@ -205,6 +205,25 @@ func TestThirdColdProjectListingGraceReleasesEnd(t *testing.T) {
 	require.True(t, p.reads.warm, "reads no longer wait on a pass that is not coming")
 }
 
+// TestThirdSyntheticEventAfterPriorSessionDelivery: a warm event of session 1
+// arrives late, after the run was started cold for session 2. The update the
+// enricher mints next is stamped as session 2 stands - cold - and as session 2.
+func TestThirdSyntheticEventAfterPriorSessionDelivery(t *testing.T) {
+	p := bare(t)
+	p.sweepSession = 2
+	p.chain = iutil.ChainCold
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), "earlier", "", "", "").WithSession(1).WithChainState(iutil.ChainWarm))
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", "web", ""))
+	for ev := range p.q.release() {
+		if ev.Name() == "web" {
+			require.Equal(t, iutil.ChainCold, ev.ChainState(), "the run in session two is still cold")
+			require.Equal(t, uint64(2), ev.Session(), "minted here for the session read for")
+			return
+		}
+	}
+	t.Fatal("the un-enriched update was never forwarded")
+}
+
 // TestThirdConnectedIsNeverDropped: a full inbox drops what it has no room
 // for, but for a connected, which waits in its slot - the newest of them -
 // instead of going on dropped.

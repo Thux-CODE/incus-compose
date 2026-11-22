@@ -533,8 +533,12 @@ func TestSecondLostConnectionControls(t *testing.T) {
 		require.Equal(t, 200, status())
 		c.p.Handle(in(1, event(iutil.ActionDisconnected, "", "")))
 		c.p.Handle(in(2, event(iutil.ActionConnected, "", "")))
-		require.Equal(t, 503, status(), "the reconnection's round has not ended")
+		// The connected spills behind the disconnected rather than going on
+		// ahead of it; neither has reached /ready yet.
 		c.p.fold(<-c.p.inbox)
+		require.Equal(t, 503, status(), "the stream went")
+		c.p.foldSpilled()
+		require.Equal(t, 503, status(), "the reconnection's round has not ended")
 		for range 3 {
 			c.p.fold(in(2, warm(event(iutil.ActionSweepEnd, "", ""))))
 		}

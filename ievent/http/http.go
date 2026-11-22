@@ -159,7 +159,9 @@ func (p *Plugin) decide(ev *iutil.Event) {
 		// which is why the enricher reads the fleet again: nothing before it
 		// confirms what is served, a round that ended while it was down
 		// included.
-		if session >= p.upSession {
+		// Not the connected of a session already seen closed: it waited in a
+		// queue the disconnected that closed it went past.
+		if session >= p.upSession && (session == 0 || !p.down || session > p.downSession) {
 			p.up(ev)
 		}
 
@@ -182,9 +184,10 @@ func (p *Plugin) decide(ev *iutil.Event) {
 		return
 	}
 
-	// An event of a session newer than the one that went: the stream is back,
-	// whatever happened to the connected that said so.
-	if p.down && session > p.downSession {
+	// An event of a session newer than the last one up: the stream is back,
+	// whatever happened to the connected that said so, and to the
+	// disconnected before it.
+	if session != 0 && session > max(p.upSession, p.downSession) {
 		p.up(ev)
 	}
 
