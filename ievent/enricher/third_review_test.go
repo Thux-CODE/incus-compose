@@ -2,7 +2,11 @@ package enricher
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -98,6 +102,77 @@ func TestThirdProjectFilterAfterRecentInstanceRead(t *testing.T) {
 	require.NotNil(t, p.state.instance("shop", inst.Name))
 	p.acceptSweep(t.Context(), <-msgs)
 	require.Nil(t, p.state.instance("shop", inst.Name), "the project was explicitly excluded by its configuration")
+}
+
+// TestThirdStoredProjectWithNoInstanceListing: the cold store was written
+// after shop's configuration was read and before its instances were ever
+// listed. That is no inventory: a listing of them that keeps failing does not
+// end the run.
+func TestThirdStoredProjectWithNoInstanceListing(t *testing.T) {
+	s := newState()
+	s.setProject("shop", map[string]string{})
+	data, err := json.Marshal(s)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	require.NoError(t, os.WriteFile(path, data, 0600))
+	p := New(slog.Default(), StoreFile(path))
+	commands := make(chan iutil.Command, 1)
+	p.args.CommandOut = commands
+	p.brokenSince = time.Now().Add(-2 * p.opts.roundGrace)
+	p.endBroken(t.Context(), &listingError{what: listedInstances, project: "shop", err: errors.New("unavailable")})
+	require.Empty(t, commands, "no instance inventory was ever obtained")
+}
+
+// TestThirdStoredEmptyListingIsAnInventory: the other way round, shop listed
+// with no instance in it and stored. That is an inventory, and the run ends
+// on it after the grace.
+func TestThirdStoredEmptyListingIsAnInventory(t *testing.T) {
+	s := newState()
+	s.setProject("shop", map[string]string{})
+	s.project("shop").listed = true
+	data, err := json.Marshal(s)
+	require.NoError(t, err)
+	path := filepath.Join(t.TempDir(), "fleet.json")
+	require.NoError(t, os.WriteFile(path, data, 0600))
+	p := New(slog.Default(), StoreFile(path))
+	commands := make(chan iutil.Command, 1)
+	p.args.CommandOut = commands
+	p.brokenSince = time.Now().Add(-2 * p.opts.roundGrace)
+	p.endBroken(t.Context(), &listingError{what: listedInstances, project: "shop", err: errors.New("unavailable")})
+	require.Len(t, commands, 1, "an empty listing stored is an inventory")
+}
+
+// TestThirdRecreatedProjectHasNoPreviousListing: shop was listed, then a
+// projects listing pruned it, then a project shop was made again. The old
+// listing says nothing about the new one.
+func TestThirdRecreatedProjectHasNoPreviousListing(t *testing.T) {
+	p := bare(t)
+	p.state.setProject("shop", nil)
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionInstances, project: "shop", at: time.Now()})
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionProjects, at: time.Now()})
+	require.Empty(t, p.state.projects)
+	p.state.setProject("shop", nil)
+	commands := make(chan iutil.Command, 1)
+	p.args.CommandOut = commands
+	p.brokenSince = time.Now().Add(-2 * p.opts.roundGrace)
+	p.endBroken(t.Context(), &listingError{what: listedInstances, project: "shop", err: errors.New("unavailable")})
+	require.Empty(t, commands, "the deleted project's inventory says nothing about its replacement")
+}
+
+// TestThirdKnownEmptyProjectInventory: a run lists no served project at all
+// and ends. Then the projects listing keeps failing: the last one that
+// answered was empty, which is an inventory, and the run ends on it.
+func TestThirdKnownEmptyProjectInventory(t *testing.T) {
+	p := bare(t)
+	commands := make(chan iutil.Command, 1)
+	p.args.CommandOut = commands
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionProjects, at: time.Now()})
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone})
+	require.Len(t, commands, 1)
+	<-commands
+	p.brokenSince = time.Now().Add(-2 * p.opts.roundGrace)
+	p.endBroken(t.Context(), &listingError{what: listedProjects, err: errors.New("unavailable")})
+	require.Len(t, commands, 1, "the last successful listing was empty")
 }
 
 // TestThirdConnectedIsNeverDropped: a full inbox drops what it has no room

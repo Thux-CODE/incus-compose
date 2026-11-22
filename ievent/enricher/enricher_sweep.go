@@ -58,6 +58,8 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 
 	switch msg.action {
 	case sweepActionProjects:
+		p.projectsListed = true
+
 		// Announced before the prune, the way a listing of instances is: a
 		// project that went, or one no longer served, would otherwise leave its
 		// names answering - restored ones most of all, which nothing else reads.
@@ -119,7 +121,7 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		p.state.pruneNetworks(msg.project, listed)
 
 	case sweepActionInstances:
-		p.listed[msg.project] = true
+		p.state.project(msg.project).listed = true
 
 		// Through accept, which is where a delete drops the instance and its
 		// archive entry: a name Incus no longer lists is gone the same way one
@@ -229,8 +231,8 @@ func (p *Plugin) endBroken(ctx context.Context, err error) {
 
 	for _, f := range failures {
 		known := f.what == listedNetworks ||
-			(f.what == listedInstances && p.listed[f.project]) ||
-			(f.what == listedProjects && len(p.listed) > 0)
+			(f.what == listedInstances && p.state.listed(f.project)) ||
+			(f.what == listedProjects && p.projectsListed)
 		if !known {
 			return
 		}

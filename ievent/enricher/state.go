@@ -49,6 +49,12 @@ type project struct {
 	config    map[string]string
 	instances map[string]*iutil.Instance
 	networks  map[string]*iutil.Network
+
+	// listed is a listing of its instances having succeeded, in this process
+	// or the one that wrote the cold store: what a listing that keeps failing
+	// has to answer from. A project made again under the same name starts
+	// without it, since the old one went with what it held.
+	listed bool
 }
 
 // newProject is a project something has been said about. The config stays nil
@@ -93,6 +99,7 @@ func (s *state) clone() *state {
 			config:    maps.Clone(p.config),
 			instances: maps.Clone(p.instances),
 			networks:  maps.Clone(p.networks),
+			listed:    p.listed,
 		}
 	}
 
@@ -121,6 +128,12 @@ type projectJSON struct {
 	Config    map[string]string          `json:"config"`
 	Instances map[string]*iutil.Instance `json:"instances,omitempty"`
 	Networks  map[string]*iutil.Network  `json:"networks,omitempty"`
+
+	// Listed is the project's instances having been listed: an empty project
+	// listed is an inventory, one whose configuration alone was read is not.
+	// Absent in a file from before it, where a project holding instances is
+	// taken as listed.
+	Listed bool `json:"listed,omitempty"`
 }
 
 func (s state) MarshalJSON() ([]byte, error) {
@@ -131,6 +144,7 @@ func (s state) MarshalJSON() ([]byte, error) {
 			Config:    p.config,
 			Instances: p.instances,
 			Networks:  p.networks,
+			Listed:    p.listed,
 		}
 	}
 
@@ -173,6 +187,8 @@ func decodeState(b []byte) (*state, error) {
 				held.networks[networkName] = n
 			}
 		}
+
+		held.listed = p.Listed || len(held.instances) > 0
 
 		out.projects[projectName] = held
 	}
@@ -236,6 +252,7 @@ func loadState(logger *slog.Logger, path string, serves func(*incusapi.Project) 
 
 			p.config = nil
 			p.instances = map[string]*iutil.Instance{}
+			p.listed = false
 		}
 	}
 
@@ -333,6 +350,14 @@ func (s *state) setProject(name string, config map[string]string) {
 	s.dirty = true
 
 	s.project(name).config = config
+}
+
+// listed reports whether one project's instances have been listed, here or by
+// the run that wrote the cold store, since the project was last made.
+func (s *state) listed(name string) bool {
+	p, ok := s.projects[name]
+
+	return ok && p.listed
 }
 
 // projectConfig is one project's own configuration, or nil where nothing has
