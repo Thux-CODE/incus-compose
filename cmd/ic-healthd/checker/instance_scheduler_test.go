@@ -2066,6 +2066,41 @@ func TestAStopDuringACheckSchedulesOneRestart(t *testing.T) {
 	requireDue(t, inst, now, 30*time.Second)
 }
 
+// TestANoneProbeRunIsProvenByItsOwnCheck is the linear case of a healthy queued
+// before a restart, with a probe that has no starting to replace it: the old
+// queued healthy keeps its run, and the new run's first check is what proves
+// it, written once and then quiet.
+func TestANoneProbeRunIsProvenByItsOwnCheck(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.test = []string{"NONE"}
+	inst := s.add("web-1", cfg)
+
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	s.result(s.checked(t, inst, nil))
+	first := s.next(t)
+	s.result(s.checked(t, inst, nil))
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(landed(first))
+	require.False(t, inst.writing, "the queued healthy is the one that landed, run and all")
+	require.True(t, inst.unproven)
+
+	s.result(s.checked(t, inst, nil))
+
+	own := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, own.status)
+	require.Equal(t, inst.run, own.run)
+	s.result(landed(own))
+	require.False(t, inst.unproven)
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
 // TestAReplacementGetsOnlyItsOwnWriteResults is the linear case of a delete and
 // a create under the same name with a write out for each: the predecessor's
 // result changes nothing, the replacement's own releases its writer, and the

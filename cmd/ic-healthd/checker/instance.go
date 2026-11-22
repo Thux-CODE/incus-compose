@@ -216,6 +216,11 @@ type instance struct {
 	// once it lands.
 	queued string
 
+	// queuedRun is the run queued was asked for in. Sent later, it still
+	// belongs to that run: a healthy queued before a start proves nothing
+	// about the run that follows.
+	queuedRun uint64
+
 	// restartDelay doubles per restart; a healthy check rebases it.
 	restartDelay time.Duration
 }
@@ -762,11 +767,12 @@ func forceStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connect
 
 	if inst.writing {
 		inst.queued = status
+		inst.queuedRun = inst.run
 
 		return
 	}
 
-	writeStatus(ctx, logger, conn, project, results, inst, status)
+	writeStatus(ctx, logger, conn, project, results, inst, status, inst.run)
 }
 
 // reportStarting marks a freshly started instance starting, as docker does: it
@@ -782,10 +788,10 @@ func reportStarting(ctx context.Context, logger *slog.Logger, conn *iclient.Conn
 }
 
 // writeStatus starts one status write. Its result is what clears writing and
-// sends whatever was queued behind it.
-func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance, status string) {
+// sends whatever was queued behind it. run is the run the value was asked for
+// in, which for a queued one is not always the run it goes out in.
+func writeStatus(ctx context.Context, logger *slog.Logger, conn *iclient.Connection, project string, results chan<- instanceResult, inst *instance, status string, run uint64) {
 	inst.writing = true
-	run := inst.run
 
 	write := &statusWrite{status: status}
 	inst.write = write
@@ -1149,8 +1155,8 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 		inst.writing = false
 		inst.write = nil
 
-		queued := inst.queued
-		inst.queued = ""
+		queued, queuedRun := inst.queued, inst.queuedRun
+		inst.queued, inst.queuedRun = "", 0
 
 		if res.err != nil {
 			logger.Warn("Writing the health status failed",
@@ -1173,11 +1179,13 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 		}
 
 		// What was asked for meanwhile, unless it is what just landed. A
-		// write sent in an earlier run does not stand in for one this run
-		// asked for: the same value, but only this run's own healthy proves
-		// the run, and a run left unproven forces every pass until one does.
-		if queued != "" && (queued != res.status || res.err != nil || res.run != inst.run) {
-			writeStatus(ctx, logger, conn, res.project, results, inst, queued)
+		// write asked for in another run does not stand in for the queued
+		// one: the same value, but only a run's own healthy proves it, and a
+		// run left unproven forces every pass until one does. The queued
+		// value keeps the run it was asked for in, so a healthy queued
+		// before a start cannot go out as proof of the run after it.
+		if queued != "" && (queued != res.status || res.err != nil || queuedRun != res.run) {
+			writeStatus(ctx, logger, conn, res.project, results, inst, queued, queuedRun)
 		}
 	}
 }

@@ -338,11 +338,15 @@ and nothing tells it from a fresh one. The one transition that matters is a new
 run's first `healthy`: a late read carrying the last run's `healthy` would make
 it a no-op, and the replica would stay `starting` for ic-dns. So a run opened by
 a start (`unproven`) writes the verdict of its passing checks whatever `status`
-says, until a `healthy` sent in that run has landed: a failed write is followed
-by a read like any other, which may be stale too. A `healthy` sent in an earlier
-run and landing after the start proves nothing about the new one, nor stands in
-for the `healthy` the new run queued behind it: that one is still sent. Runs found by
-discovery are not forced, so a daemon restart does not rewrite a healthy fleet.
+says, until a `healthy` asked for in that run has landed: a failed write is
+followed by a read like any other, which may be stale too. Every write, queued
+ones included, carries the run it was asked for in, not the run it goes out in.
+A `healthy` of an earlier run landing after the start proves nothing about the
+new one, nor stands in for the `healthy` the new run queued behind it: that one
+is still sent. A `healthy` queued before the start - with a `NONE` probe nothing
+replaces it with `starting` - goes out as the earlier run's, and the new run is
+proven only by its own first check. Runs found by discovery are not forced, so a
+daemon restart does not rewrite a healthy fleet.
 
 ### Discovery and the roster
 
