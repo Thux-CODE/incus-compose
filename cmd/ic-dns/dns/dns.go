@@ -130,6 +130,11 @@ type Plugin struct {
 	spillLive int
 	spilled   chan struct{}
 
+	// doorSession is the newest stream session seen at Handle, under spillMu.
+	// The first event of a newer one spills rather than drops: it is what
+	// takes back what the session before confirmed (sessionOf).
+	doorSession uint64
+
 	// commandOut puts an event in at the head of the chain, which is how readiness
 	// reaches every position rather than only what comes after this one.
 	commandOut chan<- iutil.Command
@@ -430,6 +435,9 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 func (p *Plugin) Handle(ev *iutil.Event) {
 	p.spillMu.Lock()
 
+	newer := ev.Session() > p.doorSession
+	p.doorSession = max(p.doorSession, ev.Session())
+
 	if len(p.spill) == 0 {
 		select {
 		case p.inbox <- ev:
@@ -442,8 +450,12 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 
 	// A connection control spills too: dropped, it would go on past the fold
 	// and the plugins after this one out of order with what is queued, and
-	// the view would miss the stream going or coming back.
-	kept := ev.Restored() || ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected
+	// the view would miss the stream going or coming back. So does the first
+	// event of a session newer than any seen here, of whatever kind: dropped,
+	// http would take the session as up and not ready while the view went on
+	// serving what the session before confirmed, at full TTL. One per session,
+	// so the spill stays bounded.
+	kept := ev.Restored() || ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected || newer
 
 	if !kept && (len(p.spill) == 0 || p.spillLive >= p.cfg.InboxSize) {
 		p.spillMu.Unlock()
