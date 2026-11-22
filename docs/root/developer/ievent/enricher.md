@@ -404,10 +404,19 @@ first run that broke, a run breaking on listings alone ends all the same, with
 a warning naming each listing and its error, and the next run that breaks
 waits a whole grace of its own. A failed network listing always counts: the
 inventory held is what instances are placed by. A failed listing of a
-project's instances, or of the projects, counts only where it has something to
-answer from - a run in this process listed them, or the cold store put them
-back. A first start that never listed them stays cold. The run ends at the
-first broken run past the grace, so up to one backoff (30 s) after it.
+project's instances counts only where that project's instances were listed -
+the project's own `listed`, written to the cold store with it and gone with
+it, so a project made again under the same name, or one whose configuration
+alone was stored, has none. A failed listing of the projects counts once one
+succeeded, here or in the run that wrote the store, empty included. A first
+start that never listed them stays cold. The run ends at the first broken run
+past the grace, so up to one backoff (30 s) after it, and the reads held back
+for the run's networks - a run broken before them never reads them - fail
+ahead of its end rather than hold it in line, and go out from then on.
+
+A listing of a project's networks asked for after an event about one, with no
+network read out, makes that event old news: the time kept for it goes, so the
+history does not grow with every network name a project ever had.
 
 `enricher/sweep-end` is raised through `Command`, which enters at the head of
 the chain, because everything _before_ here has to see it too. It says a round
@@ -432,7 +441,20 @@ send races the cancel - are not listened to. The end of a run names the stream
 session of the connected that started it, and the source takes it only in that
 session with the stream open (see [[developer/ievent/source|source]]): the run
 `Run` starts before any stream opened, and one whose end is still in flight
-when the stream comes back, end nothing.
+when the stream comes back, end nothing. A connected is never dropped at a
+full inbox: it waits in a slot of its own, the newest kept, taken behind what
+the inbox held. And any event of a session newer than the run's starts the
+run for that session, so the run follows the stream even where its connected
+did not get here. The chain state is taken only from events of the session the
+run reads for - a warm one of the session before, late out of a queue, says
+nothing of a stream that came back cold - and what the enricher mints carries
+that session.
+
+A listing announces a delete owed for a key only when it was asked for after
+the read that found the instance gone, with no read of the key out: that one
+was asked for later and decides. A project the listing of projects had and
+the configuration leaves out (`excluded`) is pruned whatever was read in it
+since; only one the listing did not have may be one made since.
 
 ## A Start Replays What The Last One Held
 

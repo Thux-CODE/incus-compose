@@ -481,9 +481,13 @@ session with the stream open, so the end of a run read before the stream went,
 or with no stream ever open, never reaches the chain. Whether the stream is up
 is told by the sessions too, not by which control arrived last - one dropped
 on a full inbox goes past the fold ahead of what is queued: a disconnected of
-a session older than the one up is a leftover, and any event of a session newer
-than the one that went says the stream is back, its connected lost or not. A
-warm event counts for a round only in the session up now.
+a session older than the one up is a leftover, so is the connected of a
+session already seen closed, and any event of a session newer than the last
+one seen up or down says the stream is back - its connected and the
+disconnected before it lost or not - and takes back what was confirmed. A warm
+event, the end of a round included, counts for a round only in the session up
+now. `dns` itself spills connection controls rather than dropping them, so the
+plugins after it see them in order.
 
 `/ready` follows the same signal, with the same rule. `http` turns ready on a
 warm event only when it was not dropped and was stamped after the last lost
