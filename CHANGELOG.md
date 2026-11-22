@@ -539,7 +539,9 @@ form.
   time its restart goes out. A restart a stop made due is called off by a read
   finding the instance running, which starts a new run instead, and the restart
   worker that finds it running and unmarked touches nothing. A restart for an
-  unhealthy run still stops the instance first. (by @sandroden)
+  unhealthy run still stops the instance first, until the instance is seen
+  stopped: from then on it is a restart for a stop like any other. (by
+  @sandroden)
 
 ### Known issues
 

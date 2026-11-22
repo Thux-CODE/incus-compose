@@ -75,6 +75,18 @@ func (s *scheduler) requireRestartOwed() {
 				"%s is read running with a restart due for a stop", k)
 		}
 	}
+
+	// And what a restart is for follows the last thing seen: once seen
+	// stopped, a restart still to go is one for a stop, whatever made it
+	// due, so a start unseen and a running read call it off.
+	for k, inst := range s.instances {
+		if inst.config == nil || inst.config.running || inst.action != instanceActionRestart || inst.state == instanceRestarting {
+			continue
+		}
+
+		require.Falsef(s.t, inst.restartStops,
+			"%s is held stopped with a restart that would force-stop the next run", k)
+	}
 }
 
 func newScheduler(t *testing.T) *scheduler {
@@ -2382,6 +2394,45 @@ func TestARunningReadKeepsAnUnhealthyRunsRestart(t *testing.T) {
 	s.event(incusApi.EventLifecycleInstanceUpdated, "web-1")
 	require.Equal(t, instanceActionRestart, inst.action)
 	require.Equal(t, due, inst.due)
+}
+
+// TestAnUnhealthyRunsRestartBecomesOneForAStop is the linear case of R6-2: the
+// unhealthy run's restart is due, the instance stops before it goes out, and
+// comes back with its start unseen. The restart is called off by the running
+// read, and the run that came back is checked from scratch to healthy.
+func TestAnUnhealthyRunsRestartBecomesOneForAStop(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.retries = 1
+	inst := s.add("web-1", cfg)
+	inst.status = shared.HealthStatusHealthy
+
+	s.result(s.checked(t, inst, errors.New("down")))
+	unhealthy := s.next(t)
+	require.Equal(t, shared.HealthStatusUnhealthy, unhealthy.status)
+	s.result(landed(unhealthy))
+	require.True(t, inst.restartStops)
+	due := inst.due
+
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+	require.False(t, inst.restartStops, "seen stopped: the restart is one for a stop now")
+	require.Equal(t, due, inst.due, "and keeps its backoff")
+	s.result(landed(s.next(t)))
+
+	keys := eventConfig(inst.config)
+	keys["status"] = shared.HealthStatusStopped
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, "web-1", true, healthKeys(keys))
+	require.Equal(t, instanceActionCheck, inst.action, "called off")
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
 }
 
 // TestARestartFoundRunningIsANewRun: the worker found the instance running for

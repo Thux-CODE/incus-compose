@@ -310,13 +310,18 @@ first check), since its start went unseen; firing it would stop a working
 instance. A restart for a stop already out, whose worker finds the instance
 running and unmarked, touches nothing (`Found running, not restarted`) and the
 run it found is checked from scratch. An unhealthy run's restart is never called
-off by a read saying it runs.
+off by a read saying it runs - while that run lasts. What a restart is for
+follows the last thing seen: once a stop event or a read shows the instance
+stopped, the unhealthy run is over and the restart still to go is one for a
+stop, so a run that comes back with its start unseen calls it off like any
+other. Only a restart already out keeps the `stops` it was sent with; its
+worker finds the instance stopped and starts it.
 
 Together that is one invariant, held both ways: an instance seen running, now
 stopped, with a restart policy and no marker, always has a restart in flight,
-due, or refused; an instance read running owes no restart for a stop. The
-scheduler tests check every step of every sequence against it
-(`requireRestartOwed`).
+due, or refused; an instance read running owes no restart for a stop; and one
+held stopped owes no restart that would force-stop the next run. The scheduler
+tests check every step of every sequence against it (`requireRestartOwed`).
 
 ### Telling results apart
 

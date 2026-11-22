@@ -447,7 +447,9 @@ func instKey(ev *iutil.Event) string {
 //
 // It keeps the restart invariant, both ways: an instance seen running, read
 // stopped, with a restart policy and no marker, has a restart in flight, due
-// or refused; one read running owes no restart for a stop.
+// or refused; one read running owes no restart for a stop. And what a restart
+// is for follows the last thing seen: once read stopped, a restart still to go
+// is for a stop, whatever made it due.
 func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, error) {
 	if !ev.Enriched(iutil.EnrichedInstance) {
 		return nil, errors.New("event without an instance read")
@@ -489,6 +491,14 @@ func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, e
 
 		instances[k] = inst
 	} else if !instConfig.running {
+		// Seen stopped: whatever made a restart due, the run it was for is
+		// over, and what is owed now is a restart for a stop. Should the
+		// instance come back with its start unseen, a running read calls it
+		// off rather than let it force-stop a run nobody has checked. A
+		// restart already out keeps the stops it was sent with; its worker
+		// finds the instance stopped.
+		inst.restartStops = false
+
 		switch {
 		case inst.state == instanceRestarting:
 			// The restart in flight owns it, and starts it anyway.
