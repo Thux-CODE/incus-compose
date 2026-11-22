@@ -981,6 +981,17 @@ func (p *Plugin) listedGone(ctx context.Context, key string, s subject, at time.
 	}
 }
 
+// verdictsOwed reports whether a listing's verdict still waits for a read.
+func (p *Plugin) verdictsOwed() bool {
+	for _, owed := range p.owedDelete {
+		if !owed.gone.IsZero() {
+			return true
+		}
+	}
+
+	return false
+}
+
 // announceDelete puts in the line the delete of one instance nothing announced
 // and nothing holds any more, and settles what was owed for it.
 func (p *Plugin) announceDelete(project, name string) {
@@ -1111,8 +1122,10 @@ func (p *Plugin) forgetUnread(ctx context.Context, keys ...string) {
 }
 
 // endIfRead announces the end of a run held at its end, once nothing it waits
-// on is left: its project reads, and the instances whose read failed unless
-// the grace for them is over.
+// on is left: its project reads, and the instances whose read failed, and the
+// listings' verdicts waiting for a read (listedGone), unless the grace for
+// them is over. A verdict not waited for would end the round with the
+// instance a listing left out still held downstream.
 //
 // The grace is armed here, the first time a run held at its end has anything
 // unread - at its end, or when a read fails after it - so no wait on unread
@@ -1122,7 +1135,7 @@ func (p *Plugin) endIfRead(ctx context.Context) {
 		return
 	}
 
-	if len(p.unread) > 0 && !p.graceOver {
+	if (len(p.unread) > 0 || p.verdictsOwed()) && !p.graceOver {
 		if p.endGrace == nil {
 			p.endGrace = time.After(p.opts.roundGrace)
 

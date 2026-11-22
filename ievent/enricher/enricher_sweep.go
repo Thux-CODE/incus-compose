@@ -154,8 +154,15 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// And what is owed a delete nothing holds any more, by a listing that
 		// knows more than the read that found it gone.
 		for key, s := range p.owedDelete {
-			if s.project == msg.project && !slices.Contains(msg.names, s.instance) {
+			switch {
+			case s.project != msg.project:
+			case !slices.Contains(msg.names, s.instance):
 				p.listedGone(ctx, key, s.subject, msg.at)
+			case !s.gone.IsZero() && msg.at.After(s.gone):
+				// A newer listing has it: the verdict of the older one is
+				// no longer what the read out settles.
+				s.gone = time.Time{}
+				p.owedDelete[key] = s
 			}
 		}
 

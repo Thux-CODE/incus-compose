@@ -465,7 +465,10 @@ gone, with no read of the key out (`listedGone`). A read out that went after
 the listing knows more, and decides. One that went before it is not overtaken:
 its events are in the line ahead of where the delete would go, so the verdict
 waits, owed - the read finding the instance keeps it, the read failing makes
-the delete final. A project the listing of projects had and the configuration
+the delete final - and the end of the round waits with it, under the same
+grace as an unread instance, or the round would end with the instance still
+held downstream. A newer listing that has the instance takes the verdict
+back. A project the listing of projects had and the configuration
 leaves out (`excluded`) is pruned whatever was read in it since, and a read in
 it landing after the prune is dropped with its events until a listing serves
 the project again; only one the listing did not have may be one made since.
