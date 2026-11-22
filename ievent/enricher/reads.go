@@ -506,6 +506,30 @@ func (d *deferred) flush(ctx context.Context) {
 	}
 }
 
+// abandonCold gives up holding reads back for a first whole-fleet pass that is
+// not coming - the run ended without its networks - and hands back what was
+// held, which no longer waits: from here on reads go out as they arrive.
+func (d *deferred) abandonCold() []*call {
+	var out []*call
+
+	for _, key := range d.cold {
+		c := d.calls[key]
+		if c == nil {
+			continue
+		}
+
+		delete(d.calls, key)
+
+		out = append(out, c)
+	}
+
+	d.cold = nil
+	d.warm = true
+	d.asked = true
+
+	return out
+}
+
 // retry offers what the pool refused again, in refusal order. The first refusal
 // stops it, since the pool is still full.
 func (d *deferred) retry(ctx context.Context) {

@@ -243,6 +243,17 @@ func (p *Plugin) endBroken(ctx context.Context, err error) {
 			"plugin", name, "listing", f.what, "project", f.project, "err", f.err, "after", p.opts.roundGrace)
 	}
 
+	// A read held back for the run's networks would hold the end behind it in
+	// the line for good, a run broken before them being one that never lists
+	// them: what was held fails, and is read again from here on.
+	for _, c := range p.reads.abandonCold() {
+		for _, it := range c.items {
+			p.q.settle(it, it.ev.WithFailed(errRead))
+		}
+
+		p.retries.soon(c.project, c.name)
+	}
+
 	// The next run that breaks waits a whole grace of its own.
 	p.brokenSince = time.Time{}
 	p.sweepEnding = true

@@ -175,6 +175,36 @@ func TestThirdKnownEmptyProjectInventory(t *testing.T) {
 	require.Len(t, commands, 1, "the last successful listing was empty")
 }
 
+// TestThirdColdProjectListingGraceReleasesEnd: after a restart an update is
+// held back for the run's networks, and the projects listing keeps failing, so
+// no run gets that far. Past the grace the end is raised, and it reaches the
+// chain: the held update fails ahead of it rather than holding it in line.
+//
+// Adapted: the projects counted as listed are now projectsListed, where the
+// review set the map it replaced.
+func TestThirdColdProjectListingGraceReleasesEnd(t *testing.T) {
+	p := bare(t)
+	inst := testlib.NewInstance("p", 0, 0)
+	p.state.setInstance(&inst, nil)
+	p.projectsListed = true
+	p.sweepSession = 2
+	commands := make(chan iutil.Command, 1)
+	p.args.CommandOut = commands
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", inst.Name, "").WithSession(2))
+	p.brokenSince = time.Now().Add(-2 * p.opts.roundGrace)
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionBroken, err: &listingError{what: listedProjects, err: errors.New("unavailable")}})
+	require.Len(t, commands, 1)
+	cmd := <-commands
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), cmd.Action, "", "", "").WithSession(cmd.Session).WithChainState(cmd.ChainState))
+	var forwarded []string
+	for ev := range p.q.release() {
+		forwarded = append(forwarded, ev.Action())
+	}
+	require.Contains(t, forwarded, iutil.ActionSweepEnd)
+	require.True(t, p.reads.warm, "reads no longer wait on a pass that is not coming")
+}
+
 // TestThirdConnectedIsNeverDropped: a full inbox drops what it has no room
 // for, but for a connected, which waits in its slot - the newest of them -
 // instead of going on dropped.
