@@ -983,31 +983,31 @@ type owedDelete struct {
 // listedGone takes a listing asked for at that leaves out an instance held,
 // or one owed a delete. One asked for before the read that found it gone says
 // nothing new. With no read of it out, the listing decides, and the instance
-// goes. With one out that went after the listing, that read knows more, and
-// decides. With one out that went before it, the delete does not go yet: the
-// events that read holds are ahead of where a delete would go. The verdict
-// waits for it, owed, but that read does not decide it: whatever it answers -
-// found, failed - is no newer than the listing, an instance found may have
-// gone after, its delete lost with the stream. Only a read asked for after
-// the listing decides; with none out once that read lands, the verdict is
-// final (settleRead).
+// goes. With one out, the delete does not go yet: the events that read holds
+// are ahead of where a delete would go. The verdict waits for it, owed, and
+// the end of the round with it (endIfRead), or the round would end with the
+// instance still held downstream. A read that went out after the listing
+// knows more, and decides: found, the instance stays; gone, it goes. One that
+// went before it does not decide: whatever it answers - found, failed - is no
+// newer than the listing, an instance found may have gone after, its delete
+// lost with the stream. With no read asked for after the listing out once
+// the read lands, the verdict is final (settleRead): a read that failed says
+// nothing newer either.
 func (p *Plugin) listedGone(ctx context.Context, key string, s subject, at time.Time) {
 	owed, isOwed := p.owedDelete[key]
 	if isOwed && !at.After(owed.since) {
 		return
 	}
 
-	c := p.reads.calls[key]
-
-	switch {
-	case c == nil:
+	if p.reads.calls[key] == nil {
 		p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
-	case c.sent.After(at):
-	default:
-		owed.subject = s
-		owed.gone = at
-		p.owedDelete[key] = owed
+
+		return
 	}
+
+	owed.subject = s
+	owed.gone = at
+	p.owedDelete[key] = owed
 }
 
 // verdictsOwed reports whether a listing's verdict still waits for a read.

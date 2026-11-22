@@ -466,16 +466,17 @@ archive, since nothing after this plugin folds it.
 
 A listing that leaves out an instance held, or one owed a delete, decides on
 its own only when it was asked for after the read that found the instance
-gone, with no read of the key out (`listedGone`). A read out that went after
-the listing knows more, and decides. One that went before it is not overtaken:
-its events are in the line ahead of where the delete would go, so the verdict
-waits, owed, but that read does not decide it: what it found, it found no
-later than the listing, and the instance may have gone after it, the delete
-lost with the stream. A read asked for after the listing decides; with none
-out once the older one lands, found or failed, the delete is final, and the
-events of the older read go on failed. The end of the round waits with it, under the same
-grace as an unread instance, or the round would end with the instance still
-held downstream. A newer listing that has the instance takes the verdict
+gone, with no read of the key out (`listedGone`). With a read out, the
+listing does not overtake it - its events are in the line ahead of where the
+delete would go - and the verdict waits, owed. A read that went after the
+listing knows more, and decides: found, the instance stays, gone, it goes.
+One that went before it does not decide: what it found, it found no later
+than the listing, and the instance may have gone after it, the delete lost
+with the stream. With no read asked for after the listing out once a read
+lands, a failed one included, the delete is final, and the events of an older
+read that found the instance go on failed. The end of the round waits for
+every such verdict, under the same grace as an unread instance, or the round
+would end with the instance still held downstream. A newer listing that has the instance takes the verdict
 back. A project the listing of projects had and the configuration
 leaves out (`excluded`) is pruned whatever was read in it since, and a read in
 it landing after the prune is dropped with its events until a listing serves

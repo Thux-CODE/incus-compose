@@ -134,9 +134,10 @@ an instance out is news as of when it was asked for, and a read as of when it
 went out. The newer of the two decides. A read that went out after the
 listing knows more, and decides. A read that went out before it decides
 nothing, whatever it answers: an instance it found may have gone after it,
-with its delete lost with the stream. Because that read's events are already
-in the line, the delete waits until the read lands. Then a read asked for
-after the listing decides, and with none, the listing's delete is final.
+with its delete lost with the stream. Whatever read is out, its events are
+already in the line, so the delete waits until the read lands, and the end
+of the round waits with it. Then a read asked for after the listing decides,
+and with none, the listing's delete is final.
 
 ## debounce
 

@@ -46,6 +46,52 @@ func TestARoundWaitsForTheListingsVerdict(t *testing.T) {
 	require.Empty(t, p.owedDelete)
 }
 
+// TestARoundWaitsForAReadNewerThanItsListing: the read out went after the
+// listing that left the instance out, so it decides - and the end of the
+// round waits for it as well, or the round would end with the instance still
+// held downstream until its 404 lands.
+func TestARoundWaitsForAReadNewerThanItsListing(t *testing.T) {
+	p := bare(t)
+	commands := make(chan iutil.Command, 4)
+	p.args.CommandOut = commands
+
+	var deleted bool
+
+	p.args.Next = func(ev *iutil.Event) {
+		if ev.Action() == api.EventLifecycleInstanceDeleted {
+			deleted = true
+		}
+	}
+
+	inst := testlib.NewInstance("p", 0, 0)
+	p.state.setInstance(&inst, nil)
+	p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
+	p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+		return nil, nil, api.StatusErrorf(404, "gone")
+	}
+	p.reads.flush(t.Context())
+
+	listing := sweepMsg{action: sweepActionInstances, project: "p", at: time.Now()}
+
+	p.accept(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleInstanceUpdated, "p", inst.Name, ""))
+	read := awaitResult(t, p)
+	require.True(t, read.call.sent.After(listing.at))
+
+	p.acceptSweep(t.Context(), listing)
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionDone})
+	require.Empty(t, commands, "the round ended before the read that decides")
+
+	p.settleRead(t.Context(), read)
+
+	for ev := range p.q.release() {
+		p.args.Next(ev)
+	}
+
+	require.Len(t, commands, 1)
+	require.True(t, deleted)
+	require.Nil(t, p.state.instance("p", inst.Name))
+}
+
 // TestANewerListingSettlesAnOlderVerdict: a listing that has the instance,
 // newer than the one that left it out, takes the verdict back, so it holds no
 // round up.
