@@ -4,6 +4,7 @@ import (
 	"net/netip"
 	"slices"
 	"sort"
+	"strings"
 
 	"github.com/miekg/dns"
 
@@ -122,10 +123,13 @@ func (s *state) aliasZones(inst *instance) []string {
 func (s *state) step(complete bool, ttl uint32) {
 	first := complete && !s.compared
 
+	// Before any digest is taken: which zone a name falls in is the longest
+	// served, so a zone coming or going moves names out of or into the ones
+	// above it, and those have to be compared on the zones that are served now.
+	s.reparent()
+
 	for name, held := range s.serials {
 		if held.names <= 0 {
-			s.zones.Delete(ecs_view.NameKey(name))
-
 			if complete {
 				held.Digest = emptyDigest
 				held.Owed = false
@@ -192,6 +196,35 @@ func (s *state) step(complete bool, ttl uint32) {
 
 	if complete {
 		s.compared = true
+	}
+}
+
+// reparent takes out of the zone tree every zone nothing is left in, and marks
+// as moved every zone above one that came to be served or stopped being: a
+// transfer carries a name in the longest zone served over it (zoneRecords), so
+// a child zone appearing takes its names - an alias counted in the parent
+// included - out of what the parent carries, and one going gives them back.
+// Without this the parent's content changes under the serial it holds, and a
+// secondary at that serial keeps the old records.
+func (s *state) reparent() {
+	for name, held := range s.serials {
+		serving := held.names > 0
+		if !serving {
+			s.zones.Delete(ecs_view.NameKey(name))
+		}
+
+		if serving == held.served {
+			continue
+		}
+
+		held.served = serving
+		s.serials[name] = held
+
+		above := name
+		for i := strings.IndexByte(above, '.'); i >= 0 && i+1 < len(above); i = strings.IndexByte(above, '.') {
+			above = above[i+1:]
+			s.dirty(above)
+		}
 	}
 }
 

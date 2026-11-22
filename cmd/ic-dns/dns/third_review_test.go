@@ -1,0 +1,59 @@
+package dns
+
+import (
+	"net/netip"
+	"slices"
+	"testing"
+
+	api "github.com/lxc/incus/v7/shared/api"
+	"github.com/miekg/dns"
+	"github.com/stretchr/testify/require"
+
+	"github.com/lxc/incus-compose/ievent/iutil"
+)
+
+func TestThirdParentTransferAfterChildZoneAppears(t *testing.T) {
+	const zone = "shop.example."
+	c := newColdServer(t, Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
+	parent := eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", map[string]string{metaAliases: "v1.api"}, map[string]string{"a": "10.0.0.2"})
+	c.p.fold(parent.WithProject(iutil.NewProject(optedIn())))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	transfer := func(serial uint32) []dns.RR {
+		peer := xfrPeer(true)
+		require.Equal(t, dns.RcodeSuccess, serve(t, c.p.xfr, peer, xfrQuery(zone, serial)))
+		return peer.records()
+	}
+	before := transfer(0)
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "other", "worker", map[string]string{metaZone: "api." + zone}, map[string]string{"a": "10.0.0.3"}))
+	c.p.write()
+	after := transfer(0)
+	alias := func(rr dns.RR) bool { return rr.Header().Name == "v1.api."+zone }
+	require.True(t, slices.ContainsFunc(before, alias), "%v", before)
+	require.False(t, slices.ContainsFunc(after, alias), "%v", after)
+	require.Greater(t, len(transfer(before[0].(*dns.SOA).Serial)), 1)
+}
+
+// The other way round: the child zone going gives the alias back to the
+// parent, whose serial steps with it.
+func TestThirdParentTransferAfterChildZoneGoes(t *testing.T) {
+	const zone = "shop.example."
+	c := newColdServer(t, Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
+	parent := eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", map[string]string{metaAliases: "v1.api"}, map[string]string{"a": "10.0.0.2"})
+	c.p.fold(parent.WithProject(iutil.NewProject(optedIn())))
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "other", "worker", map[string]string{metaZone: "api." + zone}, map[string]string{"a": "10.0.0.3"}))
+	c.p.write()
+	transfer := func(serial uint32) []dns.RR {
+		peer := xfrPeer(true)
+		require.Equal(t, dns.RcodeSuccess, serve(t, c.p.xfr, peer, xfrQuery(zone, serial)))
+		return peer.records()
+	}
+	before := transfer(0)
+	c.p.fold(event(api.EventLifecycleInstanceDeleted, "other", "worker"))
+	c.p.write()
+	after := transfer(0)
+	alias := func(rr dns.RR) bool { return rr.Header().Name == "v1.api."+zone }
+	require.False(t, slices.ContainsFunc(before, alias), "%v", before)
+	require.True(t, slices.ContainsFunc(after, alias), "%v", after)
+	require.Greater(t, len(transfer(before[0].(*dns.SOA).Serial)), 1)
+}

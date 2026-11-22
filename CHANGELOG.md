@@ -395,6 +395,12 @@ form.
   snapshot from before the end of the first round with the warm after it.
   (by @sandroden)
 
+- `ic-dns` steps the serial of a zone when a zone under it appears or goes:
+  `api.shop.example.` coming to be served takes `v1.api.shop.example.` out of
+  the transfer of `shop.example.`, and going gives it back, and the parent
+  kept its serial, so an IXFR from it was the SOA alone and a secondary kept
+  the old records. Already present in v1.4.0. (by @sandroden)
+
 - The `ievent` enricher no longer deletes an instance made again under the same
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an

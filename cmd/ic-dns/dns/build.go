@@ -173,6 +173,11 @@ type zoneSerial struct {
 	// publish compares it again.
 	dirty bool
 
+	// served is the zone having been served by the last publish, so the next
+	// one tells a zone that came or went from one that stayed: the zones
+	// around it carry what it takes in or gives back (see reparent).
+	served bool
+
 	// names is how many names the zone holds, so the last one leaving takes the
 	// zone with it; hosts is how many of those are a host's rather than an alias
 	// that landed here, so a zone with none is Shadowing.
