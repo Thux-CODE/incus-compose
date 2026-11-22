@@ -464,8 +464,11 @@ its own only when it was asked for after the read that found the instance
 gone, with no read of the key out (`listedGone`). A read out that went after
 the listing knows more, and decides. One that went before it is not overtaken:
 its events are in the line ahead of where the delete would go, so the verdict
-waits, owed - the read finding the instance keeps it, the read failing makes
-the delete final - and the end of the round waits with it, under the same
+waits, owed, but that read does not decide it: what it found, it found no
+later than the listing, and the instance may have gone after it, the delete
+lost with the stream. A read asked for after the listing decides; with none
+out once the older one lands, found or failed, the delete is final, and the
+events of the older read go on failed. The end of the round waits with it, under the same
 grace as an unread instance, or the round would end with the instance still
 held downstream. A newer listing that has the instance takes the verdict
 back. A project the listing of projects had and the configuration

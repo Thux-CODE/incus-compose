@@ -118,6 +118,15 @@ it says; an end of round of an older session is never a round, even where it
 was the last one before a flapping stream. An event no source minted (session
 0, as tests feed them) is taken in the order it comes.
 
+**A listing and the reads around it.** In the enricher, a listing that leaves
+an instance out is news as of when it was asked for, and a read as of when it
+went out. The newer of the two decides. A read that went out after the
+listing knows more, and decides. A read that went out before it decides
+nothing, whatever it answers: an instance it found may have gone after it,
+with its delete lost with the stream. Because that read's events are already
+in the line, the delete waits until the read lands. Then a read asked for
+after the listing decides, and with none, the listing's delete is final.
+
 ## debounce
 
 Leading **and** trailing. The first event of a burst goes at once, so a lone

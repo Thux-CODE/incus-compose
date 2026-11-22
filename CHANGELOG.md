@@ -446,10 +446,11 @@ form.
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an
   instance's read, or than the read owed for a key found gone, announces it
-  deleted; a listing that leaves out an instance with a read of it out waits
-  for that read - one finding the instance keeps it, one failing makes the
-  listing's delete final - instead of deleting it behind that read's update or
-  losing the verdict when the read fails; a project the configuration leaves
+  deleted; a listing that leaves out an instance with a read of it out that
+  went before the listing waits for that read instead of deleting it behind
+  the read's update, but the read does not decide: only a read asked for after
+  the listing does, and with none the listing's delete is final, whether the
+  older read found the instance or failed; a project the configuration leaves
   out is pruned even when one of its instances was just read, and a read of
   it landing after the prune no longer puts the instance back; and no network
   read or listing older than a network event undoes it, from the sweeper or

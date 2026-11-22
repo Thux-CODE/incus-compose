@@ -767,6 +767,25 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 		return
 	}
 
+	// Found by a read that went out before a listing that left the instance
+	// out: the answer may well be older than the delete the listing saw, the
+	// delete itself lost with the stream. It does not decide alone. A read of
+	// the key already asked for after it decides; with none, the listing's
+	// verdict is final (listedGone).
+	if verdict, ok := p.owedDelete[c.key]; ok && !verdict.gone.IsZero() && !c.sent.After(verdict.gone) && res.err == nil && res.instance != nil {
+		for _, it := range c.items {
+			p.q.settle(it, it.ev.WithFailed(errRead))
+		}
+
+		if p.reads.calls[c.key] == nil {
+			p.accept(ctx, iutil.NewEvent(time.Now(), incusapi.EventLifecycleInstanceDeleted, c.project, c.name, ""))
+		}
+
+		p.endIfRead(ctx)
+
+		return
+	}
+
 	_, owed := p.owedDelete[c.key]
 	had := p.state.instance(c.project, c.name) != nil || owed
 	unserved := p.opts.Instance != nil && res.instance != nil && !p.opts.Instance(res.instance)
@@ -965,11 +984,13 @@ type owedDelete struct {
 // or one owed a delete. One asked for before the read that found it gone says
 // nothing new. With no read of it out, the listing decides, and the instance
 // goes. With one out that went after the listing, that read knows more, and
-// decides. With one out that went before it, the read is not taken as the
-// answer the listing already is: the events it holds are ahead of where a
-// delete would go, and one finding the instance there would reach the chain
-// after its delete. The listing's verdict waits for it, owed: the read finding
-// the instance there settles it, the read failing makes it final (settleRead).
+// decides. With one out that went before it, the delete does not go yet: the
+// events that read holds are ahead of where a delete would go. The verdict
+// waits for it, owed, but that read does not decide it: whatever it answers -
+// found, failed - is no newer than the listing, an instance found may have
+// gone after, its delete lost with the stream. Only a read asked for after
+// the listing decides; with none out once that read lands, the verdict is
+// final (settleRead).
 func (p *Plugin) listedGone(ctx context.Context, key string, s subject, at time.Time) {
 	owed, isOwed := p.owedDelete[key]
 	if isOwed && !at.After(owed.since) {
