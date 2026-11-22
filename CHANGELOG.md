@@ -446,6 +446,11 @@ form.
   a restart policy, force-restart an instance that worked. Already present in
   v1.4.0. (by @sandroden)
 
+- `ic-healthd` sends the `healthy` a restarted instance's first passing check
+  queued behind a `healthy` of the previous run still in flight. The old write
+  landing with the same value used to drop it, so the new run was proven only
+  by a later pass, one interval on. (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

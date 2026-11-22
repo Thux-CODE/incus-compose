@@ -1914,6 +1914,39 @@ func TestAPreviousRunHealthyDoesNotProveTheNewRun(t *testing.T) {
 	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
 }
 
+// TestANewRunHealthyQueuedBehindAnOldOneIsSentOnce is the linear case of a
+// healthy from the run before still out when the new run passes: the new
+// run's healthy goes once the old one lands, proves the run, and the passes
+// after it are quiet.
+func TestANewRunHealthyQueuedBehindAnOldOneIsSentOnce(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusUnhealthy
+
+	s.result(s.checked(t, inst, nil))
+	old := s.next(t)
+
+	s.event(incusApi.EventLifecycleInstanceRestarted, "web-1")
+	s.result(s.checked(t, inst, nil))
+	s.result(s.checked(t, inst, nil))
+	s.result(landed(old))
+
+	healthy := s.next(t)
+	require.Equal(t, shared.HealthStatusHealthy, healthy.status)
+	require.Equal(t, inst.run, healthy.run, "sent in the new run")
+	s.result(landed(healthy))
+
+	require.False(t, inst.unproven)
+	require.False(t, inst.writing)
+	s.silent(t)
+
+	s.result(s.checked(t, inst, nil))
+	s.silent(t)
+}
+
 // TestAReplacementGetsOnlyItsOwnWriteResults is the linear case of a delete and
 // a create under the same name with a write out for each: the predecessor's
 // result changes nothing, the replacement's own releases its writer, and the

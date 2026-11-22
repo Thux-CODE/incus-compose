@@ -1147,8 +1147,11 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 			}
 		}
 
-		// What was asked for meanwhile, unless it is what just landed.
-		if queued != "" && (queued != res.status || res.err != nil) {
+		// What was asked for meanwhile, unless it is what just landed. A
+		// write sent in an earlier run does not stand in for one this run
+		// asked for: the same value, but only this run's own healthy proves
+		// the run, and a run left unproven forces every pass until one does.
+		if queued != "" && (queued != res.status || res.err != nil || res.run != inst.run) {
 			writeStatus(ctx, logger, conn, res.project, results, inst, queued)
 		}
 	}
