@@ -413,6 +413,13 @@ form.
   and answered `SERVFAIL` until the other one's grace ran out, up to 45
   seconds later. (by @sandroden)
 
+- `ic-dns` no longer steps a serial at the first start on a cold store from
+  before the digest when the replay of an unchanged zone lands over several
+  windows: what the serial described is taken to be the whole replay, not its
+  first window. A zone that a read of the new run changes before the replay
+  has published any of it steps once, as such a change did before the digest.
+  (by @sandroden)
+
 - The `ievent` enricher no longer deletes an instance made again under the same
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an

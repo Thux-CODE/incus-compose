@@ -72,6 +72,12 @@ type state struct {
 	// against the digest its serial was stored with.
 	compared bool
 
+	// live is the change being folded now coming from somewhere other than
+	// the replay off the enricher's store: every zone it marks as moved is
+	// marked live too (see zoneSerial.live). Set around each change by whoever
+	// makes it, false otherwise.
+	live bool
+
 	// grown is every network a name has landed on that nothing was on: its
 	// peering has not been read, since until now it could change no answer.
 	// shrunk is a network having lost the last name on it, which may leave
@@ -154,10 +160,19 @@ func (s *state) write(ttl uint32) bool {
 		}
 	}()
 
+	// live is any of it not being the replay: what refresh moves after it may
+	// be its doing.
+	live := false
+
+	defer func() { s.live = false }()
+
 	for key, next := range s.pending {
 		delete(s.pending, key)
 
 		prev := s.held[key]
+
+		// Only updates are replayed: a delete is this run's.
+		s.live = next == nil || !next.Restored()
 
 		// The same records, so the trees are left alone - but the event held is
 		// the newer one, or an instance restored from the cold store would read
@@ -165,7 +180,10 @@ func (s *state) write(ttl uint32) bool {
 		if next != nil && prev != nil && next.Equal(prev.Event) {
 			s.held[key] = next
 
-			confirmed = confirmed || (next.service != "" && prev.Restored() != next.Restored())
+			if next.service != "" && prev.Restored() != next.Restored() {
+				confirmed = true
+				live = true
+			}
 
 			continue
 		}
@@ -174,6 +192,8 @@ func (s *state) write(ttl uint32) bool {
 			continue
 		}
 
+		live = live || s.live
+
 		s.apply(key, next, ttl)
 
 		moved = true
@@ -181,6 +201,8 @@ func (s *state) write(ttl uint32) bool {
 
 	// After every instance has moved: a service name is written from all of
 	// its replicas at once.
+	s.live = live
+
 	if (moved || confirmed) && s.refresh(ttl) {
 		moved = true
 	}

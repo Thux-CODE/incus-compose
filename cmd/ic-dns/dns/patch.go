@@ -153,13 +153,26 @@ func (s *state) step(complete bool, ttl uint32) {
 				// secondary takes zero as "no zone here".
 				held.Serial = 1
 				held.born = true
-			case held.Digest == "" && !held.Owed:
+			case held.Digest == "" && !held.Owed, held.replayed:
 				// Stored by a build that kept no digest and owed nothing:
-				// what it held then is taken to be what the replay first
-				// publishes, as that build took it. A change after it, the
-				// round's included, steps once complete.
-				z, _ := s.zones.Get(ecs_view.NameKey(name))
-				held.Digest = zoneDigest(s.names.Root(), s.zones.Root(), z)
+				// what it held then is taken to be what the replay publishes,
+				// as that build took it - all of it, over however many
+				// windows it lands in, so the digest is taken again at each
+				// publish the replay alone has moved the zone. Once anything
+				// else has, the one taken before it stays, and a change after
+				// it, the round's included, steps once complete; where
+				// nothing of the replay was published before it, there is
+				// none to take and the zone is owed a step.
+				switch {
+				case !held.live:
+					z, _ := s.zones.Get(ecs_view.NameKey(name))
+					held.Digest = zoneDigest(s.names.Root(), s.zones.Root(), z)
+					held.replayed = true
+				case !held.replayed:
+					held.Owed = true
+				default:
+					held.replayed = false
+				}
 			}
 
 			s.serials[name] = held
@@ -207,6 +220,8 @@ func (s *state) step(complete bool, ttl uint32) {
 // Without this the parent's content changes under the serial it holds, and a
 // secondary at that serial keeps the old records.
 func (s *state) reparent() {
+	defer func() { s.live = false }()
+
 	for name, held := range s.serials {
 		serving := held.names > 0
 		if !serving {
@@ -219,6 +234,9 @@ func (s *state) reparent() {
 
 		held.served = serving
 		s.serials[name] = held
+
+		// What moved the zones above is whatever made this one come or go.
+		s.live = held.live
 
 		above := name
 		for i := strings.IndexByte(above, '.'); i >= 0 && i+1 < len(above); i = strings.IndexByte(above, '.') {
@@ -481,6 +499,7 @@ func (s *state) dirty(zone string) {
 	}
 
 	held.dirty = true
+	held.live = held.live || s.live
 	s.serials[zone] = held
 }
 
@@ -688,6 +707,7 @@ func (s *state) leave(name string, ns []string, ttl uint32, host, transfer bool)
 	// deleting between the two would lose the serial and republish it at 1.
 	// Publish is what sweeps a zone nothing came back to.
 	held.dirty = true
+	held.live = held.live || s.live
 
 	s.serials[name] = held
 

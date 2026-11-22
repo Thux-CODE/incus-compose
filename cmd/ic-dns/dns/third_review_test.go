@@ -14,6 +14,47 @@ import (
 	"github.com/lxc/incus-compose/ievent/iutil"
 )
 
+func TestThirdLegacyReplayInTwoPublications(t *testing.T) {
+	const zone = "shop.example."
+	c := newColdServer(t, Suffix("example"))
+	c.p.state = newState(map[string]zoneSerial{zone: {Serial: 42}})
+	for name, ip := range map[string]string{"web": "10.0.0.2", "db": "10.0.0.3"} {
+		c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", name, nil, map[string]string{"a": ip}).WithRestored())
+		c.p.write()
+	}
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Equal(t, uint32(42), c.p.state.serials[zone].Serial)
+}
+
+// The digest taken again at each window of the replay stops at the first
+// change that is not the replay: what this run read differently from what the
+// legacy serial described still steps it, once.
+func TestThirdLegacyReplayThenReadChangesBeforeRound(t *testing.T) {
+	const zone = "shop.example."
+	c := newColdServer(t, Suffix("example"))
+	c.p.state = newState(map[string]zoneSerial{zone: {Serial: 42}})
+	for name, ip := range map[string]string{"web": "10.0.0.2", "db": "10.0.0.3"} {
+		c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", name, nil, map[string]string{"a": ip}).WithRestored())
+		c.p.write()
+	}
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", nil, map[string]string{"a": "10.0.0.9"}))
+	c.p.write()
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Equal(t, uint32(43), c.p.state.serials[zone].Serial)
+}
+
+// A zone of a legacy file the replay published nothing of before a read of
+// this run reached it has no digest of what its serial described: it steps.
+func TestThirdLegacyZoneReadBeforeAnyReplay(t *testing.T) {
+	const zone = "shop.example."
+	c := newColdServer(t, Suffix("example"))
+	c.p.state = newState(map[string]zoneSerial{zone: {Serial: 42}})
+	c.p.fold(eventOn(api.EventLifecycleInstanceUpdated, "shop", "web", nil, map[string]string{"a": "10.0.0.2"}))
+	c.p.write()
+	c.p.fold(warm(event(iutil.ActionSweepEnd, "", "")))
+	require.Equal(t, uint32(43), c.p.state.serials[zone].Serial)
+}
+
 func TestThirdParentTransferAfterChildZoneAppears(t *testing.T) {
 	const zone = "shop.example."
 	c := newColdServer(t, Suffix("example"), AllowTransfer([]netip.Prefix{netip.MustParsePrefix("192.0.2.53/32")}))
