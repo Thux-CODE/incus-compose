@@ -123,6 +123,10 @@ type Plugin struct {
 	// before any stream opened, is never taken.
 	sweepSession uint64
 
+	// excluded is the projects the last listing of projects found and the
+	// configuration does not serve. See settleRead.
+	excluded map[string]bool
+
 	// closedSession is the newest session a disconnected closed. See
 	// sessionOf.
 	closedSession uint64
@@ -752,6 +756,20 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 
 		// A project that would not answer still counts: the run is over either
 		// way, and holding warm on it would leave the chain cold for ever.
+		p.endIfRead(ctx)
+
+		return
+	}
+
+	// In a project the listing of projects found and does not serve: the
+	// prune took everything in it, and a read that went out before it would
+	// put an instance back that nothing serves any more.
+	if p.excluded[c.project] {
+		for _, it := range c.items {
+			p.q.trash(it)
+		}
+
+		delete(p.unread, c.key)
 		p.endIfRead(ctx)
 
 		return

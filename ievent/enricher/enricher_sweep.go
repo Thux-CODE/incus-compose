@@ -60,6 +60,11 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 	case sweepActionProjects:
 		p.state.setListed("")
 
+		p.excluded = map[string]bool{}
+		for _, project := range msg.excluded {
+			p.excluded[project] = true
+		}
+
 		// Announced before the prune, the way a listing of instances is: a
 		// project that went, or one no longer served, would otherwise leave its
 		// names answering - restored ones most of all, which nothing else reads.
