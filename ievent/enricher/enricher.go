@@ -131,10 +131,9 @@ type Plugin struct {
 	// sessionOf.
 	closedSession uint64
 
-	// controls is the connection controls the inbox had no room for, the
-	// newest two kept: with sessions only growing, an older one says nothing
-	// the newer ones do not. See Handle.
-	controls chan *iutil.Event
+	// held is what the inbox had no room for and may not be dropped, kept by
+	// session. See Handle.
+	held *heldSessions
 
 	// sweepEnding says a run reached its end while its project reads were still
 	// out, or instances it listed were unread, so whatever settles the last of
@@ -318,11 +317,11 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	sweeps := make(chan sweepMsg)
 
 	p := &Plugin{
-		logger:   logger,
-		opts:     o,
-		inbox:    make(chan *iutil.Event, o.InboxSize),
-		controls: make(chan *iutil.Event, 2),
-		sweeps:   sweeps,
+		logger: logger,
+		opts:   o,
+		inbox:  make(chan *iutil.Event, o.InboxSize),
+		held:   newHeldSessions(),
+		sweeps: sweeps,
 
 		q:          &queue{},
 		unread:     map[string]subject{},
@@ -428,36 +427,33 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 // It runs on the previous plugin's goroutine and must not block, so a full
 // inbox drops rather than waits; dropped, not failed, since nothing went wrong.
 //
-// But for a connection control: a connected is what restarts the run for its
-// session, and a disconnected handed on dropped would overtake what is
-// queued. They wait in a slot of their own, the newest two kept, for Run to
-// take as if they had come through the inbox.
+// But for a connection control, and for the first event of a session newer
+// than any seen here: a connected is what restarts the run for its session,
+// a disconnected handed on dropped would overtake what is queued, and the
+// first news of a session dropped would leave the run reading for the one
+// before. They are held by session (heldSessions), for Run to take as if they
+// had come through the inbox; one of a session older than the newest seen
+// here is a leftover, and a control that is goes nowhere.
 func (p *Plugin) Handle(ev *iutil.Event) {
+	newer := p.held.seen(ev)
+
 	select {
 	case p.inbox <- ev:
 		return
 	default:
 	}
 
-	if ev.Action() != iutil.ActionConnected && ev.Action() != iutil.ActionDisconnected {
-		p.args.Next(ev.WithDropped(name))
+	control := ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected
 
+	if (control || newer) && p.held.keep(ev) {
 		return
 	}
 
-	for {
-		select {
-		case p.controls <- ev:
-			return
-		default:
-		}
-
-		// Full: the oldest goes, unless Run has just taken it.
-		select {
-		case <-p.controls:
-		default:
-		}
+	if control {
+		return
 	}
+
+	p.args.Next(ev.WithDropped(name))
 }
 
 // Run enriches until ctx is canceled. It blocks, so main owns the goroutine:
@@ -528,14 +524,8 @@ func (p *Plugin) Run(ctx context.Context) error {
 			}
 		}
 
-	controls:
-		for {
-			select {
-			case ev := <-p.controls:
-				p.accept(ctx, ev)
-			default:
-				break controls
-			}
+		for _, ev := range p.held.take() {
+			p.accept(ctx, ev)
 		}
 
 		// Then the whole line, settled or not, in arrival order. Reads
@@ -571,7 +561,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 				p.args.Next(ev)
 			}
 
-		case ev := <-p.controls:
+		case <-p.held.ready:
 			// Behind what the inbox held when it had no room for it.
 		queued:
 			for {
@@ -583,7 +573,9 @@ func (p *Plugin) Run(ctx context.Context) error {
 				}
 			}
 
-			p.accept(ctx, ev)
+			for _, ev := range p.held.take() {
+				p.accept(ctx, ev)
+			}
 
 			for ev := range p.q.release() {
 				p.args.Next(ev)

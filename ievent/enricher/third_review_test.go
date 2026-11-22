@@ -280,7 +280,14 @@ func TestThirdConnectedIsNeverDropped(t *testing.T) {
 
 	require.Equal(t, []string{"lost"}, dropped)
 
-	// The newest two, in the order they came.
-	require.Equal(t, iutil.ActionDisconnected, (<-p.controls).Action())
-	require.Equal(t, uint64(3), (<-p.controls).Session())
+	// Held by session: what session 2 said is a leftover once 3 is held.
+	held := p.held.take()
+	require.Len(t, held, 1)
+	require.Equal(t, iutil.ActionConnected, held[0].Action())
+	require.Equal(t, uint64(3), held[0].Session())
+
+	// And one of session 2 coming after it is not held at all.
+	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionDisconnected, "", "", "").WithSession(2))
+	require.Empty(t, p.held.take())
+	require.Equal(t, []string{"lost"}, dropped, "a leftover control goes nowhere")
 }

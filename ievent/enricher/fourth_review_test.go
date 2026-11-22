@@ -69,7 +69,9 @@ func TestFourthDisconnectAtCapacity(t *testing.T) {
 	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionDisconnected, "", "", "").WithSession(1))
 
 	// Kept with the controls, for Run to take behind what the inbox holds.
-	require.Equal(t, iutil.ActionDisconnected, (<-p.controls).Action())
+	held := p.held.take()
+	require.Len(t, held, 1)
+	require.Equal(t, iutil.ActionDisconnected, held[0].Action())
 }
 
 func TestFourthInventoryCheckpoint(t *testing.T) {

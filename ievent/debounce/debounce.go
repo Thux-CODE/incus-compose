@@ -4,6 +4,7 @@ package debounce
 import (
 	"context"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/lxc/incus-compose/ievent/iutil"
@@ -28,6 +29,11 @@ type Plugin struct {
 
 	next  iutil.Next
 	inbox chan *iutil.Event
+
+	// newest is the newest stream session seen at the door, under mu: Handle
+	// runs on the caller's goroutine, and on more than one.
+	mu     sync.Mutex
+	newest uint64
 
 	// in is the source asking this plugin to finish, on its own channel.
 	in <-chan iutil.Command
@@ -90,11 +96,26 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 }
 
 // Handle puts the event on the inbox and returns. A full inbox drops the event
-// rather than blocking.
+// rather than blocking, handing it on marked at once, ahead of what is queued.
+//
+// But for a connection control of a session older than the newest seen here:
+// handed on ahead, it would overtake a newer one still queued, and it changes
+// nothing anywhere (see sessionOf in the enricher), so it goes nowhere. A
+// control of the newest session overtakes only older ones, which is what the
+// session invariant allows.
 func (p *Plugin) Handle(ev *iutil.Event) {
+	p.mu.Lock()
+	stale := ev.Session() < p.newest
+	p.newest = max(p.newest, ev.Session())
+	p.mu.Unlock()
+
 	select {
 	case p.inbox <- ev:
 	default:
+		if stale && (ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected) {
+			return
+		}
+
 		p.next(ev.WithDropped(name))
 	}
 }
