@@ -474,7 +474,10 @@ held downstream. A newer listing that has the instance takes the verdict
 back. A project the listing of projects had and the configuration
 leaves out (`excluded`) is pruned whatever was read in it since, and a read in
 it landing after the prune is dropped with its events until a listing serves
-the project again; only one the listing did not have may be one made since.
+the project again; a delete owed there - a name nothing here holds any more
+but the subscriber still does - is announced with the prune, since no read
+landing in the project will. Only one the listing did not have may be one
+made since.
 What moved the networks of a pruned project goes with it.
 
 ## A Start Replays What The Last One Held

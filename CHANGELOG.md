@@ -451,8 +451,9 @@ form.
   the read's update, but the read does not decide: only a read asked for after
   the listing does, and with none the listing's delete is final, whether the
   older read found the instance or failed; a project the configuration leaves
-  out is pruned even when one of its instances was just read, and a read of
-  it landing after the prune no longer puts the instance back; and no network
+  out is pruned even when one of its instances was just read, a read of it
+  landing after the prune no longer puts the instance back, and a delete still
+  owed in it is announced with the prune; and no network
   read or listing older than a network event undoes it, from the sweeper or
   from a read a tenant's NIC asked for under the tenant's key, the history of
   those events going once a listing has made it old news, or with the

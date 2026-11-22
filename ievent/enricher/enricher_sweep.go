@@ -86,8 +86,15 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 				incusapi.EventLifecycleInstanceDeleted, s.project, s.instance, ""))
 		}
 
+		// What is owed a delete in a project the configuration excludes goes
+		// now, whatever read of it is out: a name only the subscriber still
+		// holds is withdrawn with the rest of the project, and a read landing
+		// in it later is dropped (settleRead), so it would never announce it.
 		for key, s := range p.owedDelete {
-			if !slices.Contains(msg.names, s.project) {
+			switch {
+			case slices.Contains(msg.excluded, s.project):
+				p.announceDelete(s.project, s.instance)
+			case !slices.Contains(msg.names, s.project):
 				p.listedGone(ctx, key, s.subject, msg.at)
 			}
 		}
