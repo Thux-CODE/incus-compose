@@ -460,9 +460,15 @@ session (`heldSessions`), only those of the newest session seen at the door,
 the last two of it, and taken behind what the inbox held. The chain state is
 taken only from events of the newest session - a warm one of the session
 before, late out of a queue, says nothing of a stream that came back cold -
-and what the enricher mints carries the run's session. A read settled after a
-newer session came up goes on in its own session and does not enter the
-archive, since nothing after this plugin folds it.
+and what the enricher mints - a read's answer, a delete a read or a listing
+found - carries the newest session seen at the door, cold while the fold has
+not taken it: it is news as of now, and a plugin after this one may already
+be in that session, its first event dropped and handed on while its
+connected waits held. What is held here takes in only what goes on in a
+session those plugins accept (`isCurrent`, judged at the door): an event
+older than that goes on untouched, and a read settled for one goes on in its
+own session and does not enter the archive, since nothing after this plugin
+folds it, and the archive would hold back the next read of the same answer.
 
 A listing that leaves out an instance held, or one owed a delete, decides on
 its own only when it was asked for after the read that found the instance

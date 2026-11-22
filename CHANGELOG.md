@@ -363,7 +363,10 @@ form.
   no longer takes `/ready` back, a lost disconnected no longer keeps the view
   healthy across the next connected, and an end of round of an earlier session
   is no round, and a delete of an earlier session no longer takes away a name
-  the newer one confirmed: an older session's event changes no data either.
+  the newer one confirmed: an older session's event changes no data either,
+  in `ic-dns` or in what the enricher holds. What the enricher reads and finds
+  goes on stamped with the newest session it has news of, so a read landing
+  while a session comes up is still folded downstream.
   Neither `ic-dns` nor the enricher drops connection controls on a full inbox,
   nor the first event of a newer session, and what the enricher holds back at
   a full inbox is kept by session, so the connected of the newest session is

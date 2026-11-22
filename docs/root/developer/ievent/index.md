@@ -103,9 +103,11 @@ invariant, and keeps the newest session it has seen:
 
 - an event of a session older than the newest seen is a leftover and changes
   nothing: no readiness, no freshness, not the session the enricher's run
-  reads for, and no data - a delete late out of a queue takes nothing away,
-  and a read the enricher settles after a newer session came up does not
-  enter its archive;
+  reads for, and no data - a delete late out of a queue takes nothing away.
+  In the enricher, "newest seen" is the newest session seen at its door,
+  which no plugin after it can be ahead of: what it holds, its archive and
+  its state, takes in only what goes on in a session they accept, and what
+  it mints itself goes on stamped with that session;
 - the first event of a newer session, of whatever kind - a peer event or an
   ordinary one as much as a connected - opens that session not fresh: its
   connected, and the disconnected of the session before, may have been lost
