@@ -951,20 +951,48 @@ func (p *Plugin) sessionOf(ctx context.Context, ev *iutil.Event) bool {
 	return true
 }
 
-// isCurrent reports whether ev is of the newest session seen, or of none: one
-// whose data counts, here and after this plugin.
+// newestSession is the newest session there is news of: the newer of what the
+// fold has taken and what the door has seen. A plugin after this one may know
+// a session the fold has not taken yet - its first event dropped on a full
+// inbox and handed on, its connected still held - but never one the door has
+// not seen.
+func (p *Plugin) newestSession() uint64 {
+	return max(p.sweepSession, p.closedSession, p.held.newestSeen())
+}
+
+// isCurrent reports whether ev is of the newest session there is news of, or
+// of none: one whose data the plugins after this one fold.
+//
+// The invariant it keeps: what this plugin holds - the archive, and the
+// state - takes in only what goes on in a session those plugins accept. An
+// event they will fold nothing of must not change what is held here, or the
+// next answer that does go on in an accepted session is held back as nothing
+// new (the archive), or never made (the state, which a listing is compared
+// against). Judged against the newest session seen at the door, since what
+// was seen there may already have gone on.
 func (p *Plugin) isCurrent(ev *iutil.Event) bool {
-	return ev.Session() == 0 || ev.Session() >= max(p.sweepSession, p.closedSession)
+	return ev.Session() == 0 || ev.Session() >= p.newestSession()
 }
 
 // stamp is an event this plugin minted, marked the way the source marks what
-// it mints: the chain as last seen, and the session the run reads for, so a
-// plugin after this one judges it by the session rather than its time.
+// it mints: the chain, and the newest session there is news of, so a plugin
+// after this one folds what this plugin found and judges it by the session
+// rather than its time. What this plugin mints - a read's answer, a delete
+// a read or a listing found - is news as of now, whatever session asked for
+// it. While the door has seen a session the fold has not taken yet, the chain
+// is cold: nothing of that session has been read whole.
 func (p *Plugin) stamp(ev *iutil.Event) *iutil.Event {
-	ev = ev.WithChainState(p.chain)
+	newest := p.newestSession()
 
-	if ev.Session() == 0 {
-		ev = ev.WithSession(p.sweepSession)
+	chain := p.chain
+	if newest > max(p.sweepSession, p.closedSession) {
+		chain = iutil.ChainCold
+	}
+
+	ev = ev.WithChainState(chain)
+
+	if ev.Session() == 0 || ev.Session() < newest {
+		ev = ev.WithSession(newest)
 	}
 
 	return ev
@@ -1050,8 +1078,10 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 	// A leftover of an older session changes nothing here either, data
 	// included: a delete late out of a queue would take away an instance the
 	// newer session has read. It goes on as it is, for the log and for what
-	// counts drops; ic-dns folds nothing of it either.
-	if ev.Action() == iutil.ActionConnected || !current {
+	// counts drops; ic-dns folds nothing of it either. Older than the newest
+	// session there is news of, not only than the one the fold has taken: a
+	// plugin after this one may already be in that one (isCurrent).
+	if ev.Action() == iutil.ActionConnected || !p.isCurrent(ev) {
 		p.q.push(ev, true)
 
 		return

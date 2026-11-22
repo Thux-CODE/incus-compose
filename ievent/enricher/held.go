@@ -50,6 +50,16 @@ func (h *heldSessions) seen(ev *iutil.Event) bool {
 	return true
 }
 
+// newestSeen is the newest session seen at the door: never older than any
+// session a plugin after this one has seen, since everything reaches them
+// through here.
+func (h *heldSessions) newestSeen() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	return h.newest
+}
+
 // keep holds ev, which the inbox had no room for, unless it is of a session
 // older than the newest seen at the door. It reports whether ev was held.
 func (h *heldSessions) keep(ev *iutil.Event) bool {
