@@ -274,9 +274,13 @@ func TestThirdConnectedIsNeverDropped(t *testing.T) {
 
 	p.Handle(iutil.NewEvent(time.Now(), "occupied", "", "", ""))
 	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", "").WithSession(2))
+	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionDisconnected, "", "", "").WithSession(2))
 	p.Handle(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", "").WithSession(3))
 	p.Handle(iutil.NewEvent(time.Now(), "lost", "", "", ""))
 
 	require.Equal(t, []string{"lost"}, dropped)
-	require.Equal(t, uint64(3), (<-p.reconnect).Session())
+
+	// The newest two, in the order they came.
+	require.Equal(t, iutil.ActionDisconnected, (<-p.controls).Action())
+	require.Equal(t, uint64(3), (<-p.controls).Session())
 }

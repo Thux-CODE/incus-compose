@@ -64,10 +64,10 @@ type Plugin struct {
 	// debounced leftover - is not taken for one since.
 	lost time.Time
 
-	// down is the stream having gone in downSession and not come back;
-	// upSession is the newest session seen come up. Under mu.
-	down                   bool
-	downSession, upSession uint64
+	// session is the newest stream session seen, and down that the stream
+	// went in it. Under mu.
+	session uint64
+	down    bool
 
 	// mu orders the decisions on ready against each other. Handle has more
 	// than one caller at once - a plugin before this one hands on what it
@@ -149,46 +149,52 @@ func (p *Plugin) decide(ev *iutil.Event) {
 
 	// The order controls arrive in is not the order they were minted in: one
 	// a plugin before this dropped is handed on at once, ahead of what it
-	// still holds. The session each carries is what tells a leftover from
-	// news.
+	// still holds. The invariant ic-dns keeps holds here too (see sessionOf
+	// in cmd/ic-dns/dns): sessions only grow, an event of an older one changes
+	// nothing, the first of a newer one - of whatever kind - opens it not
+	// ready, its disconnected closes it for good, and its connected, early or
+	// late, opens nothing that is not already open.
 	session := ev.Session()
 
-	switch ev.Action() {
-	case iutil.ActionConnected:
-		// A stream coming up is one whose events before it went to nobody,
-		// which is why the enricher reads the fleet again: nothing before it
-		// confirms what is served, a round that ended while it was down
-		// included.
-		// Not the connected of a session already seen closed: it waited in a
-		// queue the disconnected that closed it went past.
-		if session >= p.upSession && (session == 0 || !p.down || session > p.downSession) {
+	switch {
+	case session == 0:
+		// None the source minted: taken in the order it comes, a connected
+		// reopening what a disconnected closed.
+		switch ev.Action() {
+		case iutil.ActionConnected:
 			p.up(ev)
-		}
 
-		return
+			return
+		case iutil.ActionDisconnected:
+			p.close(ev)
 
-	case iutil.ActionDisconnected:
-		// The one thing that takes readiness back: nothing confirms what is
-		// served until a round has been all the way round again. Unless it
-		// ends a session older than the one already up.
-		if session < p.upSession {
 			return
 		}
 
-		p.connected.Store(false)
-		p.ready.Store(false)
-		p.lost = ev.At()
-		p.down = true
-		p.downSession = session
+	case session < p.session:
+		return
+
+	case session > p.session:
+		p.session = session
+
+		if ev.Action() == iutil.ActionDisconnected {
+			p.close(ev)
+
+			return
+		}
+
+		p.up(ev)
+
+	case ev.Action() == iutil.ActionDisconnected:
+		if !p.down {
+			p.close(ev)
+		}
 
 		return
 	}
 
-	// An event of a session newer than the last one up: the stream is back,
-	// whatever happened to the connected that said so, and to the
-	// disconnected before it.
-	if session != 0 && session > max(p.upSession, p.downSession) {
-		p.up(ev)
+	if ev.Action() == iutil.ActionConnected {
+		return
 	}
 
 	// Cold says when an event was minted, not what is served now: a read that
@@ -203,18 +209,26 @@ func (p *Plugin) decide(ev *iutil.Event) {
 		return
 	}
 
-	if (session > 0 && session == p.upSession) || (session == 0 && ev.At().After(p.lost)) {
+	if session > 0 || ev.At().After(p.lost) {
 		p.ready.Store(true)
 	}
 }
 
-// up takes the stream as up in ev's session, not ready until its round ends.
+// up takes the stream as up, not ready until its round ends.
 func (p *Plugin) up(ev *iutil.Event) {
 	p.connected.Store(true)
 	p.ready.Store(false)
 	p.lost = ev.At()
 	p.down = false
-	p.upSession = ev.Session()
+}
+
+// close takes the stream as gone: nothing confirms what is served until a
+// round has been all the way round again.
+func (p *Plugin) close(ev *iutil.Event) {
+	p.connected.Store(false)
+	p.ready.Store(false)
+	p.lost = ev.At()
+	p.down = true
 }
 
 // Run serves until ctx is canceled; it blocks, so main owns the goroutine.

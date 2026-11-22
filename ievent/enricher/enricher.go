@@ -123,9 +123,14 @@ type Plugin struct {
 	// before any stream opened, is never taken.
 	sweepSession uint64
 
-	// reconnect is a connected the inbox had no room for. One slot, the
-	// newest: it says everything an older one did. See Handle.
-	reconnect chan *iutil.Event
+	// closedSession is the newest session a disconnected closed. See
+	// sessionOf.
+	closedSession uint64
+
+	// controls is the connection controls the inbox had no room for, the
+	// newest two kept: with sessions only growing, an older one says nothing
+	// the newer ones do not. See Handle.
+	controls chan *iutil.Event
 
 	// sweepEnding says a run reached its end while its project reads were still
 	// out, or instances it listed were unread, so whatever settles the last of
@@ -313,11 +318,11 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	sweeps := make(chan sweepMsg)
 
 	p := &Plugin{
-		logger:    logger,
-		opts:      o,
-		inbox:     make(chan *iutil.Event, o.InboxSize),
-		reconnect: make(chan *iutil.Event, 1),
-		sweeps:    sweeps,
+		logger:   logger,
+		opts:     o,
+		inbox:    make(chan *iutil.Event, o.InboxSize),
+		controls: make(chan *iutil.Event, 2),
+		sweeps:   sweeps,
 
 		q:          &queue{},
 		unread:     map[string]subject{},
@@ -426,10 +431,10 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 // It runs on the previous plugin's goroutine and must not block, so a full
 // inbox drops rather than waits; dropped, not failed, since nothing went wrong.
 //
-// But for a connected: it is what restarts the run for its session, and one
-// dropped would leave every end of round naming the session before, which the
-// source refuses for the whole of the new one. It waits in a slot of its own,
-// the newest kept, for Run to take as if it had come through the inbox.
+// But for a connection control: a connected is what restarts the run for its
+// session, and a disconnected handed on dropped would overtake what is
+// queued. They wait in a slot of their own, the newest two kept, for Run to
+// take as if they had come through the inbox.
 func (p *Plugin) Handle(ev *iutil.Event) {
 	select {
 	case p.inbox <- ev:
@@ -437,18 +442,25 @@ func (p *Plugin) Handle(ev *iutil.Event) {
 	default:
 	}
 
-	if ev.Action() != iutil.ActionConnected {
+	if ev.Action() != iutil.ActionConnected && ev.Action() != iutil.ActionDisconnected {
 		p.args.Next(ev.WithDropped(name))
 
 		return
 	}
 
-	select {
-	case <-p.reconnect:
-	default:
-	}
+	for {
+		select {
+		case p.controls <- ev:
+			return
+		default:
+		}
 
-	p.reconnect <- ev
+		// Full: the oldest goes, unless Run has just taken it.
+		select {
+		case <-p.controls:
+		default:
+		}
+	}
 }
 
 // Run enriches until ctx is canceled. It blocks, so main owns the goroutine:
@@ -519,10 +531,14 @@ func (p *Plugin) Run(ctx context.Context) error {
 			}
 		}
 
-		select {
-		case ev := <-p.reconnect:
-			p.accept(ctx, ev)
-		default:
+	controls:
+		for {
+			select {
+			case ev := <-p.controls:
+				p.accept(ctx, ev)
+			default:
+				break controls
+			}
 		}
 
 		// Then the whole line, settled or not, in arrival order. Reads
@@ -558,7 +574,7 @@ func (p *Plugin) Run(ctx context.Context) error {
 				p.args.Next(ev)
 			}
 
-		case ev := <-p.reconnect:
+		case ev := <-p.controls:
 			// Behind what the inbox held when it had no room for it.
 		queued:
 			for {
@@ -839,6 +855,60 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 	}
 }
 
+// sessionOf applies the stream session ev was minted in, starting the run for
+// a session newly up, and reports whether ev belongs to the newest session.
+//
+// The invariant every consumer of the chain keeps (see sessionOf in
+// cmd/ic-dns/dns): session numbers only grow, and the newest seen is kept.
+// An event of an older session is a leftover - a connected kept in its slot
+// while a newer one went through the inbox, a disconnected late out of a
+// queue - and changes nothing: not the session the run reads for, nor the
+// chain state. The first event of a newer session, of whatever kind, opens
+// it: a stream coming back makes everything held here suspect at once,
+// whatever happened while it was down was announced to nobody, and the run
+// starts again for that session - its connected may never have got here.
+// Its disconnected closes it, and nothing of it reopens it. A connected of
+// the session already open changes nothing.
+//
+// The newest seen is the newer of the session the run reads for and the one
+// a disconnected last closed. A connected no source minted - session 0, as
+// a test feeds them - restarts the run as it comes.
+func (p *Plugin) sessionOf(ctx context.Context, ev *iutil.Event) bool {
+	session := ev.Session()
+	newest := max(p.sweepSession, p.closedSession)
+
+	switch {
+	case session == 0:
+		if ev.Action() == iutil.ActionConnected {
+			p.sweepSession = 0
+			p.restartSweep(ctx)
+		}
+
+		return true
+
+	case session < newest:
+		return false
+
+	case session > newest:
+		if ev.Action() == iutil.ActionDisconnected {
+			p.closedSession = session
+
+			return true
+		}
+
+		p.sweepSession = session
+		p.restartSweep(ctx)
+
+		return true
+	}
+
+	if ev.Action() == iutil.ActionDisconnected {
+		p.closedSession = session
+	}
+
+	return true
+}
+
 // stamp is an event this plugin minted, marked the way the source marks what
 // it mints: the chain as last seen, and the session the run reads for, so a
 // plugin after this one judges it by the session rather than its time.
@@ -879,35 +949,25 @@ func (p *Plugin) announceDelete(project, name string) {
 
 // accept puts one event in the line, issuing whatever read it needs first.
 func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
+	current := p.sessionOf(ctx, ev)
+
 	switch {
 	case ev.ChainState() == "":
 		// The run's own events arrive here unstamped: nothing minted them past
 		// the source, so this plugin carries over what it last saw, and the
 		// session it is reading for.
 		ev = p.stamp(ev)
-	case ev.Session() >= p.sweepSession:
-		// What the chain is, as said in the session read for now. A warm
-		// event of the session before, late out of a queue, says nothing of
-		// a stream that came back cold since.
+	case current:
+		// What the chain is, as said in the newest session. A warm event of
+		// the session before, late out of a queue, says nothing of a stream
+		// that came back cold since.
 		p.chain = ev.ChainState()
 	}
 
-	// A stream coming back makes everything held here suspect at once: whatever
-	// happened while it was down was announced to nobody.
 	if ev.Action() == iutil.ActionConnected {
 		p.q.push(ev, true)
-		p.sweepSession = ev.Session()
-		p.restartSweep(ctx)
 
 		return
-	}
-
-	// So does any event of a session newer than the run's: the stream came
-	// back, and its connected did not get here. The run is started for that
-	// session all the same, or its end would name the one before.
-	if ev.Session() > p.sweepSession {
-		p.sweepSession = ev.Session()
-		p.restartSweep(ctx)
 	}
 
 	want := p.args.Wanted[ev.Action()]

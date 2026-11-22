@@ -648,6 +648,10 @@ func (p *Plugin) fold(ev *iutil.Event) {
 
 	defer p.next(ev)
 
+	// First, whatever the event is: a peer event can be the first news of a
+	// session, and has to take back what the session before confirmed too.
+	current := p.sessionOf(ev)
+
 	// The peering is read again on anything that can have moved it, and once a
 	// round, so an event lost with the stream is caught up on.
 	moves := peeringMoves(ev)
@@ -660,53 +664,9 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		return
 	}
 
-	// A lost stream drops no record, but nothing is confirming them any more,
-	// which is what unready says, until a round has ended again. The view stays
-	// warm: what it holds is as good as any other server's.
-	//
-	// Whether the stream is up is told by the sessions the events carry, not
-	// by which control arrived last: a control dropped on a full inbox goes on
-	// past this fold, out of order with what is queued, and one lost that way
-	// must not hold the view down for the whole session.
-	session := ev.Session()
-
-	if ev.Action() == iutil.ActionDisconnected {
-		// The end of a session older than the one already up: a leftover.
-		if session < p.state.upSession {
-			return
-		}
-
-		p.view.SetHealthy(false)
-		p.state.fresh = false
-		p.state.lost = ev.At()
-		p.state.down = true
-		p.state.downSession = session
-
+	// The controls have said what they had to.
+	if ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected {
 		return
-	}
-
-	// Back, after events nobody heard. What a round ended while it was down
-	// said is as old as the stream's loss, so the round that counts is the one
-	// the enricher starts now. A first connection follows no loss, and takes
-	// nothing back.
-	//
-	// Nor does the connected of a session already seen closed: it waited in
-	// a queue the disconnected that closed it went past.
-	if ev.Action() == iutil.ActionConnected {
-		if session < p.state.upSession || (session != 0 && p.state.down && session <= p.state.downSession) {
-			return
-		}
-
-		p.reconnected(ev)
-
-		return
-	}
-
-	// Any event of a session newer than the last one up says the stream is
-	// back - the connected that said so dropped on the way, and maybe the
-	// disconnected before it too.
-	if session != 0 && session > max(p.state.upSession, p.state.downSession) {
-		p.reconnected(ev)
 	}
 
 	// Only an end that came the whole way in order. One dropped on the way
@@ -716,14 +676,14 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// Nor one of a session other than the one up: it is the end of a round
 	// read before the stream last came back, which waited in a queue.
 	if ev.Action() == iutil.ActionSweepEnd && ev.Err() == nil {
-		if !p.state.down && (session == 0 || session == p.state.upSession) {
+		if current && !p.state.down {
 			p.rounded()
 		}
 
 		return
 	}
 
-	if ev.Err() != nil && !p.state.fresh && !p.state.down {
+	if ev.Err() != nil && current && !p.state.fresh && !p.state.down {
 		p.roundLost(ev)
 	}
 
@@ -736,8 +696,8 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	// and says nothing about the stream since. The rule http follows for
 	// /ready, so the two agree. Nothing else - a failed read, or a cold stamp
 	// after the round - takes it back.
-	if !p.state.fresh && !p.state.down && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm &&
-		((session > 0 && session == p.state.upSession) || (session == 0 && ev.At().After(p.state.lost))) {
+	if current && !p.state.fresh && !p.state.down && ev.Err() == nil && ev.ChainState() == iutil.ChainWarm &&
+		(ev.Session() > 0 || ev.At().After(p.state.lost)) {
 		p.rounded()
 	}
 
@@ -777,20 +737,69 @@ func (p *Plugin) fold(ev *iutil.Event) {
 	p.state.pending[key] = inst
 }
 
-// reconnected takes a stream back up in ev's session: nothing confirms what
-// is served until that session's round has ended.
+// sessionOf applies the stream session ev was minted in, and reports whether
+// ev belongs to the session now newest: one that may move readiness.
 //
-// A session newer than the last one up takes back what was confirmed even
-// with no disconnected seen: there was one, and it did not get here.
-func (p *Plugin) reconnected(ev *iutil.Event) {
-	if p.state.down || (ev.Session() != 0 && ev.Session() > p.state.upSession && p.state.upSession != 0) {
-		p.view.SetHealthy(false)
-		p.state.fresh = false
-		p.state.lost = ev.At()
-		p.state.down = false
+// The invariant every consumer of the chain keeps, here, in http and in the
+// enricher alike: session numbers only grow, and each consumer keeps the
+// newest it has seen. An event of an older session is a leftover - late out
+// of a queue, or overtaken by a control dropped and handed on - and changes
+// no readiness, no freshness and no session. The first event of a newer
+// session, of whatever kind, a peer event included, opens it not fresh: its
+// connected, and the disconnected of the session before, may have been lost
+// on the way, and what was confirmed before it is not any more. Within the
+// newest session, its disconnected closes it, for good: its connected,
+// late, reopens nothing, and while it is open a second connected changes
+// nothing either. A lost stream drops no record, but nothing is confirming
+// them any more, which is what unready says until a round has ended again.
+// The view stays warm: what it holds is as good as any other server's.
+//
+// An event no source minted - session 0, as a test feeds them - is taken in
+// the order it comes, the connected reopening what a disconnected closed.
+func (p *Plugin) sessionOf(ev *iutil.Event) bool {
+	session := ev.Session()
+
+	switch {
+	case session == 0:
+		switch ev.Action() {
+		case iutil.ActionDisconnected:
+			p.lose(ev)
+		case iutil.ActionConnected:
+			if p.state.down {
+				p.lose(ev)
+			}
+
+			p.state.down = false
+		}
+
+		return true
+
+	case session < p.state.session:
+		return false
+
+	case session > p.state.session:
+		p.state.session = session
+		p.lose(ev)
+		p.state.down = ev.Action() == iutil.ActionDisconnected
+
+		return true
 	}
 
-	p.state.upSession = ev.Session()
+	if ev.Action() == iutil.ActionDisconnected && !p.state.down {
+		p.lose(ev)
+		p.state.down = true
+	}
+
+	return true
+}
+
+// lose takes back what was confirmed: unhealthy and not fresh, until a round
+// has ended after ev.
+func (p *Plugin) lose(ev *iutil.Event) {
+	p.view.SetHealthy(false)
+	p.state.fresh = false
+	p.state.lost = ev.At()
+	p.state.down = true
 }
 
 // rounded takes the end of a round. Healthy is set here, and by the first read
