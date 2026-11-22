@@ -41,6 +41,12 @@ type instance struct {
 	// alias is every name it claims as a CNAME onto its own.
 	alias []string
 
+	// aliasIn is the zone each alias was counted into when it entered, in the
+	// order of alias. Where an alias lands is decided on arrival, by the zones
+	// served then; it leaves the zone it was counted in, not the one that
+	// would be chosen now, or a zone born since loses a name it never got.
+	aliasIn []string
+
 	// service is the service name among names, empty where it carries none. Its
 	// records are not this instance's to write: which replicas answer for it
 	// depends on the others too, so services writes it for all of them.

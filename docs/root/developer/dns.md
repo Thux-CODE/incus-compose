@@ -148,6 +148,15 @@ the fleet still resolves. A name it _does_ hold is answered under the ordinary
 rule, invisible included, so falling through cannot be used to tell a hidden
 name from an absent one.
 
+Which zone an alias is counted in, the count that keeps a zone served, is
+decided once, when the alias arrives: the longest zone served then
+(`aliasZone`), and the instance keeps it (`aliasIn`) so the alias leaves that
+same zone. A transfer and an answer always place a name in the longest zone
+served over it, so a zone born later under the alias carries it while the
+count stays where it was. Taking the count out of the zone chosen again at
+leave time would take it out of the newer zone, which never got it, and could
+leave a zone with hosts in it unserved.
+
 ## Reverse Records
 
 Every address is filed backwards under the name `dns.ReverseAddr` gives it,

@@ -178,6 +178,8 @@ func (s *state) write(ttl uint32) bool {
 		// the newer one, or an instance restored from the cold store would read
 		// as restored for ever once a live read confirmed it unchanged.
 		if next != nil && prev != nil && next.Equal(prev.Event) {
+			// Counted where the one it replaces was.
+			next.aliasIn = prev.aliasIn
 			s.held[key] = next
 
 			if next.service != "" && prev.Restored() != next.Restored() {

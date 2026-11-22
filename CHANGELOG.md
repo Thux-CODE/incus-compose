@@ -411,6 +411,13 @@ form.
   kept its serial, so an IXFR from it was the SOA alone and a secondary kept
   the old records. Already present in v1.4.0. (by @sandroden)
 
+- `ic-dns` keeps serving a zone born under an alias counted in its parent when
+  that alias goes. The alias was taken out of the zone that would hold it at
+  the time it went, the newer child, which had never counted it: a child with
+  a host left in it stopped being served and its transfer was `REFUSED`. An
+  alias now leaves the zone it was counted in. Already present in v1.4.0.
+  (by @sandroden)
+
 - `ic-dns --peer-views` stores in the cold store the last peering that counted
   as known even where a read too old to count had already put the same table
   in memory: the read confirming it left the one before on disk, and a restart

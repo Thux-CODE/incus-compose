@@ -33,8 +33,8 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 			s.leave(on.zone, prev.ns, ttl, true, prev.transfer)
 		}
 
-		for _, name := range prev.alias {
-			s.leave(s.aliasZone(name), nil, ttl, false, false)
+		for _, zone := range prev.aliasIn {
+			s.leave(zone, nil, ttl, false, false)
 		}
 
 		s.dropAddrs(prev)
@@ -68,8 +68,12 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 
 	// After the zones its own names made, so an alias inside one of them finds
 	// it served rather than inventing a second.
+	next.aliasIn = make([]string, 0, len(next.alias))
+
 	for _, name := range next.alias {
-		s.enter(s.aliasZone(name), nil, ttl, false, false)
+		zone := s.aliasZone(name)
+		next.aliasIn = append(next.aliasIn, zone)
+		s.enter(zone, nil, ttl, false, false)
 	}
 
 	s.moved(next)
@@ -82,7 +86,13 @@ func (s *state) apply(key string, next *instance, ttl uint32) {
 func (s *state) moved(inst *instance) {
 	s.dirty(inst.zone)
 
+	// Where each alias is carried now, and where it was counted, which a zone
+	// born since may have parted.
 	for _, zone := range s.aliasZones(inst) {
+		s.dirty(zone)
+	}
+
+	for _, zone := range inst.aliasIn {
 		s.dirty(zone)
 	}
 
@@ -248,7 +258,11 @@ func (s *state) reparent() {
 
 // aliasZone is the zone one alias lands in: the longest served, otherwise its
 // own parent. Decided on arrival, so a longer zone appearing later leaves this
-// count stale - ZoneOf takes the longest, so the answers are not.
+// count stale - ZoneOf takes the longest, so the answers are not, and a
+// transfer carries the alias in the longest too (zoneRecords). The count is
+// taken back out of the zone it went into (instance.aliasIn), never out of
+// one chosen again later: a child zone born since never got it, and losing it
+// there takes a zone that still has hosts off the air.
 func (s *state) aliasZone(name string) string {
 	zone, _ := aliasZone(name, func(zone string) bool {
 		held, known := s.serials[zone]
