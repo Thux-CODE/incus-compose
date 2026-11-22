@@ -62,6 +62,19 @@ func (s *scheduler) requireRestartOwed() {
 			require.Falsef(s.t, inst.due.IsZero(), "%s waits on a restart with no due", k)
 		}
 	}
+
+	// The other way round: one read running owes no restart for a stop. Only
+	// an unhealthy run's restart (restartStops) is due on a running instance.
+	for k, inst := range s.instances {
+		if inst.config == nil || !inst.config.running {
+			continue
+		}
+
+		if inst.state == instanceIdle && inst.action == instanceActionRestart {
+			require.Truef(s.t, inst.restartStops,
+				"%s is read running with a restart due for a stop", k)
+		}
+	}
 }
 
 func newScheduler(t *testing.T) *scheduler {
@@ -123,6 +136,12 @@ func (s *scheduler) running(t *testing.T, inst *instance, state instanceState, d
 	inst.actionDeadline = deadline
 	inst.actionContext, inst.actionCancel = context.WithCancel(s.ctx)
 	inst.actionRun = inst.run
+
+	// A restart of an instance held running is an unhealthy run's: what the
+	// scheduler would have set when it escalated.
+	if state == instanceRestarting && inst.config.running {
+		inst.restartStops = true
+	}
 
 	t.Cleanup(inst.actionCancel)
 }
@@ -2303,6 +2322,88 @@ func TestARefusedRestartIsDueAgainOnceTheMarkerGoes(t *testing.T) {
 	require.Equal(t, instanceIdle, inst.state)
 	require.Equal(t, instanceActionRestart, inst.action)
 	requireDue(t, inst, now, 30*time.Second)
+}
+
+// TestARunningReadCancelsARestartOwedForAStop is the linear case of N13: a read
+// stopped makes a restart due, a read running comes before it goes out. The
+// restart is called off, nothing fires at the old due, and the run it found is
+// a new one: starting, then the first pass's healthy.
+func TestARunningReadCancelsARestartOwedForAStop(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	s.stoppedRead(inst, false)
+	due := inst.due
+	stopped := s.next(t)
+	require.Equal(t, shared.HealthStatusStopped, stopped.status)
+	s.result(landed(stopped))
+
+	run := inst.run
+	keys := eventConfig(inst.config)
+	keys["status"] = shared.HealthStatusStopped
+	s.eventRead(incusApi.EventLifecycleInstanceUpdated, "web-1", true, healthKeys(keys))
+
+	require.Equal(t, instanceActionCheck, inst.action, "the restart is called off")
+	require.Equal(t, run+1, inst.run, "a run the daemon did not see start")
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	// Due now, well before the old restart's due: what goes is a check.
+	require.True(t, inst.due.Before(due))
+	require.False(t, inst.due.After(time.Now()))
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestARunningReadKeepsAnUnhealthyRunsRestart: an unhealthy run is running by
+// definition, so a read saying so is no reason to call its restart off.
+func TestARunningReadKeepsAnUnhealthyRunsRestart(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	cfg := testConfig()
+	cfg.retries = 1
+	inst := s.add("web-1", cfg)
+	inst.status = shared.HealthStatusHealthy
+
+	s.result(s.checked(t, inst, errors.New("down")))
+	require.Equal(t, instanceActionRestart, inst.action)
+	require.True(t, inst.restartStops)
+	due := inst.due
+
+	s.event(incusApi.EventLifecycleInstanceUpdated, "web-1")
+	require.Equal(t, instanceActionRestart, inst.action)
+	require.Equal(t, due, inst.due)
+}
+
+// TestARestartFoundRunningIsANewRun: the worker found the instance running for
+// a restart owed for a stop. It touched nothing; the run it found is checked
+// from scratch, starting first.
+func TestARestartFoundRunningIsANewRun(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	s.stoppedRead(inst, false)
+	s.result(landed(s.next(t)))
+
+	res := s.restarted(t, inst, nil)
+	require.False(t, inst.restartStops, "owed for a stop")
+	res.alreadyRunning = true
+	s.result(res)
+
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionCheck, inst.action)
+	require.Equal(t, shared.HealthStatusStarting, s.next(t).status)
 }
 
 // TestAStopReadDuringACheckCallsItOff: the check out probed the run that ended;

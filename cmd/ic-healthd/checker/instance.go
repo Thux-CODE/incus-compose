@@ -144,6 +144,10 @@ type instanceResult struct {
 	// them gets the result of the write its predecessor sent.
 	write *statusWrite
 
+	// alreadyRunning says a restart owed for a stop found the instance
+	// running and touched nothing (instanceResultRestarted).
+	alreadyRunning bool
+
 	err error
 }
 
@@ -239,6 +243,12 @@ type instance struct {
 
 	// restartDelay doubles per restart; a healthy check rebases it.
 	restartDelay time.Duration
+
+	// restartStops says what the restart owed is for. True: an unhealthy run,
+	// which the restart stops first even though it is running. False: a stop,
+	// so a read showing it running again cancels the restart, and a worker
+	// finding it running starts nothing and stops nothing.
+	restartStops bool
 }
 
 // instanceStarted puts an instance in the shape a fresh start leaves it in: due
@@ -248,6 +258,7 @@ func instanceStarted(inst *instance, now time.Time) {
 
 	inst.state = instanceIdle
 	inst.action = instanceActionCheck
+	inst.restartStops = false
 	inst.due = now
 }
 
@@ -420,6 +431,7 @@ func unparkForRestart(inst *instance, now time.Time) {
 
 	inst.state = instanceIdle
 	inst.action = instanceActionRestart
+	inst.restartStops = false
 	inst.due = now.Add(inst.restartDelay)
 	inst.restartDelay = min(inst.restartDelay*2, maxRestartDelay)
 }
@@ -432,6 +444,10 @@ func instKey(ev *iutil.Event) string {
 
 // saveInstance folds one enriched event into what is held, leaving a new
 // instance the way a discovery does: idle, due for a check at once.
+//
+// It keeps the restart invariant, both ways: an instance seen running, read
+// stopped, with a restart policy and no marker, has a restart in flight, due
+// or refused; one read running owes no restart for a stop.
 func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, error) {
 	if !ev.Enriched(iutil.EnrichedInstance) {
 		return nil, errors.New("event without an instance read")
@@ -492,6 +508,11 @@ func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, e
 			inst.action = ""
 		}
 	} else if instConfig.running && inst.state == instanceParked {
+		instanceStarted(inst, time.Now())
+	} else if instConfig.running && inst.state == instanceIdle && inst.action == instanceActionRestart && !inst.restartStops {
+		// Running again, its start unseen, before the restart a stop made
+		// due went out: the stop is over, and firing the restart now would
+		// stop a working instance. An unhealthy run's restart still goes.
 		instanceStarted(inst, time.Now())
 	}
 
@@ -603,10 +624,16 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 		// A stop nobody asked for, so widen the window: a crash loop backs off.
 		inst.state = instanceIdle
 		inst.action = instanceActionRestart
+		inst.restartStops = false
 		inst.due = time.Now().Add(inst.restartDelay)
 		inst.restartDelay = min(inst.restartDelay*2, maxRestartDelay)
 
 	case incusApi.EventLifecycleInstanceUpdated:
+		var before uint64
+		if prev, ok := instances[instKey(ev)]; ok {
+			before = prev.run
+		}
+
 		inst, err := saveInstance(instances, ev)
 		if err != nil {
 			reportUnwatched(logger, ev.ProjectName(), ev.Name(), err)
@@ -617,6 +644,12 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 		// sweep's trickle is the first one to say so.
 		if !inst.config.running {
 			reportStatus(ctx, logger, conn, ev.ProjectName(), results, inst, shared.HealthStatusStopped)
+		}
+
+		// The read found it running again, its start unseen: a new run, with
+		// no verdict yet, as after a start event.
+		if inst.run != before && inst.config.running {
+			reportStarting(ctx, logger, conn, ev.ProjectName(), results, inst)
 		}
 	case incusApi.EventLifecycleInstanceDeleted:
 		k := instKey(ev)
@@ -633,8 +666,12 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 	}
 }
 
-// instanceRestartAction starts an instance unless it was stopped on purpose, and reports the outcome.
-func instanceRestartAction(ctx context.Context, conn *iclient.Connection, project string, name string) instanceResult {
+// instanceRestartAction starts an instance unless it was stopped on purpose, and
+// reports the outcome. stops says the restart is for an unhealthy run, so a
+// running instance is force-stopped first; without it the restart is for a
+// stop, and an instance found running - started since by someone else - is
+// left as it is.
+func instanceRestartAction(ctx context.Context, conn *iclient.Connection, project string, name string, stops bool) instanceResult {
 	res := instanceResult{kind: instanceResultRestarted, name: name, project: project}
 
 	inst, err := getInstance(ctx, conn, project, name)
@@ -649,6 +686,11 @@ func instanceRestartAction(ctx context.Context, conn *iclient.Connection, projec
 		state, _, err := conn.GetInstanceState(ctx, project, name)
 		if err != nil {
 			res.err = err
+			return res
+		}
+
+		if !stops && runningStatus(state.StatusCode) {
+			res.alreadyRunning = true
 			return res
 		}
 
@@ -889,6 +931,7 @@ func checkFailed(inst *instance, now time.Time) string {
 	if slices.Contains(shared.RestartPolicies, inst.config.restart) {
 		inst.failures = 0
 		inst.action = instanceActionRestart
+		inst.restartStops = true
 		inst.due = now.Add(inst.restartDelay)
 		inst.restartDelay = min(inst.restartDelay*2, maxRestartDelay)
 	}
@@ -975,11 +1018,11 @@ func runInstanceActions(ctx context.Context, logger *slog.Logger, conn *iclient.
 		switch inst.action {
 		case instanceActionRestart:
 			actionCtx, cancel := context.WithCancel(ctx)
-			name := inst.name
+			name, stops := inst.name, inst.restartStops
 
 			logger.Info("Restarting", "instance", name)
 			err := pool.restart.Submit(func() {
-				res := instanceRestartAction(actionCtx, conn, inst.project, name)
+				res := instanceRestartAction(actionCtx, conn, inst.project, name, stops)
 				res.ctx = actionCtx
 
 				select {
@@ -1094,6 +1137,7 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 
 			if slices.Contains(shared.RestartPolicies, inst.config.restart) {
 				inst.action = instanceActionRestart
+				inst.restartStops = false
 				inst.due = time.Now().Add(inst.restartDelay)
 				inst.restartDelay = min(inst.restartDelay*2, maxRestartDelay)
 			}
@@ -1187,9 +1231,15 @@ func handleInstanceResult(ctx context.Context, logger *slog.Logger, conn *iclien
 			return
 		}
 
-		logger.Info("Restarted", "instance", inst.name)
-		if metrics {
-			restartsTotal.WithLabelValues("success").Inc()
+		if res.alreadyRunning {
+			// Started by someone else since the stop: nothing was touched,
+			// and the run it is in has not been checked yet.
+			logger.Info("Found running, not restarted", "instance", inst.name)
+		} else {
+			logger.Info("Restarted", "instance", inst.name)
+			if metrics {
+				restartsTotal.WithLabelValues("success").Inc()
+			}
 		}
 		instanceStarted(inst, time.Now())
 		reportStarting(ctx, logger, conn, res.project, results, inst)

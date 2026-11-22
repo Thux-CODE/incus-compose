@@ -188,9 +188,10 @@ func TestInstanceRestartActionRestarts(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, incusApi.Running, before.StatusCode)
 
-	res := instanceRestartAction(t.Context(), conn, project, name)
+	res := instanceRestartAction(t.Context(), conn, project, name, true)
 	require.Equal(t, instanceResultRestarted, res.kind)
 	require.NoError(t, res.err)
+	require.False(t, res.alreadyRunning)
 
 	after, _, err := conn.GetInstanceState(t.Context(), project, name)
 	require.NoError(t, err)
@@ -208,7 +209,7 @@ func TestInstanceRestartActionStartsAStoppedInstance(t *testing.T) {
 	name := testContainer(t, c, "web", nil, false)
 	conn, project := testConn(t, c), c.Project()
 
-	res := instanceRestartAction(t.Context(), conn, project, name)
+	res := instanceRestartAction(t.Context(), conn, project, name, false)
 	require.NoError(t, res.err)
 
 	state, _, err := conn.GetInstanceState(t.Context(), project, name)
@@ -226,7 +227,7 @@ func TestInstanceRestartActionRefusesAnIntentionalStop(t *testing.T) {
 	name := testContainer(t, c, "web", map[string]string{shared.HealthStoppedKey: "true"}, false)
 	conn, project := testConn(t, c), c.Project()
 
-	res := instanceRestartAction(t.Context(), conn, project, name)
+	res := instanceRestartAction(t.Context(), conn, project, name, false)
 
 	require.ErrorIs(t, res.err, ErrIntentionallyStopped)
 

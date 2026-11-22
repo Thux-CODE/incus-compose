@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,6 +34,63 @@ func stateConn(t *testing.T, code incusApi.StatusCode) *iclient.Connection {
 	require.NoError(t, err)
 
 	return conn
+}
+
+// TestInstanceRestartActionLeavesARunningInstanceForAStop: a restart owed for a
+// stop that finds the instance running - started since by someone else - sends
+// no stop and no start. One owed for an unhealthy run still stops it first.
+func TestInstanceRestartActionLeavesARunningInstanceForAStop(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name       string
+		code       incusApi.StatusCode
+		stops      bool
+		wantNoop   bool
+		wantChange bool
+		wantError  bool
+	}{
+		{name: "running, for a stop", code: incusApi.Running, wantNoop: true},
+		{name: "ready, for a stop", code: incusApi.Ready, wantNoop: true},
+		{name: "stopped, for a stop", code: incusApi.Stopped, wantChange: true, wantError: true},
+		{name: "running, unhealthy", code: incusApi.Running, stops: true, wantChange: true, wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var changes atomic.Int32
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+
+				// A state change opens the event socket before its PUT.
+				if r.Method == http.MethodPut || strings.HasSuffix(r.URL.Path, "/events") {
+					changes.Add(1)
+					_, _ = io.WriteString(w, `{"type":"error","error_code":500,"error":"refused by the test"}`)
+
+					return
+				}
+
+				_, _ = io.WriteString(w, `{"type":"sync","status_code":200,"metadata":{"status":"`+
+					tt.code.String()+`","status_code":`+strconv.Itoa(int(tt.code))+`}}`)
+			}))
+			t.Cleanup(server.Close)
+
+			conn, err := iclient.NewConnection(&iclient.ConfigRemoteInfo{Name: "state", Addrs: []string{server.URL}})
+			require.NoError(t, err)
+
+			res := instanceRestartAction(t.Context(), conn, "p", "web-1", tt.stops)
+
+			require.Equal(t, tt.wantNoop, res.alreadyRunning)
+			require.Equal(t, tt.wantChange, changes.Load() > 0, "state changes sent: %d", changes.Load())
+
+			if tt.wantError {
+				require.Error(t, res.err)
+			} else {
+				require.NoError(t, res.err)
+			}
+		})
+	}
 }
 
 // TestInstanceCheckActionReadyIsRunning: Ready is a running instance whose

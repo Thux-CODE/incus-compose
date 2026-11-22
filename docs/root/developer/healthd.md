@@ -300,9 +300,23 @@ start has reported since, and a park there would leave nothing to bring it
 back. That holds whatever the instance was doing, parked included: one parked
 for its marker, or whose restart the marker refused, has the restart due again
 once a read shows the marker gone while it stays stopped. A restart already due
-keeps its backoff. The scheduler tests hold every step of every sequence to that invariant
-(`requireRestartOwed`): such an instance always has its restart in flight, due,
-or refused.
+keeps its backoff.
+
+The other way round holds too. A restart remembers what it is for
+(`restartStops`): an unhealthy run, which it force-stops first even though it
+runs, or a stop. A read finding running again an instance whose restart is due
+for a stop calls that restart off and opens a new run (`starting`, then the
+first check), since its start went unseen; firing it would stop a working
+instance. A restart for a stop already out, whose worker finds the instance
+running and unmarked, touches nothing (`Found running, not restarted`) and the
+run it found is checked from scratch. An unhealthy run's restart is never called
+off by a read saying it runs.
+
+Together that is one invariant, held both ways: an instance seen running, now
+stopped, with a restart policy and no marker, always has a restart in flight,
+due, or refused; an instance read running owes no restart for a stop. The
+scheduler tests check every step of every sequence against it
+(`requireRestartOwed`).
 
 ### Telling results apart
 

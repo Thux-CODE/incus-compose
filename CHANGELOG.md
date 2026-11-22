@@ -532,6 +532,12 @@ form.
   with its restart refused for it, it waited on a start event that never came.
   Already present in v1.4.0. (by @sandroden)
 
+- `ic-healthd` no longer force-stops an instance that is running again by the
+  time its restart goes out. A restart a stop made due is called off by a read
+  finding the instance running, which starts a new run instead, and the restart
+  worker that finds it running and unmarked touches nothing. A restart for an
+  unhealthy run still stops the instance first. (by @sandroden)
+
 ### Known issues
 
 - `ievent` enricher inventory: a failed listing of the projects can end a
