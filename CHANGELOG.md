@@ -451,6 +451,15 @@ form.
   landing with the same value used to drop it, so the new run was proven only
   by a later pass, one interval on. (by @sandroden)
 
+- `ic-healthd` no longer restarts an instance twice. The stop event of its own
+  restart freed the instance while that restart was still running, so a second
+  one fired beside it: it failed with "The instance is already running", or
+  stopped the instance the first had just started, and a failed one scheduled a
+  third. That stop no longer writes `stopped` either, which landed on the
+  running instance a few seconds before `starting`. A stop during a check calls
+  the check off, so the restart backoff widens once. Already present in v1.4.0.
+  (by @sandroden)
+
 ## [v1.4.0] - 2026-11-11
 
 ### Added

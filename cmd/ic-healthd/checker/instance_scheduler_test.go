@@ -1947,6 +1947,125 @@ func TestANewRunHealthyQueuedBehindAnOldOneIsSentOnce(t *testing.T) {
 	s.silent(t)
 }
 
+// ----------------------------------------------------------------------------
+// the stop a restart makes
+// ----------------------------------------------------------------------------
+
+// TestAStopDuringARestartDoesNotFireASecond is the lab's double "Restarting":
+// the daemon's own restart force-stops the instance, and that stop event used
+// to free the slot while the restart was still out, so the next pass fired a
+// second one beside it - which then failed with "already running", or stopped
+// the instance the first had just started.
+func TestAStopDuringARestartDoesNotFireASecond(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusUnhealthy
+	inst.action = instanceActionRestart
+	inst.due = time.Now().Add(-time.Second)
+
+	deadline := time.Now().Add(time.Minute)
+	s.running(t, inst, instanceRestarting, deadline)
+	live := inst.actionContext
+	delay := inst.restartDelay
+
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+
+	require.Equal(t, instanceRestarting, inst.state, "the restart in flight still owns the instance")
+	require.Same(t, live, inst.actionContext)
+	require.Equal(t, deadline, inst.actionDeadline)
+	require.Equal(t, delay, inst.restartDelay, "its own stop does not widen the backoff")
+
+	s.run()
+	require.Same(t, live, inst.actionContext, "no second restart was sent")
+
+	// Its stop lands as nothing: the restart's result writes starting.
+	s.silent(t)
+}
+
+// TestADaemonRestartGoesStraightToStarting is the linear case: restart out, its
+// stop and start events, its result, then starting and the first pass's
+// healthy, with no stopped written on the way.
+func TestADaemonRestartGoesStraightToStarting(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusUnhealthy
+	inst.action = instanceActionRestart
+
+	restart := s.restarted(t, inst, nil)
+
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+	s.event(incusApi.EventLifecycleInstanceStarted, "web-1")
+	s.silent(t)
+
+	s.result(restart)
+
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestAStopDuringARestartThatFailsIsRetried: the restart whose stop came by
+// fails after all. Its result schedules the next one, as before: the stop
+// event having been left to it costs no restart.
+func TestAStopDuringARestartThatFailsIsRetried(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.action = instanceActionRestart
+
+	restart := s.restarted(t, inst, errors.New("start failed"))
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+
+	now := time.Now()
+	s.result(restart)
+
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionRestart, inst.action)
+	requireDue(t, inst, now, 30*time.Second)
+}
+
+// TestAStopDuringACheckSchedulesOneRestart: the check out probed the run that
+// just ended. It is called off, so its result - not running, most likely -
+// does not schedule the restart a second time and widen the backoff twice.
+func TestAStopDuringACheckSchedulesOneRestart(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.status = shared.HealthStatusHealthy
+
+	late := s.checked(t, inst, ErrNotRunning)
+	probe := inst.actionContext
+
+	now := time.Now()
+	s.event(incusApi.EventLifecycleInstanceStopped, "web-1")
+
+	require.Error(t, probe.Err(), "the check is called off")
+	require.Nil(t, inst.actionContext)
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionRestart, inst.action)
+	requireDue(t, inst, now, 30*time.Second)
+	require.Equal(t, 60*time.Second, inst.restartDelay)
+
+	require.Equal(t, shared.HealthStatusStopped, s.next(t).status)
+
+	s.result(late)
+	require.Equal(t, 60*time.Second, inst.restartDelay, "widened once")
+	requireDue(t, inst, now, 30*time.Second)
+}
+
 // TestAReplacementGetsOnlyItsOwnWriteResults is the linear case of a delete and
 // a create under the same name with a write out for each: the predecessor's
 // result changes nothing, the replacement's own releases its writer, and the

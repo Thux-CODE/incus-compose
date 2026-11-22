@@ -487,9 +487,24 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 		reportStarting(ctx, logger, conn, ev.ProjectName(), results, inst)
 
 	case incusApi.EventLifecycleInstanceStopped, incusApi.EventLifecycleInstanceShutdown:
+		// Before the fold, which parks an instance read stopped.
+		prev, ok := instances[instKey(ev)]
+		checking := ok && prev.state == instanceChecking
+
 		inst, err := saveInstance(instances, ev)
 		if err != nil {
 			reportUnwatched(logger, ev.ProjectName(), ev.Name(), err)
+			return
+		}
+
+		policy := slices.Contains(shared.RestartPolicies, inst.config.restart)
+
+		// A restart in flight owns the instance: this is its own stop, or one
+		// it ends anyway by starting the instance, and its result writes
+		// starting. Taking the stop for a new one would fire a second restart
+		// beside it, and a stopped written now would only land once the
+		// start lets go of the instance, on a running one.
+		if inst.state == instanceRestarting && policy {
 			return
 		}
 
@@ -498,7 +513,7 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 
 		// Before anything else, so a policy dropped since discovery still drops
 		// the instance rather than scheduling a restart for it.
-		if !slices.Contains(shared.RestartPolicies, inst.config.restart) {
+		if !policy {
 			if inst.actionCancel != nil {
 				inst.actionCancel()
 			}
@@ -506,6 +521,16 @@ func handleInstanceEvent(ctx context.Context, logger *slog.Logger, conn *iclient
 			delete(instances, instKey(ev))
 
 			return
+		}
+
+		// A check out probed a run that has just ended; its result would
+		// schedule the restart below a second time and widen the backoff
+		// twice. The watchdog has nothing left to reap.
+		if checking && inst.actionCancel != nil {
+			inst.actionCancel()
+			inst.actionCancel = nil
+			inst.actionContext = nil
+			inst.actionDeadline = time.Time{}
 		}
 
 		// Already waiting on a restart: leave its backoff alone.

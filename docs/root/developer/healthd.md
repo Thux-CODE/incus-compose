@@ -281,6 +281,14 @@ start lands probed the run before, so the start opens the new run anyway
 (`newRun`: run number bumped, failures cleared, start period re-armed) and
 writes `starting`, leaving the action, its deadline and its context alone.
 
+A **stopped event** during a restart is the restart's own force-stop, or a stop
+the restart ends anyway by starting the instance: it changes nothing, and writes
+nothing - a `stopped` sent then would wait out Incus' operation lock and land on
+an instance already running again, before the restart's own `starting`. Taking
+it for a new stop would also free the slot and fire a second restart beside the
+first. A stopped event during a check calls the check off before scheduling the
+restart, so its result cannot schedule it again.
+
 ### Telling results apart
 
 Each in-flight action gets a fresh context, and the result carries it back. The
