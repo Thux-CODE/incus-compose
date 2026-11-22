@@ -852,8 +852,13 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 
 	// Through withProject like every other instance event emitted here, or it is
 	// not the same event a live one on this key is.
-	if c.ev != nil && inst != nil && p.isCurrent(c.ev) {
-		syn := p.withProject(c.ev.WithInstance(inst, true))
+	//
+	// Stamped again on the way out: the event was minted when the read was
+	// asked for, and a fan-out of a newer session joined to it, or a session
+	// come up while it was out, would leave it stamped older than what it
+	// says, which is news as of now.
+	if c.ev != nil && inst != nil {
+		syn := p.withProject(p.stamp(c.ev).WithInstance(inst, true))
 		if p.archive.changed(syn) {
 			p.q.push(syn, true)
 		}

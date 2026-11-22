@@ -36,6 +36,61 @@ func TestAnOlderSessionsDeleteChangesNothing(t *testing.T) {
 	require.Equal(t, api.EventLifecycleInstanceDeleted, handed[len(handed)-1].Action(), "the leftover still goes on")
 }
 
+// TestWhatThisPluginMintsCarriesTheNewestSession: the run reads for session 2
+// while the door has already seen session 3, which a plugin after this one
+// may know. What the enricher mints - the answer of a fan-out read asked for
+// in session 2, a delete a read found - is news as of now: it goes on
+// stamped 3, cold, so it is folded downstream and what is held here matches
+// it.
+func TestWhatThisPluginMintsCarriesTheNewestSession(t *testing.T) {
+	for _, found := range []bool{true, false} {
+		t.Run(map[bool]string{true: "answer", false: "delete"}[found], func(t *testing.T) {
+			p := bare(t)
+			inst := testlib.NewInstance("p", 0, 0)
+			p.state.setInstance(&inst, nil)
+			p.args.Wanted = map[string]iutil.Want{api.EventLifecycleInstanceUpdated: {Enrich: iutil.EnrichedInstance}}
+			changed := inst
+			changed.Description = "changed"
+			p.reads.read = func(context.Context, string, string, bool, bool) (*api.Instance, *api.InstanceState, error) {
+				if !found {
+					return nil, nil, api.StatusErrorf(404, "gone")
+				}
+
+				return &changed, nil, nil
+			}
+			p.reads.flush(t.Context())
+
+			p.sweepSession = 2
+			p.chain = iutil.ChainWarm
+			p.fanOut(t.Context(), p.state.projectInstances("p"))
+			read := awaitResult(t, p)
+			require.Equal(t, uint64(2), read.call.ev.Session(), "asked for in session 2")
+
+			// Session 3 seen at the door, not yet taken by the fold.
+			p.held.seen(iutil.NewEvent(time.Now(), iutil.ActionConnected, "", "", "").WithSession(3))
+			p.settleRead(t.Context(), read)
+
+			var out []*iutil.Event
+
+			for ev := range p.q.release() {
+				if ev.Name() == inst.Name {
+					out = append(out, ev)
+				}
+			}
+
+			require.Len(t, out, 1)
+			require.Equal(t, uint64(3), out[0].Session())
+			require.Equal(t, iutil.ChainCold, out[0].ChainState(), "nothing of session 3 has been read whole")
+
+			if found {
+				require.NotNil(t, out[0].Instance())
+			} else {
+				require.Equal(t, api.EventLifecycleInstanceDeleted, out[0].Action())
+			}
+		})
+	}
+}
+
 // TestAReadOfAnOlderSessionIsNotArchived: an update read in session 1 lands
 // after session 2 came up. Its event goes on, of session 1, and nothing after
 // this plugin folds it; the archive does not take it as handed on either, so
