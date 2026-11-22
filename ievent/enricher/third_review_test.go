@@ -224,6 +224,43 @@ func TestThirdSyntheticEventAfterPriorSessionDelivery(t *testing.T) {
 	t.Fatal("the un-enriched update was never forwarded")
 }
 
+// TestThirdDiscardedNetworkHistory: networks deleted under names never seen
+// again, then a listing of the project asked for after them, with no network
+// read out. Nothing is left to tell older from newer, and the history goes.
+func TestThirdDiscardedNetworkHistory(t *testing.T) {
+	p := bare(t)
+	for _, name := range []string{"build-a", "build-b", "build-c"} {
+		p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkDeleted, "p", name, ""))
+	}
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetworks, project: "p", at: time.Now()})
+	require.Empty(t, p.reads.calls)
+	require.Empty(t, p.netMoved, "the fresh listing settled every deletion and no older read remains")
+}
+
+// TestThirdNetworkHistoryKeptForAnOlderRead: the same with a network read out,
+// asked for before the delete under a tenant's key (the delete abandons one
+// under its own). The history stays, so that read lands as older news; a
+// listing taken before the delete settles nothing either.
+func TestThirdNetworkHistoryKeptForAnOlderRead(t *testing.T) {
+	p := bare(t)
+	n := api.Network{Name: "net", Project: "p", Managed: true, Config: map[string]string{}}
+	p.reads.readNet = func(context.Context, string, string) (*api.Network, string, error) { return &n, "", nil }
+	before := time.Now()
+	p.readNetwork(t.Context(), "tenant", "net")
+	res := awaitResult(t, p)
+	p.acceptNetwork(t.Context(), iutil.NewEvent(time.Now(), api.EventLifecycleNetworkDeleted, "p", "net", ""))
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetworks, project: "p", at: before})
+	require.NotEmpty(t, p.netMoved, "a listing from before the delete settled it")
+
+	p.acceptSweep(t.Context(), sweepMsg{action: sweepActionNetworks, project: "p", at: time.Now()})
+	require.NotEmpty(t, p.netMoved, "settled with a read from before it still out")
+
+	p.settleRead(t.Context(), res)
+	_, _, exists := p.state.network("p", "net")
+	require.False(t, exists, "the older read put the network back")
+}
+
 // TestThirdConnectedIsNeverDropped: a full inbox drops what it has no room
 // for, but for a connected, which waits in its slot - the newest of them -
 // instead of going on dropped.

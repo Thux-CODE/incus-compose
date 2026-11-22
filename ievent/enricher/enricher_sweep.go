@@ -112,13 +112,14 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 		// whatever the listing says: one created since is not gone.
 		listed := slices.Clone(msg.names)
 
-		for key, at := range p.netMoved {
-			if key.project == msg.project && at.After(msg.at) {
-				listed = append(listed, key.name)
+		for network, at := range p.netMoved[msg.project] {
+			if at.After(msg.at) {
+				listed = append(listed, network)
 			}
 		}
 
 		p.state.pruneNetworks(msg.project, listed)
+		p.settleNetworkMoves(msg.project, msg.at)
 
 	case sweepActionInstances:
 		p.state.project(msg.project).listed = true

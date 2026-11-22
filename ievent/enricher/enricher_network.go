@@ -32,10 +32,10 @@ func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
 	p.q.push(ev, true)
 
 	// What was read of it before now is older than this, wherever it lands.
-	p.netMoved[netRef{project: ev.ProjectName(), name: ev.Name()}] = time.Now()
+	p.networkMovedNow(ev.ProjectName(), ev.Name())
 
 	if ev.OldName() != "" {
-		p.netMoved[netRef{project: ev.ProjectName(), name: ev.OldName()}] = time.Now()
+		p.networkMovedNow(ev.ProjectName(), ev.OldName())
 	}
 
 	// A rename leaves the old key behind; everything that was on it is re-read,
@@ -62,18 +62,44 @@ func (p *Plugin) acceptNetwork(ctx context.Context, ev *iutil.Event) bool {
 	return true
 }
 
-// netRef names one network, by the project an event or a read named it in.
-type netRef struct {
-	project string
-	name    string
+// networkMovedNow records an event about one network, now.
+func (p *Plugin) networkMovedNow(project, name string) {
+	if p.netMoved[project] == nil {
+		p.netMoved[project] = map[string]time.Time{}
+	}
+
+	p.netMoved[project][name] = time.Now()
 }
 
 // networkMoved reports whether an event about one network arrived after since:
 // a read or a listing of it from before then says what the event changed.
 func (p *Plugin) networkMoved(project, name string, since time.Time) bool {
-	at, moved := p.netMoved[netRef{project: project, name: name}]
+	at, moved := p.netMoved[project][name]
 
 	return moved && at.After(since)
+}
+
+// settleNetworkMoves forgets what a listing of a project's networks asked for
+// at has made old news: an event before it is one the listing knew of, and
+// with no network read out - one of those may have been asked for before the
+// event, and still has to be told older - nothing else can be. Otherwise the
+// history grows by every network name the project ever had.
+func (p *Plugin) settleNetworkMoves(project string, at time.Time) {
+	for _, c := range p.reads.calls {
+		if c.kind == kindNetwork {
+			return
+		}
+	}
+
+	for name, moved := range p.netMoved[project] {
+		if moved.Before(at) {
+			delete(p.netMoved[project], name)
+		}
+	}
+
+	if len(p.netMoved[project]) == 0 {
+		delete(p.netMoved, project)
+	}
 }
 
 // forgetNetwork drops one network and re-reads what was on it. Both halves matter:

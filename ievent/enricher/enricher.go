@@ -152,10 +152,11 @@ type Plugin struct {
 	// since, and is not taken as saying it went.
 	readAt map[subject]time.Time
 
-	// netMoved is when an event last arrived about each network: a read or a
-	// listing of it asked for before then is older news than the event, and
-	// is not taken.
-	netMoved map[netRef]time.Time
+	// netMoved is when an event last arrived about each network, by project
+	// and name: a read or a listing of it asked for before then is older news
+	// than the event, and is not taken. A listing of the project's networks
+	// asked for after it settles it (settleNetworkMoves).
+	netMoved map[string]map[string]time.Time
 
 	// owedDelete is every instance a read found gone while a later read of it
 	// was owed, keyed like a call: nothing holds it any more, so the delete is
@@ -321,7 +322,7 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 		q:          &queue{},
 		unread:     map[string]subject{},
 		owedDelete: map[string]owedDelete{},
-		netMoved:   map[netRef]time.Time{},
+		netMoved:   map[string]map[string]time.Time{},
 		readAt:     map[subject]time.Time{},
 		state:      loadState(logger, o.StoreFile, o.Project),
 		reads:      newDeferred(o.Workers, o.ReadTimeout),
