@@ -90,6 +90,14 @@ func (p *Plugin) acceptSweep(ctx context.Context, msg sweepMsg) {
 
 		p.state.pruneProjects(served)
 
+		// What moved the networks of a project no longer held is no news
+		// about anything held.
+		for project := range p.netMoved {
+			if !slices.Contains(served, project) {
+				delete(p.netMoved, project)
+			}
+		}
+
 		p.forgetUnread(ctx, p.unreadOutside(func(s subject) bool { return slices.Contains(msg.names, s.project) })...)
 
 		// The run lists, this plugin reads: a project's own configuration is
