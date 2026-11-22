@@ -480,13 +480,16 @@ the connected that started its run: the source takes it only within that
 session with the stream open, so the end of a run read before the stream went,
 or with no stream ever open, never reaches the chain. Whether the stream is up
 is told by the sessions too, not by which control arrived last - one dropped
-on a full inbox goes past the fold ahead of what is queued: a disconnected of
-a session older than the one up is a leftover, so is the connected of a
-session already seen closed, and any event of a session newer than the last
-one seen up or down says the stream is back - its connected and the
-disconnected before it lost or not - and takes back what was confirmed. A warm
-event, the end of a round included, counts for a round only in the session up
-now. `dns` itself spills connection controls rather than dropping them, so the
+on a full inbox goes past the fold ahead of what is queued - under the
+invariant the enricher and `http` keep as well (`sessionOf`; see
+[[developer/ievent/index|ievent]], "Sessions only grow"): session numbers
+only grow and the newest seen is kept; an event of an older session is a
+leftover and changes no readiness or freshness; the first event of a newer
+session, of any kind - a peer event included, folded before the peering
+returns - opens it not fresh, its connected and the disconnected before it
+lost or not; its disconnected closes it for good, and its connected, early or
+late, opens nothing already open. A warm event, the end of a round included,
+counts for a round only in the newest session, open. `dns` itself spills connection controls rather than dropping them, so the
 plugins after it see them in order.
 
 `/ready` follows the same signal, with the same rule. `http` turns ready on a

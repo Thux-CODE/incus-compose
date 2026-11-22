@@ -94,6 +94,30 @@ resetting on the attempt would be a hot retry loop. `ActionConnected` and
 `ActionDisconnected` bracket every session, and the command line is served in
 the gap between two - a reconnect is exactly when a round is abandoned.
 
+**Sessions only grow.** Every event carries the session it was minted in, and
+the controls do not arrive in the order they were minted: a plugin hands on
+what it drops from its caller's goroutine, ahead of what it still holds, and a
+control that waited in a slot or a queue comes out behind a newer one. Every
+consumer of the session - the enricher, `dns`, `http` - keeps the same
+invariant, and keeps the newest session it has seen:
+
+- an event of a session older than the newest seen is a leftover and changes
+  nothing: no readiness, no freshness, not the session the enricher's run
+  reads for;
+- the first event of a newer session, of whatever kind - a peer event or an
+  ordinary one as much as a connected - opens that session not fresh: its
+  connected, and the disconnected of the session before, may have been lost
+  on the way, and what was confirmed before is not any more;
+- within the newest session its disconnected closes it for good, and its
+  connected, early or late, opens nothing already open: a connected arriving
+  after its own session's round ended takes nothing back.
+
+What it costs: nothing looks back. A disconnected of the newest session that
+arrives after a newer event of the same session still closes it, which is what
+it says; an end of round of an older session is never a round, even where it
+was the last one before a flapping stream. An event no source minted (session
+0, as tests feed them) is taken in the order it comes.
+
 ## debounce
 
 Leading **and** trailing. The first event of a burst goes at once, so a lone

@@ -336,8 +336,12 @@ form.
   the same, with a warning, where there is an inventory to answer from - always
   for networks, for instances only once a listing of that project's instances
   succeeded (stored in the cold store with the project, and gone with it), for
-  projects once a projects listing succeeded, empty included - so a first start
-  that never could stays `SERVFAIL`. Ending it that way fails the reads still
+  projects once a projects listing succeeded, empty included (stored in the cold
+  store too) - so a first start that never could stays `SERVFAIL`. A project's
+  configuration read, or one instance an event brought in, is no listing: only
+  a cold store from v1.4.0 or from format 1, which never said what was listed,
+  has a project holding instances taken as listed. Every listing that succeeds
+  is stored at once, an empty one included. Ending it that way fails the reads still
   held for the run's networks ahead of the end, instead of leaving the end
   queued behind them. Every event carries the event stream session it was
   minted in, and the end of a round is taken only within the session its run
@@ -346,13 +350,19 @@ form.
   enricher starts the run for a session on any event of it, its connected lost
   or not, and no longer drops a connected on a full inbox, so a lost connected
   no longer has every end of round of the healthy session refused.
-  `ic-dns` and `/ready` tell whether the stream is up by the sessions, not by
-  the last control they were handed: a connected dropped on a full inbox no
-  longer keeps the view cold for the whole session, an older disconnected
-  handed on after it no longer keeps `/ready` at 503, the connected of a
-  session already closed no longer reopens it, a lost disconnected no longer
-  keeps the view healthy across the next connected, and an end of round of an
-  earlier session is no round. `ic-dns` no longer drops connection controls on
+  `ic-dns`, `/ready` and the enricher tell whether the stream is up by the
+  sessions, not by the last control they were handed, under one rule: sessions
+  only grow, an event of a session older than the newest seen changes nothing,
+  the first event of a newer one - a peer event included - opens it not ready,
+  its disconnected closes it for good, and its connected, early or late, opens
+  nothing already open. So a connected dropped on a full inbox no longer keeps
+  the view cold for the whole session, an older disconnected or connected
+  handed on after a newer one no longer moves readiness or the session the
+  enricher's run reads for, the connected of a session already closed no
+  longer reopens it, a late connected of a session whose round already ended
+  no longer takes `/ready` back, a lost disconnected no longer keeps the view
+  healthy across the next connected, and an end of round of an earlier session
+  is no round. Neither `ic-dns` nor the enricher drops connection controls on
   a full inbox. A peering that becomes known while the stream is down turns the
   view warm, clamped and not ready, instead of leaving every name `SERVFAIL`
   with `--cold-answers=false`. (by @sandroden)
@@ -424,11 +434,16 @@ form.
   name on the strength of a 404 read before it, and no longer loses the delete
   of one found gone when the reads after it fail; no listing older than an
   instance's read, or than the read owed for a key found gone, announces it
-  deleted; a project the configuration leaves out is pruned even when one of
-  its instances was just read; and no network read or listing older than a
-  network event undoes it, from the sweeper or from a read a tenant's NIC
-  asked for under the tenant's key, the history of those events going once a
-  listing has made it old news. (by @sandroden)
+  deleted; a listing that leaves out an instance with a read of it out waits
+  for that read - one finding the instance keeps it, one failing makes the
+  listing's delete final - instead of deleting it behind that read's update or
+  losing the verdict when the read fails; a project the configuration leaves
+  out is pruned even when one of its instances was just read, and a read of
+  it landing after the prune no longer puts the instance back; and no network
+  read or listing older than a network event undoes it, from the sweeper or
+  from a read a tenant's NIC asked for under the tenant's key, the history of
+  those events going once a listing has made it old news, or with the
+  project. (by @sandroden)
 
 - `ic-healthd` no longer lets a check sent before an instance restarted decide
   the new run: its verdict, pass, fail or timeout, is dropped and the new run is

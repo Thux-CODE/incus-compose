@@ -408,8 +408,12 @@ project's instances counts only where that project's instances were listed -
 the project's own `listed`, written to the cold store with it and gone with
 it, so a project made again under the same name, or one whose configuration
 alone was stored, has none. A failed listing of the projects counts once one
-succeeded, here or in the run that wrote the store, empty included. A first
-start that never listed them stays cold. The run ends at the first broken run
+succeeded, here or in the run that wrote the store, empty included - the
+state's `projectsListed`, written to the store beside the projects. Known is
+only what a listing that succeeded said: a project's configuration read, or
+one instance an event brought in, lists nothing. Either bit is set with the
+state marked dirty, so the next write carries it even where the listing, empty,
+changed nothing else. A first start that never listed them stays cold. The run ends at the first broken run
 past the grace, so up to one backoff (30 s) after it, and the reads held back
 for the run's networks - a run broken before them never reads them - fail
 ahead of its end rather than hold it in line, and go out from then on.
@@ -441,20 +445,31 @@ send races the cancel - are not listened to. The end of a run names the stream
 session of the connected that started it, and the source takes it only in that
 session with the stream open (see [[developer/ievent/source|source]]): the run
 `Run` starts before any stream opened, and one whose end is still in flight
-when the stream comes back, end nothing. A connected is never dropped at a
-full inbox: it waits in a slot of its own, the newest kept, taken behind what
-the inbox held. And any event of a session newer than the run's starts the
-run for that session, so the run follows the stream even where its connected
-did not get here. The chain state is taken only from events of the session the
-run reads for - a warm one of the session before, late out of a queue, says
-nothing of a stream that came back cold - and what the enricher mints carries
-that session.
+when the stream comes back, end nothing. Which session the run reads for
+follows the invariant every consumer keeps (see
+[[developer/ievent/index|ievent]], "Sessions only grow"), the newest seen being
+the newer of the run's session and the last one a disconnected closed: the
+first event of a newer session, its connected or any other, starts the run for
+it, so the run follows the stream even where its connected did not get here;
+an older one - a connected kept in its slot while a newer one went through the
+inbox - starts nothing and moves no session back. A connection control is
+never dropped at a full inbox, nor handed on dropped ahead of what is queued:
+it waits in a slot of its own, the newest two kept, taken behind what the inbox
+held. The chain state is taken only from events of the newest session - a warm
+one of the session before, late out of a queue, says nothing of a stream that
+came back cold - and what the enricher mints carries the run's session.
 
-A listing announces a delete owed for a key only when it was asked for after
-the read that found the instance gone, with no read of the key out: that one
-was asked for later and decides. A project the listing of projects had and
-the configuration leaves out (`excluded`) is pruned whatever was read in it
-since; only one the listing did not have may be one made since.
+A listing that leaves out an instance held, or one owed a delete, decides on
+its own only when it was asked for after the read that found the instance
+gone, with no read of the key out (`listedGone`). A read out that went after
+the listing knows more, and decides. One that went before it is not overtaken:
+its events are in the line ahead of where the delete would go, so the verdict
+waits, owed - the read finding the instance keeps it, the read failing makes
+the delete final. A project the listing of projects had and the configuration
+leaves out (`excluded`) is pruned whatever was read in it since, and a read in
+it landing after the prune is dropped with its events until a listing serves
+the project again; only one the listing did not have may be one made since.
+What moved the networks of a pruned project goes with it.
 
 ## A Start Replays What The Last One Held
 
@@ -462,7 +477,10 @@ With `StoreFile` set, what is held is written every `StoreInterval` and once on
 the way down, and read back by the next start in `New`. A file that is missing,
 cannot be decoded, or carries a `version` this binary does not know starts cold
 with a log line, the way a start without a store does; a file with no `version`
-at all is what v1.4.0 wrote, and is the same shape as version 1.
+at all is what v1.4.0 wrote, and is the same shape as version 1. Version 2,
+written now, says what was listed whatever it is; versions 1 and 0 never did,
+and there a project holding instances is taken as listed, and the projects
+with it, as the only guess those files allow.
 
 What is read back is cut to the configuration of this start before anything sees
 it: a project the `Project` predicate no longer serves - `--project` or the
