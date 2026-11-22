@@ -2149,6 +2149,8 @@ func TestANoneProbeRunIsProvenByItsOwnCheck(t *testing.T) {
 // of its config and, if marked, the stopped-on-purpose marker.
 func (s *scheduler) stoppedRead(inst *instance, marked bool) {
 	keys := eventConfig(inst.config)
+	delete(keys, "stopped")
+
 	if marked {
 		keys["stopped"] = "true"
 	}
@@ -2241,6 +2243,66 @@ func TestAStoppedInstanceFoundAtDiscoveryWaitsForItsStart(t *testing.T) {
 	s.stoppedRead(inst, false)
 	require.Equal(t, instanceParked, inst.state)
 	require.Empty(t, inst.action)
+}
+
+// TestAMarkerTakenOffAStoppedInstanceRestartsIt is the linear case: stopped on
+// purpose and parked, the marker then taken off while it stays stopped. The
+// restart is due one backoff on, the loop wakes for it, and the run that
+// follows goes starting then healthy.
+func TestAMarkerTakenOffAStoppedInstanceRestartsIt(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	s.stoppedRead(inst, true)
+	require.Equal(t, instanceParked, inst.state)
+	stopped := s.next(t)
+	s.result(landed(stopped))
+
+	now := time.Now()
+	s.stoppedRead(inst, false)
+	s.stoppedRead(inst, false)
+
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionRestart, inst.action)
+	requireDue(t, inst, now, 30*time.Second)
+	require.Equal(t, 60*time.Second, inst.restartDelay, "widened once for two reads")
+	require.Equal(t, inst.due, s.run())
+
+	// The reads carry no status, so stopped goes out again.
+	s.result(landed(s.next(t)))
+
+	s.result(s.restarted(t, inst, nil))
+	starting := s.next(t)
+	require.Equal(t, shared.HealthStatusStarting, starting.status)
+	s.result(landed(starting))
+
+	s.result(s.checked(t, inst, nil))
+	require.Equal(t, shared.HealthStatusHealthy, s.next(t).status)
+}
+
+// TestARefusedRestartIsDueAgainOnceTheMarkerGoes: the restart found the marker
+// and parked. A read with the marker gone, the instance still stopped, makes
+// the restart due again instead of leaving the refusal standing.
+func TestARefusedRestartIsDueAgainOnceTheMarkerGoes(t *testing.T) {
+	t.Parallel()
+
+	s := newScheduler(t)
+
+	inst := s.add("web-1", testConfig())
+	inst.action = instanceActionRestart
+	s.result(s.restarted(t, inst, ErrIntentionallyStopped))
+	require.Equal(t, instanceParked, inst.state)
+
+	s.stoppedRead(inst, true)
+	require.Equal(t, instanceParked, inst.state, "still stopped on purpose")
+
+	now := time.Now()
+	s.stoppedRead(inst, false)
+	require.Equal(t, instanceIdle, inst.state)
+	require.Equal(t, instanceActionRestart, inst.action)
+	requireDue(t, inst, now, 30*time.Second)
 }
 
 // TestAStopReadDuringACheckCallsItOff: the check out probed the run that ended;

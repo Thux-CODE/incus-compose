@@ -472,13 +472,22 @@ func saveInstance(instances map[string]*instance, ev *iutil.Event) (*instance, e
 		}
 
 		instances[k] = inst
-	} else if !instConfig.running && inst.action == instanceActionCheck {
-		if inst.ran && instConfig.restartOwed() {
-			// A stop known from a read alone: its event lost, or folded
-			// while a restart was out and the restart's start reported
-			// since. Parking it would leave nothing to bring it back.
-			unparkForRestart(inst, time.Now())
-		} else {
+	} else if !instConfig.running {
+		switch {
+		case inst.state == instanceRestarting:
+			// The restart in flight owns it, and starts it anyway.
+		case inst.ran && instConfig.restartOwed():
+			// A stop known from a read alone: its event lost, folded while a
+			// restart was out whose start reported since, or one whose
+			// marker has been taken off while it stays stopped. Parked, or
+			// refused for a marker no longer there, nothing would bring it
+			// back. A restart already due keeps its backoff.
+			if inst.action != instanceActionRestart || inst.state == instanceParked {
+				unparkForRestart(inst, time.Now())
+			}
+		case inst.action == instanceActionCheck:
+			// Stopped on purpose, without a policy, or never seen running:
+			// its start event is what brings it back.
 			inst.state = instanceParked
 			inst.action = ""
 		}

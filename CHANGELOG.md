@@ -527,6 +527,11 @@ form.
   stopped on purpose, without a policy, or found stopped at discovery still wait
   for their start. Already present in v1.4.0. (by @sandroden)
 
+- `ic-healthd` restarts an instance with a restart policy that stays stopped
+  once `user.healthcheck.stopped` is taken off it. Parked for the marker, or
+  with its restart refused for it, it waited on a start event that never came.
+  Already present in v1.4.0. (by @sandroden)
+
 ### Known issues
 
 - `ievent` enricher inventory: a failed listing of the projects can end a

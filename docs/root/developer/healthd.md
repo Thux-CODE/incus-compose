@@ -297,7 +297,10 @@ daemon came up. Any read that finds an instance the daemon saw running stopped,
 with a restart policy and no marker, schedules the restart one backoff on, like
 a stop event: the event may be lost, or folded while a restart was out whose
 start has reported since, and a park there would leave nothing to bring it
-back. The scheduler tests hold every step of every sequence to that invariant
+back. That holds whatever the instance was doing, parked included: one parked
+for its marker, or whose restart the marker refused, has the restart due again
+once a read shows the marker gone while it stays stopped. A restart already due
+keeps its backoff. The scheduler tests hold every step of every sequence to that invariant
 (`requireRestartOwed`): such an instance always has its restart in flight, due,
 or refused.
 
