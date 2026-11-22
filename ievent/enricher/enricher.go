@@ -123,6 +123,10 @@ type Plugin struct {
 	// before any stream opened, is never taken.
 	sweepSession uint64
 
+	// reconnect is a connected the inbox had no room for. One slot, the
+	// newest: it says everything an older one did. See Handle.
+	reconnect chan *iutil.Event
+
 	// sweepEnding says a run reached its end while its project reads were still
 	// out, or instances it listed were unread, so whatever settles the last of
 	// them announces it instead.
@@ -308,10 +312,11 @@ func New(logger *slog.Logger, opts ...Option) *Plugin {
 	sweeps := make(chan sweepMsg)
 
 	p := &Plugin{
-		logger: logger,
-		opts:   o,
-		inbox:  make(chan *iutil.Event, o.InboxSize),
-		sweeps: sweeps,
+		logger:    logger,
+		opts:      o,
+		inbox:     make(chan *iutil.Event, o.InboxSize),
+		reconnect: make(chan *iutil.Event, 1),
+		sweeps:    sweeps,
 
 		q:          &queue{},
 		unread:     map[string]subject{},
@@ -422,12 +427,30 @@ func (p *Plugin) Setup(args iutil.SetupArgs) error {
 //
 // It runs on the previous plugin's goroutine and must not block, so a full
 // inbox drops rather than waits; dropped, not failed, since nothing went wrong.
+//
+// But for a connected: it is what restarts the run for its session, and one
+// dropped would leave every end of round naming the session before, which the
+// source refuses for the whole of the new one. It waits in a slot of its own,
+// the newest kept, for Run to take as if it had come through the inbox.
 func (p *Plugin) Handle(ev *iutil.Event) {
 	select {
 	case p.inbox <- ev:
+		return
 	default:
-		p.args.Next(ev.WithDropped(name))
 	}
+
+	if ev.Action() != iutil.ActionConnected {
+		p.args.Next(ev.WithDropped(name))
+
+		return
+	}
+
+	select {
+	case <-p.reconnect:
+	default:
+	}
+
+	p.reconnect <- ev
 }
 
 // Run enriches until ctx is canceled. It blocks, so main owns the goroutine:
@@ -498,6 +521,12 @@ func (p *Plugin) Run(ctx context.Context) error {
 			}
 		}
 
+		select {
+		case ev := <-p.reconnect:
+			p.accept(ctx, ev)
+		default:
+		}
+
 		// Then the whole line, settled or not, in arrival order. Reads
 		// still in flight are abandoned rather than waited for.
 		for ev := range p.q.drain() {
@@ -525,6 +554,24 @@ func (p *Plugin) Run(ctx context.Context) error {
 			return nil
 
 		case ev := <-p.inbox:
+			p.accept(ctx, ev)
+
+			for ev := range p.q.release() {
+				p.args.Next(ev)
+			}
+
+		case ev := <-p.reconnect:
+			// Behind what the inbox held when it had no room for it.
+		queued:
+			for {
+				select {
+				case held := <-p.inbox:
+					p.accept(ctx, held)
+				default:
+					break queued
+				}
+			}
+
 			p.accept(ctx, ev)
 
 			for ev := range p.q.release() {
@@ -822,6 +869,14 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.restartSweep(ctx)
 
 		return
+	}
+
+	// So does any event of a session newer than the run's: the stream came
+	// back, and its connected did not get here. The run is started for that
+	// session all the same, or its end would name the one before.
+	if ev.Session() > p.sweepSession {
+		p.sweepSession = ev.Session()
+		p.restartSweep(ctx)
 	}
 
 	want := p.args.Wanted[ev.Action()]
