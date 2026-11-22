@@ -676,8 +676,13 @@ func (p *Plugin) fold(ev *iutil.Event) {
 		return
 	}
 
-	// The controls have said what they had to.
-	if ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected {
+	// The controls have said what they had to. And an event of a session
+	// older than the newest seen says nothing at all: not of readiness, nor of
+	// the records - a delete late out of a queue would take away a name the
+	// newer session has confirmed. Session 0 is what no listener minted - the
+	// replay, and what the enricher reads before the first connected - and
+	// is taken as it comes (sessionOf).
+	if ev.Action() == iutil.ActionConnected || ev.Action() == iutil.ActionDisconnected || !current {
 		return
 	}
 

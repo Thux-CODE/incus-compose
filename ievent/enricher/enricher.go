@@ -812,6 +812,16 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 			ev = p.withProject(ev.WithInstance(inst, true))
 		}
 
+		// Of a session older than the newest by now: what comes after this
+		// plugin folds nothing of it, so the archive does not take it as
+		// handed on either, or the next read of the same answer would be
+		// held back as nothing new.
+		if !p.isCurrent(ev) {
+			p.q.settle(it, ev)
+
+			continue
+		}
+
 		if !p.archive.changed(ev) {
 			p.q.trash(it)
 
@@ -823,7 +833,7 @@ func (p *Plugin) settleRead(ctx context.Context, res result) {
 
 	// Through withProject like every other instance event emitted here, or it is
 	// not the same event a live one on this key is.
-	if c.ev != nil && inst != nil {
+	if c.ev != nil && inst != nil && p.isCurrent(c.ev) {
 		syn := p.withProject(c.ev.WithInstance(inst, true))
 		if p.archive.changed(syn) {
 			p.q.push(syn, true)
@@ -922,6 +932,12 @@ func (p *Plugin) sessionOf(ctx context.Context, ev *iutil.Event) bool {
 	return true
 }
 
+// isCurrent reports whether ev is of the newest session seen, or of none: one
+// whose data counts, here and after this plugin.
+func (p *Plugin) isCurrent(ev *iutil.Event) bool {
+	return ev.Session() == 0 || ev.Session() >= max(p.sweepSession, p.closedSession)
+}
+
 // stamp is an event this plugin minted, marked the way the source marks what
 // it mints: the chain as last seen, and the session the run reads for, so a
 // plugin after this one judges it by the session rather than its time.
@@ -1010,7 +1026,11 @@ func (p *Plugin) accept(ctx context.Context, ev *iutil.Event) {
 		p.chain = ev.ChainState()
 	}
 
-	if ev.Action() == iutil.ActionConnected {
+	// A leftover of an older session changes nothing here either, data
+	// included: a delete late out of a queue would take away an instance the
+	// newer session has read. It goes on as it is, for the log and for what
+	// counts drops; ic-dns folds nothing of it either.
+	if ev.Action() == iutil.ActionConnected || !current {
 		p.q.push(ev, true)
 
 		return
