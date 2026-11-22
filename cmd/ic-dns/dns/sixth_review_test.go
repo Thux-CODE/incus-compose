@@ -18,7 +18,7 @@ import (
 // trashes the same answer read again in session 3). Session 3's round ends.
 // web is live in Incus and answers NXDOMAIN, warm, from here on.
 func TestSixthOlderSessionReadIsTheOnlyNews(t *testing.T) {
-	t.Skip("contradicts the session invariant (TestFifthOldDeleteAfterCurrentRound): ic-dns folds no data of an older session; the fix is in the enricher, which now never makes this sequence - see TestSixthReadSettledAfterNewerSessionWentDownstream")
+	t.Skip("no longer reaches the fold: the enricher also hands on the read of session 3's round stamped 3, see TestTheNewerRoundHandsOnWhatAnOlderReadFound in ievent/enricher")
 	require.Equal(t, dns.RcodeSuccess, sixthWebAfterRound(t, 2), "a live instance answered NXDOMAIN after the round of session 3")
 }
 
